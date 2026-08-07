@@ -35,6 +35,25 @@ func (f *fakeStore) setFileOffset(ctx context.Context, path string, offset int64
 	return nil
 }
 
+// dispatch mirrors what main.go's runPerkLogPipeline does with each parsed
+// event: route it to the matching store method by kind. pollOnce itself
+// only reads/parses/checkpoints -- it has no opinion on what an event
+// means, that's entirely the caller's onEvent callback, same as here.
+func dispatch(ctx context.Context, store eventStore, ev *perkEvent) {
+	switch ev.Kind {
+	case "login":
+		store.handleLogin(ctx, ev)
+	case "died":
+		store.handleDied(ctx, ev)
+	case "created_player":
+		store.handleCreatedPlayer(ctx, ev)
+	case "level_changed":
+		store.handleLevelChanged(ctx, ev)
+	case "skills":
+		store.handleSkills(ctx, ev)
+	}
+}
+
 const loginLine = `[06-08-26 08:34:59.194] [76561197965988309][Edd1e360][6764,5380,0][Login][Hours Survived: 472].` + "\n"
 const skillLine = `[06-08-26 08:34:59.195] [76561197965988309][Edd1e360][6764,5380,0][Cooking=0, Fitness=5][Hours Survived: 472].` + "\n"
 
@@ -49,12 +68,13 @@ func TestPollOnce_CatchesUpFreshAndSkipsWhenNoNewContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	ctx := context.Background()
 	store := newFakeStore()
 	var events []*perkEvent
-	onEvent := func(ev *perkEvent) { events = append(events, ev) }
+	onEvent := func(ev *perkEvent) { events = append(events, ev); dispatch(ctx, store, ev) }
 
 	done := make(map[string]bool)
-	pollOnce(context.Background(), dir, store, done, onEvent)
+	pollOnce(ctx, dir, store, done, onEvent)
 
 	if store.logins != 1 || store.skills != 1 {
 		t.Fatalf("expected 1 login + 1 skills event, got logins=%d skills=%d", store.logins, store.skills)
@@ -68,7 +88,7 @@ func TestPollOnce_CatchesUpFreshAndSkipsWhenNoNewContent(t *testing.T) {
 	}
 
 	// Second poll, no new content -- must be a complete no-op.
-	pollOnce(context.Background(), dir, store, done, onEvent)
+	pollOnce(ctx, dir, store, done, onEvent)
 	if store.logins != 1 || store.skills != 1 {
 		t.Fatalf("second poll re-processed content: logins=%d skills=%d", store.logins, store.skills)
 	}
@@ -88,12 +108,13 @@ func TestPollOnce_RestartResumesFromPersistedOffset(t *testing.T) {
 	// Simulate a fresh process (empty in-memory done set) that already has
 	// a persisted checkpoint from a previous run past the login line but
 	// not the skill line -- only the skill line should be (re-)processed.
+	ctx := context.Background()
 	store := newFakeStore()
 	store.offsets[logPath] = int64(len(loginLine))
 
 	var events []*perkEvent
-	onEvent := func(ev *perkEvent) { events = append(events, ev) }
-	pollOnce(context.Background(), dir, store, make(map[string]bool), onEvent)
+	onEvent := func(ev *perkEvent) { events = append(events, ev); dispatch(ctx, store, ev) }
+	pollOnce(ctx, dir, store, make(map[string]bool), onEvent)
 
 	if store.logins != 0 {
 		t.Fatalf("login line before the checkpoint must not be reprocessed, got logins=%d", store.logins)
@@ -115,10 +136,11 @@ func TestPollOnce_PartialTrailingLineNotConsumed(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	ctx := context.Background()
 	store := newFakeStore()
 	var events []*perkEvent
-	onEvent := func(ev *perkEvent) { events = append(events, ev) }
-	pollOnce(context.Background(), dir, store, make(map[string]bool), onEvent)
+	onEvent := func(ev *perkEvent) { events = append(events, ev); dispatch(ctx, store, ev) }
+	pollOnce(ctx, dir, store, make(map[string]bool), onEvent)
 
 	if len(events) != 1 {
 		t.Fatalf("expected only the complete login line to be processed, got %d events", len(events))
@@ -131,7 +153,7 @@ func TestPollOnce_PartialTrailingLineNotConsumed(t *testing.T) {
 	if err := os.WriteFile(logPath, []byte(partial+`[Hours Survived: 600].`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	pollOnce(context.Background(), dir, store, make(map[string]bool), onEvent)
+	pollOnce(ctx, dir, store, make(map[string]bool), onEvent)
 	if len(events) != 2 {
 		t.Fatalf("expected the completed line to be picked up on the next poll, got %d events total", len(events))
 	}
@@ -152,11 +174,12 @@ func TestPollOnce_OldFileMarkedDoneAndNeverRereadEvenIfDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	ctx := context.Background()
 	store := newFakeStore()
 	done := make(map[string]bool)
 	var events []*perkEvent
-	onEvent := func(ev *perkEvent) { events = append(events, ev) }
-	pollOnce(context.Background(), dir, store, done, onEvent)
+	onEvent := func(ev *perkEvent) { events = append(events, ev); dispatch(ctx, store, ev) }
+	pollOnce(ctx, dir, store, done, onEvent)
 
 	if !done[oldPath] {
 		t.Fatal("old (non-newest) fully-read file should be marked done")
@@ -172,7 +195,7 @@ func TestPollOnce_OldFileMarkedDoneAndNeverRereadEvenIfDeleted(t *testing.T) {
 	// confirm a subsequent poll doesn't error or reprocess -- it's skipped
 	// via the in-memory done set before ever touching the filesystem again.
 	os.Remove(oldPath)
-	pollOnce(context.Background(), dir, store, done, onEvent)
+	pollOnce(ctx, dir, store, done, onEvent)
 	if len(events) != 2 {
 		t.Fatalf("expected no new events after old file removal, got %d total", len(events))
 	}
