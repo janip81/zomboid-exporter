@@ -1,8 +1,8 @@
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
-COPY main.go .
+COPY *.go *.sql ./
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o zomboid-exporter .
 
 FROM gcr.io/distroless/static:nonroot

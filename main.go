@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -161,11 +164,94 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
+// perkLogMetrics are plain Prometheus counters (not part of the
+// file-snapshot collector above) driven by the PerkLog.txt tailer, which
+// is event-based rather than poll-based.
+type perkLogMetrics struct {
+	logins   *prometheus.CounterVec
+	deaths   *prometheus.CounterVec
+	levelUps *prometheus.CounterVec
+	newChars *prometheus.CounterVec
+}
+
+func newPerkLogMetrics(reg *prometheus.Registry) *perkLogMetrics {
+	m := &perkLogMetrics{
+		logins: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "zomboid_logins_total",
+			Help: "Total player logins observed in PerkLog.txt",
+		}, []string{"server"}),
+		deaths: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "zomboid_deaths_total",
+			Help: "Total player deaths observed in PerkLog.txt",
+		}, []string{"server"}),
+		levelUps: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "zomboid_skill_levelups_total",
+			Help: "Total skill level-up events observed in PerkLog.txt",
+		}, []string{"server", "skill"}),
+		newChars: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "zomboid_characters_created_total",
+			Help: "Total new characters (fresh spawns/respawns) observed in PerkLog.txt",
+		}, []string{"server"}),
+	}
+	reg.MustRegister(m.logins, m.deaths, m.levelUps, m.newChars)
+	return m
+}
+
+// runPerkLogPipeline tails PerkLog.txt for the lifetime of ctx, updating
+// Prometheus counters for every event and, if db is non-nil, persisting
+// richer per-event detail (death locations, skill history, character
+// lifecycle) to Postgres. db is entirely optional -- with no --db-dsn set,
+// this still runs and still drives the Prometheus counters above; it just
+// skips the persistence step.
+func runPerkLogPipeline(ctx context.Context, dataPath, serverName string, metrics *perkLogMetrics, db eventStore) {
+	events := make(chan *perkEvent, 64)
+	go tailPerkLog(ctx, dataPath, events)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-events:
+			switch ev.Kind {
+			case "login":
+				metrics.logins.WithLabelValues(serverName).Inc()
+				if db != nil {
+					db.handleLogin(ctx, ev)
+				}
+			case "died":
+				metrics.deaths.WithLabelValues(serverName).Inc()
+				if db != nil {
+					db.handleDied(ctx, ev)
+				}
+			case "created_player":
+				metrics.newChars.WithLabelValues(serverName).Inc()
+				if db != nil {
+					db.handleCreatedPlayer(ctx, ev)
+				}
+			case "level_changed":
+				metrics.levelUps.WithLabelValues(serverName, ev.SkillName).Inc()
+				if db != nil {
+					db.handleLevelChanged(ctx, ev)
+				}
+			case "skills":
+				// No dedicated Prometheus counter -- this is a point-in-time
+				// snapshot, not a discrete event. Only meaningful with a DB
+				// to store the history in.
+				if db != nil {
+					db.handleSkills(ctx, ev)
+				}
+			}
+		}
+	}
+}
+
 func main() {
-	dataPath   := flag.String("data-path", "/data", "Zomboid data directory (contains Lua/panelbridge/)")
+	dataPath := flag.String("data-path", "/data", "Zomboid data directory (contains Lua/panelbridge/ and Logs/)")
 	serverName := flag.String("server-name", "", "Server name — must match the directory under Lua/panelbridge/")
 	listenAddr := flag.String("web.listen-address", ":9091", "Address on which to expose metrics")
-	stale      := flag.Duration("stale-threshold", 120*time.Second, "Status file age above which server is considered stale/down")
+	stale := flag.Duration("stale-threshold", 120*time.Second, "Status file age above which server is considered stale/down")
+	dbDSN := flag.String("db-dsn", "", "Optional external Postgres DSN (e.g. postgres://user:pass@host:5432/dbname). Takes priority over --sqlite-path if both are set.")
+	sqlitePath := flag.String("sqlite-path", "", "Optional path to a SQLite database file (created if missing) -- zero-external-dependency alternative to --db-dsn. Must point at a writable location (the default --data-path mount is typically read-only). If neither this nor --db-dsn is set, PerkLog events still drive Prometheus counters but are not persisted -- player/death/skill history and leaderboards need one of them.")
 	flag.Parse()
 
 	if *serverName == "" {
@@ -173,8 +259,40 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(newCollector(*dataPath, *serverName, stale.Seconds()))
+	perkMetrics := newPerkLogMetrics(reg)
+
+	var db eventStore
+	switch {
+	case *dbDSN != "":
+		pg, err := newPgStore(ctx, *dbDSN)
+		if err != nil {
+			// Deliberately non-fatal: a DB outage shouldn't take down
+			// Prometheus scraping, which is the exporter's primary job.
+			slog.Error("failed to connect to Postgres -- continuing without persistence", "err", err)
+		} else {
+			defer pg.Close()
+			db = pg
+			slog.Info("connected to Postgres, event history + leaderboards enabled")
+		}
+	case *sqlitePath != "":
+		sq, err := newSQLiteStore(ctx, *sqlitePath)
+		if err != nil {
+			slog.Error("failed to open SQLite database -- continuing without persistence", "path", *sqlitePath, "err", err)
+		} else {
+			defer sq.Close()
+			db = sq
+			slog.Info("opened SQLite database, event history + leaderboards enabled", "path", *sqlitePath)
+		}
+	default:
+		slog.Info("no --db-dsn or --sqlite-path set, running Prometheus-only (no player/death/skill history)")
+	}
+
+	go runPerkLogPipeline(ctx, *dataPath, *serverName, perkMetrics, db)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
@@ -182,8 +300,16 @@ func main() {
 		fmt.Fprintln(w, "ok")
 	})
 
+	srv := &http.Server{Addr: *listenAddr, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(shutdownCtx)
+	}()
+
 	slog.Info("zomboid-exporter started", "listen", *listenAddr, "server", *serverName, "data", *dataPath)
-	if err := http.ListenAndServe(*listenAddr, mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("listen failed", "err", err)
 		os.Exit(1)
 	}
