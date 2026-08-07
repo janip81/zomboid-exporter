@@ -1,0 +1,12 @@
+# Internal project docs -- not for the public repo
+AGENTS.md
+PLAN.md
+ROADMAP.md
+
+# Go build artifacts
+/zomboid-exporter
+*.test
+
+# Local state
+*.db
+*.sqlite3
