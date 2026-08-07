@@ -126,7 +126,7 @@ func (s *pgStore) handleLogin(ctx context.Context, ev *perkEvent) {
 	}
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details)
-		VALUES ('login', $1, $2, $3, jsonb_build_object('hours_survived', $4::float8, 'x', $5, 'y', $6, 'z', $7))
+		VALUES ('login', $1, $2, $3, jsonb_build_object('hours_survived', $4::float8, 'x', $5::int, 'y', $6::int, 'z', $7::int))
 	`, ev.SteamID, charID, ev.Timestamp, ev.HoursSurvived, ev.X, ev.Y, ev.Z)
 	if err != nil {
 		slog.Warn("insert login event failed", "err", err)
@@ -186,7 +186,7 @@ func (s *pgStore) handleDied(ctx context.Context, ev *perkEvent) {
 	delete(s.activeCharBySteamID, ev.SteamID)
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details)
-		VALUES ('died', $1, $2, $3, jsonb_build_object('hours_survived', $4::float8, 'x', $5, 'y', $6, 'z', $7))
+		VALUES ('died', $1, $2, $3, jsonb_build_object('hours_survived', $4::float8, 'x', $5::int, 'y', $6::int, 'z', $7::int))
 	`, ev.SteamID, charID, ev.Timestamp, ev.HoursSurvived, ev.X, ev.Y, ev.Z)
 	if err != nil {
 		slog.Warn("insert died event failed", "err", err)
