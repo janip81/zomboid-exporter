@@ -233,3 +233,21 @@ func (s *pgStore) handleSkills(ctx context.Context, ev *perkEvent) {
 		slog.Warn("insert skill_snapshots (dump) failed", "err", err)
 	}
 }
+
+func (s *pgStore) getFileOffset(ctx context.Context, path string) (int64, error) {
+	var offset int64
+	err := s.pool.QueryRow(ctx, `SELECT byte_offset FROM processed_files WHERE file_path = $1`, path).Scan(&offset)
+	if err == pgx.ErrNoRows {
+		return 0, nil
+	}
+	return offset, err
+}
+
+func (s *pgStore) setFileOffset(ctx context.Context, path string, offset int64) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO processed_files (file_path, byte_offset)
+		VALUES ($1, $2)
+		ON CONFLICT (file_path) DO UPDATE SET byte_offset = EXCLUDED.byte_offset
+	`, path, offset)
+	return err
+}

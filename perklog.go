@@ -142,22 +142,131 @@ func parseSkillDump(s string) map[string]int {
 	return skills
 }
 
-// findLatestPerkLog returns the newest PerkLog.txt across all
-// Logs/logs_YYYY-MM-DD/ folders under dataPath, or "" if none exist yet.
-func findLatestPerkLog(dataPath string) string {
+// listPerkLogs returns every PerkLog.txt across all Logs/logs_YYYY-MM-DD/
+// folders under dataPath, oldest first (filenames are YYYY-MM-DD_HH-MM-
+// prefixed, so lexical sort == chronological).
+func listPerkLogs(dataPath string) []string {
 	matches, err := filepath.Glob(filepath.Join(dataPath, "Logs", "logs_*", "*_PerkLog.txt"))
-	if err != nil || len(matches) == 0 {
-		return ""
+	if err != nil {
+		return nil
 	}
-	sort.Strings(matches) // filenames are YYYY-MM-DD_HH-MM-prefixed, so lexical sort == chronological
-	return matches[len(matches)-1]
+	sort.Strings(matches)
+	return matches
 }
 
-// tailPerkLog follows the newest PerkLog.txt, switching files when the
-// server restarts and a newer one appears (PZ writes one file per server
-// start, not one continuously-appended file). Parsed events are sent to
-// out. Blocks until ctx is cancelled.
-func tailPerkLog(ctx context.Context, dataPath string, out chan<- *perkEvent) {
+// readNewLines opens path, seeks to fromOffset, and reads up to the last
+// complete line (a trailing partial line, if the writer is mid-write, is
+// left unread -- it'll be picked up whole on the next poll once its
+// newline lands). Returns the parsed events and the offset to checkpoint
+// at (the byte position right after the last complete line consumed).
+func readNewLines(path string, fromOffset int64) (events []*perkEvent, newOffset int64, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fromOffset, err
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(fromOffset, io.SeekStart); err != nil {
+		return nil, fromOffset, err
+	}
+
+	reader := bufio.NewReader(f)
+	newOffset = fromOffset
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			// Partial line (or clean EOF) -- stop here, don't advance past it.
+			break
+		}
+		newOffset += int64(len(line))
+		if ev := parsePerkLogLine(strings.TrimRight(line, "\r\n")); ev != nil {
+			events = append(events, ev)
+		}
+	}
+	return events, newOffset, nil
+}
+
+// pollOnce checks every known PerkLog file for content past its last
+// checkpoint and processes it. done tracks files already fully caught up
+// (and not the current newest, so they can never grow again) -- skipped
+// entirely on subsequent calls rather than even stat()'d again.
+func pollOnce(ctx context.Context, dataPath string, db eventStore, done map[string]bool, onEvent func(*perkEvent)) {
+	files := listPerkLogs(dataPath)
+	if len(files) == 0 {
+		return
+	}
+	newest := files[len(files)-1]
+
+	for _, path := range files {
+		if done[path] {
+			continue
+		}
+
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+
+		offset, err := db.getFileOffset(ctx, path)
+		if err != nil {
+			slog.Warn("getFileOffset failed", "path", path, "err", err)
+			continue
+		}
+
+		if info.Size() <= offset {
+			if path != newest {
+				done[path] = true // fully caught up and will never grow again
+			}
+			continue
+		}
+
+		events, newOffset, err := readNewLines(path, offset)
+		if err != nil {
+			slog.Warn("readNewLines failed", "path", path, "err", err)
+			continue
+		}
+		for _, ev := range events {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			onEvent(ev)
+		}
+		if err := db.setFileOffset(ctx, path, newOffset); err != nil {
+			slog.Warn("setFileOffset failed", "path", path, "err", err)
+		}
+		if path != newest && newOffset >= info.Size() {
+			done[path] = true
+		}
+	}
+}
+
+// pollPerkLogsWithHistory is the persistence-enabled path: every file
+// (historical and current alike) is checked against its DB-stored
+// checkpoint on every poll, so a first-ever run backfills all existing
+// files from offset 0, and any exporter downtime is caught up on restart
+// -- both for free, from the same code path, with no separate backfill
+// step and no re-processing of content already checkpointed.
+func pollPerkLogsWithHistory(ctx context.Context, dataPath string, db eventStore, onEvent func(*perkEvent)) {
+	done := make(map[string]bool)
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	pollOnce(ctx, dataPath, db, done, onEvent) // catch up immediately on startup, don't wait for the first tick
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pollOnce(ctx, dataPath, db, done, onEvent)
+		}
+	}
+}
+
+// tailPerkLogLive is the no-persistence fallback (db == nil): nowhere to
+// checkpoint an offset, so it only ever follows the newest file from EOF
+// forward, same as before -- live Prometheus counters, no history.
+func tailPerkLogLive(ctx context.Context, dataPath string, onEvent func(*perkEvent)) {
 	pollInterval := 3 * time.Second
 	var (
 		currentPath string
@@ -181,8 +290,6 @@ func tailPerkLog(ctx context.Context, dataPath string, out chan<- *perkEvent) {
 			slog.Warn("cannot open PerkLog file", "path", currentPath, "err", err)
 			return
 		}
-		// Start at EOF: we only care about events from this point forward,
-		// not replaying a whole session's history on every exporter restart.
 		if _, err := f.Seek(0, io.SeekEnd); err != nil {
 			f.Close()
 			return
@@ -199,7 +306,11 @@ func tailPerkLog(ctx context.Context, dataPath string, out chan<- *perkEvent) {
 		default:
 		}
 
-		latest := findLatestPerkLog(dataPath)
+		files := listPerkLogs(dataPath)
+		var latest string
+		if len(files) > 0 {
+			latest = files[len(files)-1]
+		}
 		if latest != "" && latest != currentPath {
 			currentPath = latest
 			openCurrent()
@@ -223,11 +334,7 @@ func tailPerkLog(ctx context.Context, dataPath string, out chan<- *perkEvent) {
 			continue
 		}
 		if ev := parsePerkLogLine(line); ev != nil {
-			select {
-			case out <- ev:
-			case <-ctx.Done():
-				return
-			}
+			onEvent(ev)
 		}
 	}
 }

@@ -197,51 +197,59 @@ func newPerkLogMetrics(reg *prometheus.Registry) *perkLogMetrics {
 	return m
 }
 
-// runPerkLogPipeline tails PerkLog.txt for the lifetime of ctx, updating
-// Prometheus counters for every event and, if db is non-nil, persisting
-// richer per-event detail (death locations, skill history, character
-// lifecycle) to Postgres. db is entirely optional -- with no --db-dsn set,
-// this still runs and still drives the Prometheus counters above; it just
-// skips the persistence step.
+// runPerkLogPipeline processes PerkLog.txt for the lifetime of ctx,
+// updating Prometheus counters for every event and, if db is non-nil,
+// persisting richer per-event detail (death locations, skill history,
+// character lifecycle) to it.
+//
+// With db configured: uses pollPerkLogsWithHistory, which checkpoints a
+// byte offset per file in the DB itself -- a first-ever run backfills
+// every historical PerkLog.txt from the start, and any gap from exporter
+// downtime is caught up automatically on restart, all from the same code
+// path, with no separate backfill step and no re-processing of content
+// already checkpointed.
+//
+// With db nil: there's nowhere to persist a checkpoint, so it falls back
+// to tailPerkLogLive, which only follows the newest file from EOF forward
+// (live Prometheus counters only, no history -- the same behavior this
+// exporter always had before persistence existed).
 func runPerkLogPipeline(ctx context.Context, dataPath, serverName string, metrics *perkLogMetrics, db eventStore) {
-	events := make(chan *perkEvent, 64)
-	go tailPerkLog(ctx, dataPath, events)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case ev := <-events:
-			switch ev.Kind {
-			case "login":
-				metrics.logins.WithLabelValues(serverName).Inc()
-				if db != nil {
-					db.handleLogin(ctx, ev)
-				}
-			case "died":
-				metrics.deaths.WithLabelValues(serverName).Inc()
-				if db != nil {
-					db.handleDied(ctx, ev)
-				}
-			case "created_player":
-				metrics.newChars.WithLabelValues(serverName).Inc()
-				if db != nil {
-					db.handleCreatedPlayer(ctx, ev)
-				}
-			case "level_changed":
-				metrics.levelUps.WithLabelValues(serverName, ev.SkillName).Inc()
-				if db != nil {
-					db.handleLevelChanged(ctx, ev)
-				}
-			case "skills":
-				// No dedicated Prometheus counter -- this is a point-in-time
-				// snapshot, not a discrete event. Only meaningful with a DB
-				// to store the history in.
-				if db != nil {
-					db.handleSkills(ctx, ev)
-				}
+	onEvent := func(ev *perkEvent) {
+		switch ev.Kind {
+		case "login":
+			metrics.logins.WithLabelValues(serverName).Inc()
+			if db != nil {
+				db.handleLogin(ctx, ev)
+			}
+		case "died":
+			metrics.deaths.WithLabelValues(serverName).Inc()
+			if db != nil {
+				db.handleDied(ctx, ev)
+			}
+		case "created_player":
+			metrics.newChars.WithLabelValues(serverName).Inc()
+			if db != nil {
+				db.handleCreatedPlayer(ctx, ev)
+			}
+		case "level_changed":
+			metrics.levelUps.WithLabelValues(serverName, ev.SkillName).Inc()
+			if db != nil {
+				db.handleLevelChanged(ctx, ev)
+			}
+		case "skills":
+			// No dedicated Prometheus counter -- this is a point-in-time
+			// snapshot, not a discrete event. Only meaningful with a DB to
+			// store the history in.
+			if db != nil {
+				db.handleSkills(ctx, ev)
 			}
 		}
+	}
+
+	if db != nil {
+		pollPerkLogsWithHistory(ctx, dataPath, db, onEvent)
+	} else {
+		tailPerkLogLive(ctx, dataPath, onEvent)
 	}
 }
 

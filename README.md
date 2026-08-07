@@ -151,8 +151,34 @@ keywords are ignored rather than guessed at, so a future PZ update
 adding a new event type fails safe (silently skipped) instead of
 mis-parsing.
 
-`PerkLog.txt` rotates to a new file every server start (not daily), so
-the tailer re-scans for the newest file under `Logs/logs_*/` and
-switches to it automatically when the server restarts — it does not
-replay a session's full history on exporter restart, only events from
-that point forward.
+`PerkLog.txt` rotates to a new file every server start (not daily). How
+restarts and history are handled depends on whether a database is
+configured:
+
+- **With `--db-dsn`/`--sqlite-path`**: a byte offset per file is
+  checkpointed in the database itself. On the very first run, every
+  historical file is read from the start — a full backfill, no manual
+  step required. On every subsequent run (including after downtime),
+  each file is compared against its last checkpoint and only genuinely
+  new content is read; a file that's already fully caught up costs one
+  cheap `stat()` per poll, not a re-read. This also means no event is
+  ever lost to exporter downtime, whether that's a five-second pod
+  restart or the exporter being off for days.
+- **Without either**: there's nowhere to persist a checkpoint, so it
+  falls back to simply following the newest file from EOF forward — live
+  Prometheus counters only, no history, same as before persistence
+  existed.
+
+## Roadmap / not yet implemented
+
+- **Zombie kill tracking.** Checked both `PerkLog.txt` and
+  `ClientActionLog.txt` (the only other structured per-action log PZ
+  writes) — neither logs kills. Kill counts currently exist only inside
+  the binary save file, which this project deliberately avoids parsing
+  (fragile, reverse-engineered format). Adding this would need a small
+  server-side Lua mod hook that logs each kill to a file the same way
+  PerkLog already does for deaths/logins. Important caveat: unlike
+  everything else here, kill history could only start from whenever that
+  mod goes live — there's no backfill possible, since the data was never
+  recorded anywhere before that point (nothing analogous to the existing
+  `PerkLog.txt` to read retroactively).

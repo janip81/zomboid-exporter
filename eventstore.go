@@ -15,5 +15,16 @@ type eventStore interface {
 	handleDied(ctx context.Context, ev *perkEvent)
 	handleLevelChanged(ctx context.Context, ev *perkEvent)
 	handleSkills(ctx context.Context, ev *perkEvent)
+
+	// getFileOffset/setFileOffset track how far into each PerkLog.txt file
+	// has been read, keyed by absolute path. This is what makes history
+	// gap-free across exporter restarts (including the very first run,
+	// which backfills every historical file from offset 0) without any
+	// manual backfill step -- every poll cycle just asks "is there new
+	// content past my last checkpoint?" for every file that still exists,
+	// old and current alike.
+	getFileOffset(ctx context.Context, path string) (int64, error)
+	setFileOffset(ctx context.Context, path string, offset int64) error
+
 	Close()
 }

@@ -269,3 +269,21 @@ func (s *sqliteStore) handleSkills(ctx context.Context, ev *perkEvent) {
 		slog.Warn("commit skill_snapshots (dump) failed", "err", err)
 	}
 }
+
+func (s *sqliteStore) getFileOffset(ctx context.Context, path string) (int64, error) {
+	var offset int64
+	err := s.db.QueryRowContext(ctx, `SELECT byte_offset FROM processed_files WHERE file_path = ?`, path).Scan(&offset)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return offset, err
+}
+
+func (s *sqliteStore) setFileOffset(ctx context.Context, path string, offset int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO processed_files (file_path, byte_offset)
+		VALUES (?, ?)
+		ON CONFLICT (file_path) DO UPDATE SET byte_offset = excluded.byte_offset
+	`, path, offset)
+	return err
+}

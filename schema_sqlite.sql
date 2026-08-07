@@ -52,3 +52,11 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_type_time ON events (event_type, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_steam_id ON events (steam_id, occurred_at DESC);
+
+-- Tracks how far into each PerkLog.txt file has been read, so restarts
+-- (and the very first run, backfilling every historical file) never
+-- re-process or skip content -- see pollPerkLogsWithHistory in perklog.go.
+CREATE TABLE IF NOT EXISTS processed_files (
+    file_path   TEXT PRIMARY KEY,
+    byte_offset INTEGER NOT NULL
+);
