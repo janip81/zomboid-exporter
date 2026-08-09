@@ -23,6 +23,7 @@ type sqliteStore struct {
 	db                  *sql.DB
 	serverName          string
 	activeCharBySteamID map[string]int64
+	steamIDByUsername   map[string]string
 }
 
 func newSQLiteStore(ctx context.Context, path, serverName string) (*sqliteStore, error) {
@@ -44,7 +45,7 @@ func newSQLiteStore(ctx context.Context, path, serverName string) (*sqliteStore,
 		db.Close()
 		return nil, err
 	}
-	s := &sqliteStore{db: db, serverName: serverName, activeCharBySteamID: make(map[string]int64)}
+	s := &sqliteStore{db: db, serverName: serverName, activeCharBySteamID: make(map[string]int64), steamIDByUsername: make(map[string]string)}
 	if err := s.migrateServerColumn(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -234,6 +235,7 @@ func detailsJSON(v map[string]any) string {
 }
 
 func (s *sqliteStore) handleLogin(ctx context.Context, ev *perkEvent) {
+	s.rememberSteamID(ev.Username, ev.SteamID)
 	if err := s.upsertPlayer(ctx, ev.SteamID, ev.Username, ev.Timestamp); err != nil {
 		slog.Warn("upsertPlayer failed", "err", err)
 		return
@@ -254,6 +256,7 @@ func (s *sqliteStore) handleLogin(ctx context.Context, ev *perkEvent) {
 }
 
 func (s *sqliteStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {
+	s.rememberSteamID(ev.Username, ev.SteamID)
 	if err := s.upsertPlayer(ctx, ev.SteamID, ev.Username, ev.Timestamp); err != nil {
 		slog.Warn("upsertPlayer failed", "err", err)
 		return
@@ -289,6 +292,7 @@ func (s *sqliteStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {
 }
 
 func (s *sqliteStore) handleDied(ctx context.Context, ev *perkEvent) {
+	s.rememberSteamID(ev.Username, ev.SteamID)
 	charID, err := s.activeCharacter(ctx, ev.SteamID, ev.Timestamp)
 	if err != nil {
 		slog.Warn("activeCharacter failed", "err", err)
@@ -318,6 +322,7 @@ func (s *sqliteStore) handleDied(ctx context.Context, ev *perkEvent) {
 }
 
 func (s *sqliteStore) handleLevelChanged(ctx context.Context, ev *perkEvent) {
+	s.rememberSteamID(ev.Username, ev.SteamID)
 	charID, err := s.activeCharacter(ctx, ev.SteamID, ev.Timestamp)
 	if err != nil {
 		slog.Warn("activeCharacter failed", "err", err)
@@ -341,6 +346,7 @@ func (s *sqliteStore) handleLevelChanged(ctx context.Context, ev *perkEvent) {
 }
 
 func (s *sqliteStore) handleSkills(ctx context.Context, ev *perkEvent) {
+	s.rememberSteamID(ev.Username, ev.SteamID)
 	charID, err := s.activeCharacter(ctx, ev.SteamID, ev.Timestamp)
 	if err != nil {
 		slog.Warn("activeCharacter failed", "err", err)
@@ -372,19 +378,35 @@ func (s *sqliteStore) handleSkills(ctx context.Context, ev *perkEvent) {
 	}
 }
 
+// rememberSteamID/canonicalSteamID -- see pgStore's copy of this comment
+// for the full rationale (Lua-side SteamID64 precision loss).
+func (s *sqliteStore) rememberSteamID(username, steamID string) {
+	if username != "" && steamID != "" {
+		s.steamIDByUsername[username] = steamID
+	}
+}
+
+func (s *sqliteStore) canonicalSteamID(username, fallback string) string {
+	if id, ok := s.steamIDByUsername[username]; ok {
+		return id
+	}
+	return fallback
+}
+
 // handleExporterEvent persists a parsed ExporterLog.txt line generically:
 // event_type is whatever the Lua mod's "type" field says, and the full
 // decoded payload is kept verbatim in details -- see exporterlog.go.
 func (s *sqliteStore) handleExporterEvent(ctx context.Context, ev *exporterEvent) {
-	if ev.SteamID == "" {
+	steamID := s.canonicalSteamID(ev.Username, ev.SteamID)
+	if steamID == "" {
 		slog.Warn("dropping ExporterLog event with no steamId", "type", ev.EventType, "username", ev.Username)
 		return
 	}
-	if err := s.upsertPlayer(ctx, ev.SteamID, ev.Username, ev.Timestamp); err != nil {
+	if err := s.upsertPlayer(ctx, steamID, ev.Username, ev.Timestamp); err != nil {
 		slog.Warn("upsertPlayer failed", "err", err)
 		return
 	}
-	charID, err := s.activeCharacter(ctx, ev.SteamID, ev.Timestamp)
+	charID, err := s.activeCharacter(ctx, steamID, ev.Timestamp)
 	if err != nil {
 		slog.Warn("activeCharacter failed", "err", err)
 		return
@@ -393,7 +415,7 @@ func (s *sqliteStore) handleExporterEvent(ctx context.Context, ev *exporterEvent
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
 		VALUES (?, ?, ?, ?, ?, ?)
-	`, ev.EventType, ev.SteamID, charID, iso(ev.Timestamp), details, s.serverName)
+	`, ev.EventType, steamID, charID, iso(ev.Timestamp), details, s.serverName)
 	if err != nil {
 		slog.Warn("insert exporter event failed", "type", ev.EventType, "err", err)
 	}
@@ -404,6 +426,7 @@ func (s *sqliteStore) handleExporterEvent(ctx context.Context, ev *exporterEvent
 // session spans logins/deaths/new characters), so character_id is
 // always NULL here, unlike the character-linked handlers above.
 func (s *sqliteStore) handleSessionEvent(ctx context.Context, ev *sessionEvent) {
+	s.rememberSteamID(ev.Username, ev.SteamID)
 	if err := s.upsertPlayer(ctx, ev.SteamID, ev.Username, ev.Timestamp); err != nil {
 		slog.Warn("upsertPlayer failed", "err", err)
 		return
