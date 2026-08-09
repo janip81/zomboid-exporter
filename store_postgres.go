@@ -348,6 +348,24 @@ func (s *pgStore) handleExporterEvent(ctx context.Context, ev *exporterEvent) {
 	}
 }
 
+// handleSessionEvent persists a parsed connections.txt session_start/
+// session_end line -- see connections.go. Not character-scoped (a
+// session spans logins/deaths/new characters), so character_id is
+// always NULL here, unlike the character-linked handlers above.
+func (s *pgStore) handleSessionEvent(ctx context.Context, ev *sessionEvent) {
+	if err := s.upsertPlayer(ctx, ev.SteamID, ev.Username, ev.Timestamp); err != nil {
+		slog.Warn("upsertPlayer failed", "err", err)
+		return
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+		VALUES ($1, $2, NULL, $3, '{}'::jsonb, $4)
+	`, ev.Kind, ev.SteamID, ev.Timestamp, s.serverName)
+	if err != nil {
+		slog.Warn("insert session event failed", "kind", ev.Kind, "err", err)
+	}
+}
+
 func (s *pgStore) getFileOffset(ctx context.Context, path string) (int64, error) {
 	var offset int64
 	err := s.pool.QueryRow(ctx, `SELECT byte_offset FROM processed_files WHERE file_path = $1`, path).Scan(&offset)

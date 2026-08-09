@@ -11,6 +11,7 @@ import (
 // in isolation, without a real database.
 type fakeStore struct {
 	offsets        map[string]int64
+	sessionEvents  int
 	logins         int
 	skills         int
 	exporterEvents int
@@ -26,6 +27,7 @@ func (f *fakeStore) handleDied(ctx context.Context, ev *perkEvent)              
 func (f *fakeStore) handleLevelChanged(ctx context.Context, ev *perkEvent)      {}
 func (f *fakeStore) handleSkills(ctx context.Context, ev *perkEvent)            { f.skills++ }
 func (f *fakeStore) handleExporterEvent(ctx context.Context, ev *exporterEvent) { f.exporterEvents++ }
+func (f *fakeStore) handleSessionEvent(ctx context.Context, ev *sessionEvent)   { f.sessionEvents++ }
 func (f *fakeStore) Close()                                                     {}
 
 func (f *fakeStore) getFileOffset(ctx context.Context, path string) (int64, error) {

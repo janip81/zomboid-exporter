@@ -399,6 +399,24 @@ func (s *sqliteStore) handleExporterEvent(ctx context.Context, ev *exporterEvent
 	}
 }
 
+// handleSessionEvent persists a parsed connections.txt session_start/
+// session_end line -- see connections.go. Not character-scoped (a
+// session spans logins/deaths/new characters), so character_id is
+// always NULL here, unlike the character-linked handlers above.
+func (s *sqliteStore) handleSessionEvent(ctx context.Context, ev *sessionEvent) {
+	if err := s.upsertPlayer(ctx, ev.SteamID, ev.Username, ev.Timestamp); err != nil {
+		slog.Warn("upsertPlayer failed", "err", err)
+		return
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+		VALUES (?, ?, NULL, ?, '{}', ?)
+	`, ev.Kind, ev.SteamID, iso(ev.Timestamp), s.serverName)
+	if err != nil {
+		slog.Warn("insert session event failed", "kind", ev.Kind, "err", err)
+	}
+}
+
 func (s *sqliteStore) getFileOffset(ctx context.Context, path string) (int64, error) {
 	var offset int64
 	err := s.db.QueryRowContext(ctx, `SELECT byte_offset FROM processed_files WHERE file_path = ?`, path).Scan(&offset)

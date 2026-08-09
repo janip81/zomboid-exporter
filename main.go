@@ -302,6 +302,7 @@ func main() {
 
 	go runPerkLogPipeline(ctx, *dataPath, *serverName, perkMetrics, db)
 	go runExporterLogPipeline(ctx, *dataPath, db)
+	go runConnectionsPipeline(ctx, *dataPath, db)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))

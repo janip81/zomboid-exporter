@@ -24,6 +24,11 @@ type eventStore interface {
 	// comment for the table's rationale.
 	handleExporterEvent(ctx context.Context, ev *exporterEvent)
 
+	// handleSessionEvent persists a parsed connections.txt line
+	// (session_start/session_end, from the native fully-connected/
+	// receive-disconnect records) -- see connections.go.
+	handleSessionEvent(ctx context.Context, ev *sessionEvent)
+
 	// getFileOffset/setFileOffset track how far into each PerkLog.txt file
 	// has been read, keyed by absolute path. This is what makes history
 	// gap-free across exporter restarts (including the very first run,
