@@ -4,7 +4,15 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    paths: &code-paths
+      - "*.go"
+      - "go.mod"
+      - "go.sum"
+      - "*.sql"
+      - "Dockerfile"
+      - ".github/workflows/build.yaml"
   pull_request:
+    paths: *code-paths
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/zomboid-exporter
