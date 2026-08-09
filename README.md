@@ -42,6 +42,38 @@ eating/drinking/pills, reading, medical treatment, injuries, vehicle
 enter/exit — see [`lua-mod/ExporterLog-Workshop/CHANGELOG.md`](lua-mod/ExporterLog-Workshop/CHANGELOG.md)
 for the exact current list and history).
 
+## Installation
+
+Two independent pieces — install whichever you need.
+
+### 1. The Lua mod (only needed for kills/movement/consumption/medical/etc)
+
+Published on Steam Workshop as **`ExporterLog`, item ID `3779278410`**
+(unlisted — not searchable, but installable by anyone with the ID). Add
+it the same way as any other Workshop mod:
+
+- **Steam Workshop** (recommended): subscribe via
+  `https://steamcommunity.com/sharedfiles/filedetails/?id=3779278410`,
+  or add `3779278410` directly to your server's `WorkshopItems=` line
+  (`Server/<servername>.ini`) — then add `ExporterLog` to `Mods=` on the
+  same file so it's actually activated, not just downloaded. Both are
+  needed; `WorkshopItems=` alone only fetches the content.
+- **Local `mods/` folder** (no Steam Workshop): copy
+  [`lua-mod/ExporterLog/`](lua-mod/ExporterLog) into your server's
+  `Zomboid/mods/ExporterLog/` and add `ExporterLog` to `Mods=`.
+
+Either way it's server-side only — players who don't have it see no
+difference at all, since every hook runs on the dedicated server
+process itself, not the client.
+
+### 2. The exporter (always needed)
+
+Run the `ghcr.io/janip81/zomboid-exporter` image alongside your server —
+see [Running it](#running-it) below for Docker Compose / Kubernetes
+examples. Works standalone against PanelBridge/PerkLog/connections.txt
+even without the Lua mod installed; you just won't get kill/movement/
+consumption/medical/injury stats until it's added too.
+
 ## Prometheus metrics
 
 | Metric | Type | Labels | Source |
