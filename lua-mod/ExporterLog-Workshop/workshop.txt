@@ -1,0 +1,6 @@
+version=1
+id=3779278410
+title=ExporterLog
+description=Server-side-only mod that logs extra player stats to Logs/logs_*/*_ExporterLog.txt for external stats tracking via a companion Prometheus exporter. Tracks zombie kills (with cause: melee/firearm/vehicle, plus weapon or vehicle type), driving distance (per vehicle type), walking/running/sprinting distance, eating, drinking (from inventory or a world source like a sink/toilet/lake, including which one), pills/medicine taken, books read, and vehicle enter/exit. No client-side code -- has zero effect on players who don't have it, since everything runs on the dedicated server process itself.
+tags=Build 42;Framework
+visibility=unlisted

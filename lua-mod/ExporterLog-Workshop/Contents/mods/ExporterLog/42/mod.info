@@ -1,0 +1,3 @@
+name=ExporterLog
+description=Logs extra stats (kills, etc.) to Logs/logs_*/*_ExporterLog.txt for external stats tracking. Server-side only.
+id=ExporterLog

@@ -10,3 +10,16 @@ ROADMAP.md
 # Local state
 *.db
 *.sqlite3
+
+# ExporterLog Lua mod: only lua-mod/src/ExporterLog (the hand-edited
+# source) and each package's own metadata are tracked. build-dev.py and
+# build-workshop.py regenerate the Lua module tree under every package's
+# 42/media/lua/server/ExporterLog/ -- never edit those copies directly,
+# so they're not tracked either. ExporterLog_Dev is a disposable
+# single-player-only local testing copy, never uploaded anywhere.
+# ExporterLog_backup_workshop is a personal backup, not part of the
+# build pipeline.
+lua-mod/ExporterLog_Dev/
+lua-mod/ExporterLog_backup_workshop/
+lua-mod/ExporterLog/42/media/lua/server/ExporterLog/
+lua-mod/ExporterLog-Workshop/Contents/mods/ExporterLog/42/media/lua/server/ExporterLog/
