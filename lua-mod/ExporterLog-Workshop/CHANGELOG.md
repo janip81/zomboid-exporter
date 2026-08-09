@@ -1,5 +1,10 @@
 # ExporterLog changelog
 
+## Update 2026-08-09 (4) — v1.2.0
+
+### New tracked stats
+- **Maximum driving speed** — per vehicle type, records a new personal-best top speed as it's set while driving.
+
 ## Update 2026-08-09 (3) — v1.1.0
 
 ### New tracked stats
