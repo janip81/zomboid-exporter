@@ -107,16 +107,10 @@ local function onEveryMinuteDriving()
                 -- is what makes the per-vehicle-type breakdown free.
                 local okSpeed, speedKmh = pcall(function() return vehicle:getCurrentSpeedKmHour() end)
                 if not okSpeed then
-                    -- Real failure, not debug-gated -- if this ever
-                    -- prints, it explains a "stuck" max speed directly
-                    -- instead of silently no-opping forever.
+                    -- If this ever prints, it explains a "stuck" max
+                    -- speed directly instead of silently no-opping
+                    -- forever.
                     print(ExporterLog.Runtime.logPrefix() .. ": getCurrentSpeedKmHour() failed: " .. tostring(speedKmh))
-                elseif ExporterLog.Runtime.isDebug() then
-                    -- TEMP diagnostic (2026-08-09): confirms whether
-                    -- speed is even being sampled correctly tick to
-                    -- tick, separate from whether a new record was set
-                    -- -- strip once max_speed is fully proven.
-                    print(ExporterLog.Runtime.logPrefix() .. ": SPEED_DEBUG raw=" .. tostring(speedKmh) .. " max=" .. tostring(state.maxSpeedKmh))
                 end
                 if okSpeed and speedKmh and speedKmh > state.maxSpeedKmh then
                     state.maxSpeedKmh = speedKmh
