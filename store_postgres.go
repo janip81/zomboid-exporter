@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -42,6 +43,10 @@ func newPgStore(ctx context.Context, dsn, serverName string) (*pgStore, error) {
 		pool.Close()
 		return nil, err
 	}
+	if err := s.migrateFileOffsetKeys(ctx); err != nil {
+		pool.Close()
+		return nil, err
+	}
 	if err := s.loadActiveCharacters(ctx); err != nil {
 		pool.Close()
 		return nil, err
@@ -65,6 +70,55 @@ func (s *pgStore) migrateServerColumn(ctx context.Context) error {
 			return err
 		}
 		if _, err := s.pool.Exec(ctx, `ALTER TABLE `+tbl+` ALTER COLUMN server SET NOT NULL`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateFileOffsetKeys converts processed_files rows keyed by full
+// absolute path (the original scheme) to basename-only keys, which
+// pollOnce/pollExporterOnce now use so a checkpoint survives PZ moving a
+// session's log file from Logs/<name>.txt to Logs/logs_YYYY-MM-DD/
+// <name>.txt once the next server start archives it -- see listPerkLogs'
+// comment in perklog.go for the full story. Without this, every
+// already-checkpointed file would look brand new under the new key
+// scheme and get fully re-ingested, duplicating its entire event
+// history. Harmless no-op once every row is already basename-keyed (no
+// row contains a path separator).
+func (s *pgStore) migrateFileOffsetKeys(ctx context.Context) error {
+	rows, err := s.pool.Query(ctx, `SELECT file_path, byte_offset FROM processed_files WHERE file_path LIKE '%/%'`)
+	if err != nil {
+		return err
+	}
+	type kv struct {
+		oldKey string
+		offset int64
+	}
+	var toMigrate []kv
+	for rows.Next() {
+		var k kv
+		if err := rows.Scan(&k.oldKey, &k.offset); err != nil {
+			rows.Close()
+			return err
+		}
+		toMigrate = append(toMigrate, k)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+
+	for _, k := range toMigrate {
+		newKey := filepath.Base(k.oldKey)
+		if _, err := s.pool.Exec(ctx, `
+			INSERT INTO processed_files (file_path, byte_offset)
+			VALUES ($1, $2)
+			ON CONFLICT (file_path) DO UPDATE SET byte_offset = GREATEST(processed_files.byte_offset, EXCLUDED.byte_offset)
+		`, newKey, k.offset); err != nil {
+			return err
+		}
+		if _, err := s.pool.Exec(ctx, `DELETE FROM processed_files WHERE file_path = $1`, k.oldKey); err != nil {
 			return err
 		}
 	}

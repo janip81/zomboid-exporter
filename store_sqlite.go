@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	_ "modernc.org/sqlite" // pure Go, CGO-free -- keeps the distroless/CGO_ENABLED=0 build intact
@@ -45,6 +46,10 @@ func newSQLiteStore(ctx context.Context, path, serverName string) (*sqliteStore,
 	}
 	s := &sqliteStore{db: db, serverName: serverName, activeCharBySteamID: make(map[string]int64)}
 	if err := s.migrateServerColumn(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := s.migrateFileOffsetKeys(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -99,6 +104,51 @@ func (s *sqliteStore) hasColumn(ctx context.Context, table, column string) (bool
 		}
 	}
 	return false, rows.Err()
+}
+
+// migrateFileOffsetKeys converts processed_files rows keyed by full
+// absolute path to basename-only keys -- see pgStore.migrateFileOffsetKeys
+// for the full rationale (PZ moves a session's log file to a different
+// path once archived by the next restart; basename is the only thing
+// stable across that move). Harmless no-op once every row is already
+// basename-keyed.
+func (s *sqliteStore) migrateFileOffsetKeys(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT file_path, byte_offset FROM processed_files WHERE file_path LIKE '%/%'`)
+	if err != nil {
+		return err
+	}
+	type kv struct {
+		oldKey string
+		offset int64
+	}
+	var toMigrate []kv
+	for rows.Next() {
+		var k kv
+		if err := rows.Scan(&k.oldKey, &k.offset); err != nil {
+			rows.Close()
+			return err
+		}
+		toMigrate = append(toMigrate, k)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+
+	for _, k := range toMigrate {
+		newKey := filepath.Base(k.oldKey)
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO processed_files (file_path, byte_offset)
+			VALUES (?, ?)
+			ON CONFLICT (file_path) DO UPDATE SET byte_offset = MAX(processed_files.byte_offset, excluded.byte_offset)
+		`, newKey, k.offset); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM processed_files WHERE file_path = ?`, k.oldKey); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *sqliteStore) Close() {

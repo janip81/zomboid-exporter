@@ -66,15 +66,23 @@ func parseExporterLogLine(line string) *exporterEvent {
 	}
 }
 
-// listExporterLogs returns every ExporterLog.txt across all
-// Logs/logs_YYYY-MM-DD/ folders under dataPath, oldest first -- same
-// convention as listPerkLogs.
+// listExporterLogs returns every ExporterLog.txt under dataPath, oldest
+// first -- same dual-location handling as listPerkLogs (see its comment):
+// the live session's file sits flat in Logs/, only moving under
+// Logs/logs_YYYY-MM-DD/ once archived by the next restart.
 func listExporterLogs(dataPath string) []string {
-	matches, err := filepath.Glob(filepath.Join(dataPath, "Logs", "logs_*", "*_ExporterLog.txt"))
+	flat, err := filepath.Glob(filepath.Join(dataPath, "Logs", "*_ExporterLog.txt"))
 	if err != nil {
 		return nil
 	}
-	sort.Strings(matches)
+	archived, err := filepath.Glob(filepath.Join(dataPath, "Logs", "logs_*", "*_ExporterLog.txt"))
+	if err != nil {
+		return nil
+	}
+	matches := append(flat, archived...)
+	sort.Slice(matches, func(i, j int) bool {
+		return filepath.Base(matches[i]) < filepath.Base(matches[j])
+	})
 	return matches
 }
 
@@ -118,7 +126,8 @@ func pollExporterOnce(ctx context.Context, dataPath string, db eventStore, done 
 	newest := files[len(files)-1]
 
 	for _, path := range files {
-		if done[path] {
+		key := filepath.Base(path) // see listPerkLogs' comment on why
+		if done[key] {
 			continue
 		}
 
@@ -127,7 +136,7 @@ func pollExporterOnce(ctx context.Context, dataPath string, db eventStore, done 
 			continue
 		}
 
-		offset, err := db.getFileOffset(ctx, path)
+		offset, err := db.getFileOffset(ctx, key)
 		if err != nil {
 			slog.Warn("getFileOffset failed", "path", path, "err", err)
 			continue
@@ -135,7 +144,7 @@ func pollExporterOnce(ctx context.Context, dataPath string, db eventStore, done 
 
 		if info.Size() <= offset {
 			if path != newest {
-				done[path] = true
+				done[key] = true
 			}
 			continue
 		}
@@ -153,11 +162,11 @@ func pollExporterOnce(ctx context.Context, dataPath string, db eventStore, done 
 			}
 			onEvent(ev)
 		}
-		if err := db.setFileOffset(ctx, path, newOffset); err != nil {
+		if err := db.setFileOffset(ctx, key, newOffset); err != nil {
 			slog.Warn("setFileOffset failed", "path", path, "err", err)
 		}
 		if path != newest && newOffset >= info.Size() {
-			done[path] = true
+			done[key] = true
 		}
 	}
 }

@@ -118,8 +118,8 @@ func TestPollExporterOnce_CatchesUpFreshAndSkipsWhenNoNewContent(t *testing.T) {
 		t.Fatalf("expected 2 exporter events, got %d", store.exporterEvents)
 	}
 	info, _ := os.Stat(logPath)
-	if store.offsets[logPath] != info.Size() {
-		t.Fatalf("offset should equal file size after full read: got %d want %d", store.offsets[logPath], info.Size())
+	if store.offsets[filepath.Base(logPath)] != info.Size() {
+		t.Fatalf("offset should equal file size after full read: got %d want %d", store.offsets[filepath.Base(logPath)], info.Size())
 	}
 
 	// Second poll, no new content -- must be a complete no-op.
@@ -142,7 +142,7 @@ func TestPollExporterOnce_RestartResumesFromPersistedOffset(t *testing.T) {
 
 	ctx := context.Background()
 	store := newFakeStore()
-	store.offsets[logPath] = int64(len(killLine))
+	store.offsets[filepath.Base(logPath)] = int64(len(killLine))
 
 	var events []*exporterEvent
 	onEvent := func(ev *exporterEvent) { events = append(events, ev); store.handleExporterEvent(ctx, ev) }
@@ -174,8 +174,8 @@ func TestPollExporterOnce_PartialTrailingLineNotConsumed(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("expected only the complete kill line to be processed, got %d events", len(events))
 	}
-	if store.offsets[logPath] != int64(len(killLine)) {
-		t.Fatalf("offset should stop right after the last complete line: got %d want %d", store.offsets[logPath], len(killLine))
+	if store.offsets[filepath.Base(logPath)] != int64(len(killLine)) {
+		t.Fatalf("offset should stop right after the last complete line: got %d want %d", store.offsets[filepath.Base(logPath)], len(killLine))
 	}
 
 	// Now "finish" the write with a newline, and poll again.

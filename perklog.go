@@ -142,15 +142,30 @@ func parseSkillDump(s string) map[string]int {
 	return skills
 }
 
-// listPerkLogs returns every PerkLog.txt across all Logs/logs_YYYY-MM-DD/
-// folders under dataPath, oldest first (filenames are YYYY-MM-DD_HH-MM-
-// prefixed, so lexical sort == chronological).
+// listPerkLogs returns every PerkLog.txt under dataPath, oldest first.
+// PZ writes the currently-running session's files flat in Logs/ and only
+// moves them into Logs/logs_YYYY-MM-DD/ once the *next* server start
+// happens -- confirmed live (2026-08-09): a session's PerkLog.txt/
+// ExporterLog.txt sits at Logs/<name>.txt for its entire run and only
+// appears under Logs/logs_*/ after a subsequent restart archives it. Both
+// locations must be globbed, or the exporter can never see the live
+// session's data -- only ever catches up on the *previous* one, a
+// restart late. Sorted by basename (not full path) since filenames are
+// YYYY-MM-DD_HH-MM-prefixed and thus chronological regardless of which
+// of the two locations currently holds them.
 func listPerkLogs(dataPath string) []string {
-	matches, err := filepath.Glob(filepath.Join(dataPath, "Logs", "logs_*", "*_PerkLog.txt"))
+	flat, err := filepath.Glob(filepath.Join(dataPath, "Logs", "*_PerkLog.txt"))
 	if err != nil {
 		return nil
 	}
-	sort.Strings(matches)
+	archived, err := filepath.Glob(filepath.Join(dataPath, "Logs", "logs_*", "*_PerkLog.txt"))
+	if err != nil {
+		return nil
+	}
+	matches := append(flat, archived...)
+	sort.Slice(matches, func(i, j int) bool {
+		return filepath.Base(matches[i]) < filepath.Base(matches[j])
+	})
 	return matches
 }
 
@@ -198,7 +213,12 @@ func pollOnce(ctx context.Context, dataPath string, db eventStore, done map[stri
 	newest := files[len(files)-1]
 
 	for _, path := range files {
-		if done[path] {
+		// Checkpoints are keyed by basename, not full path: a session's
+		// file lives at Logs/<name>.txt while running and moves to
+		// Logs/logs_YYYY-MM-DD/<name>.txt once archived on the next
+		// restart -- basename is the only thing stable across that move.
+		key := filepath.Base(path)
+		if done[key] {
 			continue
 		}
 
@@ -207,7 +227,7 @@ func pollOnce(ctx context.Context, dataPath string, db eventStore, done map[stri
 			continue
 		}
 
-		offset, err := db.getFileOffset(ctx, path)
+		offset, err := db.getFileOffset(ctx, key)
 		if err != nil {
 			slog.Warn("getFileOffset failed", "path", path, "err", err)
 			continue
@@ -215,7 +235,7 @@ func pollOnce(ctx context.Context, dataPath string, db eventStore, done map[stri
 
 		if info.Size() <= offset {
 			if path != newest {
-				done[path] = true // fully caught up and will never grow again
+				done[key] = true // fully caught up and will never grow again
 			}
 			continue
 		}
@@ -233,11 +253,11 @@ func pollOnce(ctx context.Context, dataPath string, db eventStore, done map[stri
 			}
 			onEvent(ev)
 		}
-		if err := db.setFileOffset(ctx, path, newOffset); err != nil {
+		if err := db.setFileOffset(ctx, key, newOffset); err != nil {
 			slog.Warn("setFileOffset failed", "path", path, "err", err)
 		}
 		if path != newest && newOffset >= info.Size() {
-			done[path] = true
+			done[key] = true
 		}
 	}
 }

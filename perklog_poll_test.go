@@ -85,8 +85,8 @@ func TestPollOnce_CatchesUpFreshAndSkipsWhenNoNewContent(t *testing.T) {
 		t.Fatalf("expected 2 events total, got %d", len(events))
 	}
 	info, _ := os.Stat(logPath)
-	if store.offsets[logPath] != info.Size() {
-		t.Fatalf("offset should equal file size after full read: got %d want %d", store.offsets[logPath], info.Size())
+	if store.offsets[filepath.Base(logPath)] != info.Size() {
+		t.Fatalf("offset should equal file size after full read: got %d want %d", store.offsets[filepath.Base(logPath)], info.Size())
 	}
 
 	// Second poll, no new content -- must be a complete no-op.
@@ -112,7 +112,7 @@ func TestPollOnce_RestartResumesFromPersistedOffset(t *testing.T) {
 	// not the skill line -- only the skill line should be (re-)processed.
 	ctx := context.Background()
 	store := newFakeStore()
-	store.offsets[logPath] = int64(len(loginLine))
+	store.offsets[filepath.Base(logPath)] = int64(len(loginLine))
 
 	var events []*perkEvent
 	onEvent := func(ev *perkEvent) { events = append(events, ev); dispatch(ctx, store, ev) }
@@ -147,8 +147,8 @@ func TestPollOnce_PartialTrailingLineNotConsumed(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("expected only the complete login line to be processed, got %d events", len(events))
 	}
-	if store.offsets[logPath] != int64(len(loginLine)) {
-		t.Fatalf("offset should stop right after the last complete line: got %d want %d", store.offsets[logPath], len(loginLine))
+	if store.offsets[filepath.Base(logPath)] != int64(len(loginLine)) {
+		t.Fatalf("offset should stop right after the last complete line: got %d want %d", store.offsets[filepath.Base(logPath)], len(loginLine))
 	}
 
 	// Now "finish" the write with a newline + Hours Survived, and poll again.
@@ -183,10 +183,10 @@ func TestPollOnce_OldFileMarkedDoneAndNeverRereadEvenIfDeleted(t *testing.T) {
 	onEvent := func(ev *perkEvent) { events = append(events, ev); dispatch(ctx, store, ev) }
 	pollOnce(ctx, dir, store, done, onEvent)
 
-	if !done[oldPath] {
+	if !done[filepath.Base(oldPath)] {
 		t.Fatal("old (non-newest) fully-read file should be marked done")
 	}
-	if done[newPath] {
+	if done[filepath.Base(newPath)] {
 		t.Fatal("newest file must never be marked done -- it can still grow")
 	}
 	if len(events) != 2 {
@@ -200,5 +200,74 @@ func TestPollOnce_OldFileMarkedDoneAndNeverRereadEvenIfDeleted(t *testing.T) {
 	pollOnce(ctx, dir, store, done, onEvent)
 	if len(events) != 2 {
 		t.Fatalf("expected no new events after old file removal, got %d total", len(events))
+	}
+}
+
+func TestListPerkLogs_FindsBothFlatAndArchivedFiles(t *testing.T) {
+	dir := t.TempDir()
+	logsDir := filepath.Join(dir, "Logs")
+	archivedDir := filepath.Join(logsDir, "logs_2026-08-06")
+	if err := os.MkdirAll(archivedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The currently-running session's file sits flat in Logs/ (PZ hasn't
+	// archived it yet -- that only happens on the *next* server start).
+	flatPath := filepath.Join(logsDir, "2026-08-06_10-00_PerkLog.txt")
+	archivedPath := filepath.Join(archivedDir, "2026-08-06_08-00_PerkLog.txt")
+	if err := os.WriteFile(flatPath, []byte(loginLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archivedPath, []byte(loginLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	files := listPerkLogs(dir)
+	if len(files) != 2 {
+		t.Fatalf("expected both the flat (live) and archived file to be found, got %d: %v", len(files), files)
+	}
+	if filepath.Base(files[0]) != "2026-08-06_08-00_PerkLog.txt" || filepath.Base(files[1]) != "2026-08-06_10-00_PerkLog.txt" {
+		t.Fatalf("expected chronological order by basename regardless of location, got %v", files)
+	}
+}
+
+func TestPollOnce_CheckpointSurvivesArchiveMove(t *testing.T) {
+	dir := t.TempDir()
+	logsDir := filepath.Join(dir, "Logs")
+	if err := os.MkdirAll(logsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	name := "2026-08-06_08-04_PerkLog.txt"
+	flatPath := filepath.Join(logsDir, name)
+	if err := os.WriteFile(flatPath, []byte(loginLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	store := newFakeStore()
+	var events []*perkEvent
+	onEvent := func(ev *perkEvent) { events = append(events, ev); dispatch(ctx, store, ev) }
+
+	// First poll: the session is still running, file is flat -- gets read in full.
+	pollOnce(ctx, dir, store, make(map[string]bool), onEvent)
+	if store.logins != 1 {
+		t.Fatalf("expected 1 login from the flat file, got %d", store.logins)
+	}
+
+	// Simulate PZ archiving it on the next server start: same basename,
+	// moved under Logs/logs_YYYY-MM-DD/.
+	archivedDir := filepath.Join(logsDir, "logs_2026-08-06")
+	if err := os.MkdirAll(archivedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(flatPath, filepath.Join(archivedDir, name)); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh poll (fresh done map, as if the exporter just restarted)
+	// must NOT re-process the login line now that the file lives at a
+	// different path -- only the basename-keyed checkpoint should matter.
+	pollOnce(ctx, dir, store, make(map[string]bool), onEvent)
+	if store.logins != 1 {
+		t.Fatalf("checkpoint should have survived the archive move, got logins=%d (content was re-processed)", store.logins)
 	}
 }
