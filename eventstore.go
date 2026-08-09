@@ -16,6 +16,14 @@ type eventStore interface {
 	handleLevelChanged(ctx context.Context, ev *perkEvent)
 	handleSkills(ctx context.Context, ev *perkEvent)
 
+	// handleExporterEvent persists a parsed ExporterLog.txt line (kill,
+	// movement_distance, driving_distance, enter_vehicle, exit_vehicle,
+	// eat, drink, pill, read, and any future stat the Lua mod adds) into
+	// the same generic events table PerkLog events use -- see
+	// exporterlog.go for parsing and schema_postgres.sql's events
+	// comment for the table's rationale.
+	handleExporterEvent(ctx context.Context, ev *exporterEvent)
+
 	// getFileOffset/setFileOffset track how far into each PerkLog.txt file
 	// has been read, keyed by absolute path. This is what makes history
 	// gap-free across exporter restarts (including the very first run,

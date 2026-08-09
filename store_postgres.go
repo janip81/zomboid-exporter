@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"log/slog"
 	"time"
 
@@ -19,10 +20,11 @@ var schemaSQL string
 // the right character row without a query on every line.
 type pgStore struct {
 	pool                *pgxpool.Pool
+	serverName          string
 	activeCharBySteamID map[string]int64
 }
 
-func newPgStore(ctx context.Context, dsn string) (*pgStore, error) {
+func newPgStore(ctx context.Context, dsn, serverName string) (*pgStore, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, err
@@ -35,12 +37,38 @@ func newPgStore(ctx context.Context, dsn string) (*pgStore, error) {
 		pool.Close()
 		return nil, err
 	}
-	s := &pgStore{pool: pool, activeCharBySteamID: make(map[string]int64)}
+	s := &pgStore{pool: pool, serverName: serverName, activeCharBySteamID: make(map[string]int64)}
+	if err := s.migrateServerColumn(ctx); err != nil {
+		pool.Close()
+		return nil, err
+	}
 	if err := s.loadActiveCharacters(ctx); err != nil {
 		pool.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// migrateServerColumn backfills the server column on databases that
+// predate it -- CREATE TABLE IF NOT EXISTS above is a no-op against an
+// already-existing table, so this covers upgrading an existing
+// deployment in place. Every row gets this instance's --server-name;
+// harmless no-op on a fresh database (schemaSQL already created the
+// column NOT NULL, so ADD COLUMN IF NOT EXISTS and the UPDATE both
+// affect zero rows).
+func (s *pgStore) migrateServerColumn(ctx context.Context) error {
+	for _, tbl := range []string{"players", "characters", "events"} {
+		if _, err := s.pool.Exec(ctx, `ALTER TABLE `+tbl+` ADD COLUMN IF NOT EXISTS server TEXT`); err != nil {
+			return err
+		}
+		if _, err := s.pool.Exec(ctx, `UPDATE `+tbl+` SET server = $1 WHERE server IS NULL`, s.serverName); err != nil {
+			return err
+		}
+		if _, err := s.pool.Exec(ctx, `ALTER TABLE `+tbl+` ALTER COLUMN server SET NOT NULL`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *pgStore) Close() {
@@ -66,13 +94,14 @@ func (s *pgStore) loadActiveCharacters(ctx context.Context) error {
 
 func (s *pgStore) upsertPlayer(ctx context.Context, steamID, username string, seenAt time.Time) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO players (steam_id, last_username, first_seen, last_seen)
-		VALUES ($1, $2, $3, $3)
+		INSERT INTO players (steam_id, last_username, first_seen, last_seen, server)
+		VALUES ($1, $2, $3, $3, $4)
 		ON CONFLICT (steam_id) DO UPDATE
 		SET last_username = EXCLUDED.last_username,
-		    last_seen = EXCLUDED.last_seen
+		    last_seen = EXCLUDED.last_seen,
+		    server = EXCLUDED.server
 		WHERE players.last_seen < EXCLUDED.last_seen
-	`, steamID, username, seenAt)
+	`, steamID, username, seenAt, s.serverName)
 	return err
 }
 
@@ -104,10 +133,10 @@ func (s *pgStore) activeCharacter(ctx context.Context, steamID string, at time.T
 		return 0, err
 	}
 	if err := s.pool.QueryRow(ctx, `
-		INSERT INTO characters (steam_id, character_number, created_at, is_alive)
-		VALUES ($1, $2, $3, TRUE)
+		INSERT INTO characters (steam_id, character_number, created_at, is_alive, server)
+		VALUES ($1, $2, $3, TRUE, $4)
 		RETURNING id
-	`, steamID, nextNum, at).Scan(&id); err != nil {
+	`, steamID, nextNum, at, s.serverName).Scan(&id); err != nil {
 		return 0, err
 	}
 	s.activeCharBySteamID[steamID] = id
@@ -125,9 +154,9 @@ func (s *pgStore) handleLogin(ctx context.Context, ev *perkEvent) {
 		return
 	}
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details)
-		VALUES ('login', $1, $2, $3, jsonb_build_object('hours_survived', $4::float8, 'x', $5::int, 'y', $6::int, 'z', $7::int))
-	`, ev.SteamID, charID, ev.Timestamp, ev.HoursSurvived, ev.X, ev.Y, ev.Z)
+		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+		VALUES ('login', $1, $2, $3, jsonb_build_object('hours_survived', $4::float8, 'x', $5::int, 'y', $6::int, 'z', $7::int), $8)
+	`, ev.SteamID, charID, ev.Timestamp, ev.HoursSurvived, ev.X, ev.Y, ev.Z, s.serverName)
 	if err != nil {
 		slog.Warn("insert login event failed", "err", err)
 	}
@@ -147,19 +176,19 @@ func (s *pgStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {
 	}
 	var charID int64
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO characters (steam_id, character_number, created_at, is_alive)
-		VALUES ($1, $2, $3, TRUE)
+		INSERT INTO characters (steam_id, character_number, created_at, is_alive, server)
+		VALUES ($1, $2, $3, TRUE, $4)
 		RETURNING id
-	`, ev.SteamID, nextNum, ev.Timestamp).Scan(&charID)
+	`, ev.SteamID, nextNum, ev.Timestamp, s.serverName).Scan(&charID)
 	if err != nil {
 		slog.Warn("insert character failed", "err", err)
 		return
 	}
 	s.activeCharBySteamID[ev.SteamID] = charID
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details)
-		VALUES ('created_player', $1, $2, $3, '{}'::jsonb)
-	`, ev.SteamID, charID, ev.Timestamp)
+		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+		VALUES ('created_player', $1, $2, $3, '{}'::jsonb, $4)
+	`, ev.SteamID, charID, ev.Timestamp, s.serverName)
 	if err != nil {
 		slog.Warn("insert created_player event failed", "err", err)
 	}
@@ -185,9 +214,9 @@ func (s *pgStore) handleDied(ctx context.Context, ev *perkEvent) {
 	}
 	delete(s.activeCharBySteamID, ev.SteamID)
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details)
-		VALUES ('died', $1, $2, $3, jsonb_build_object('hours_survived', $4::float8, 'x', $5::int, 'y', $6::int, 'z', $7::int))
-	`, ev.SteamID, charID, ev.Timestamp, ev.HoursSurvived, ev.X, ev.Y, ev.Z)
+		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+		VALUES ('died', $1, $2, $3, jsonb_build_object('hours_survived', $4::float8, 'x', $5::int, 'y', $6::int, 'z', $7::int), $8)
+	`, ev.SteamID, charID, ev.Timestamp, ev.HoursSurvived, ev.X, ev.Y, ev.Z, s.serverName)
 	if err != nil {
 		slog.Warn("insert died event failed", "err", err)
 	}
@@ -207,9 +236,9 @@ func (s *pgStore) handleLevelChanged(ctx context.Context, ev *perkEvent) {
 		slog.Warn("insert skill_snapshot (levelup) failed", "err", err)
 	}
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details)
-		VALUES ('level_changed', $1, $2, $3, jsonb_build_object('skill', $4::text, 'level', $5::int))
-	`, ev.SteamID, charID, ev.Timestamp, ev.SkillName, ev.SkillLevel)
+		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+		VALUES ('level_changed', $1, $2, $3, jsonb_build_object('skill', $4::text, 'level', $5::int), $6)
+	`, ev.SteamID, charID, ev.Timestamp, ev.SkillName, ev.SkillLevel, s.serverName)
 	if err != nil {
 		slog.Warn("insert level_changed event failed", "err", err)
 	}
@@ -231,6 +260,37 @@ func (s *pgStore) handleSkills(ctx context.Context, ev *perkEvent) {
 	br := s.pool.SendBatch(ctx, &batch)
 	if err := br.Close(); err != nil {
 		slog.Warn("insert skill_snapshots (dump) failed", "err", err)
+	}
+}
+
+// handleExporterEvent persists a parsed ExporterLog.txt line generically:
+// event_type is whatever the Lua mod's "type" field says, and the full
+// decoded payload is kept verbatim in details -- see exporterlog.go.
+func (s *pgStore) handleExporterEvent(ctx context.Context, ev *exporterEvent) {
+	if ev.SteamID == "" {
+		slog.Warn("dropping ExporterLog event with no steamId", "type", ev.EventType, "username", ev.Username)
+		return
+	}
+	if err := s.upsertPlayer(ctx, ev.SteamID, ev.Username, ev.Timestamp); err != nil {
+		slog.Warn("upsertPlayer failed", "err", err)
+		return
+	}
+	charID, err := s.activeCharacter(ctx, ev.SteamID, ev.Timestamp)
+	if err != nil {
+		slog.Warn("activeCharacter failed", "err", err)
+		return
+	}
+	details, err := json.Marshal(ev.Fields)
+	if err != nil {
+		slog.Warn("marshal ExporterLog details failed", "type", ev.EventType, "err", err)
+		return
+	}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+	`, ev.EventType, ev.SteamID, charID, ev.Timestamp, string(details), s.serverName)
+	if err != nil {
+		slog.Warn("insert exporter event failed", "type", ev.EventType, "err", err)
 	}
 }
 

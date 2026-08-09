@@ -6,11 +6,15 @@
 -- to run every boot). Timestamps are stored as ISO-8601 UTC TEXT, which
 -- sorts correctly lexicographically.
 
+-- server labels every row with the --server-name this exporter instance
+-- was started with -- see schema_postgres.sql's players comment for
+-- the full rationale (label-only, not a uniqueness key).
 CREATE TABLE IF NOT EXISTS players (
     steam_id      TEXT PRIMARY KEY,
     last_username TEXT NOT NULL,
     first_seen    TEXT NOT NULL,
-    last_seen     TEXT NOT NULL
+    last_seen     TEXT NOT NULL,
+    server        TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS characters (
@@ -24,6 +28,7 @@ CREATE TABLE IF NOT EXISTS characters (
     death_y                 INTEGER,
     death_z                 INTEGER,
     is_alive                INTEGER NOT NULL DEFAULT 1,
+    server                  TEXT NOT NULL DEFAULT '',
     UNIQUE (steam_id, character_number)
 );
 
@@ -41,13 +46,20 @@ CREATE TABLE IF NOT EXISTS skill_snapshots (
 CREATE INDEX IF NOT EXISTS idx_skill_snapshots_character
     ON skill_snapshots (character_id, skill_name, captured_at DESC);
 
+-- Generic event log: both PerkLog.txt (login, died, created_player,
+-- level_changed) and ExporterLog.txt (kill, movement_distance,
+-- driving_distance, enter_vehicle, exit_vehicle, eat, drink, pill,
+-- read, and any future Lua-mod-added stat) land here under their own
+-- event_type, with type-specific data in details. A new ExporterLog
+-- stat never needs a schema change -- see handleExporterEvent.
 CREATE TABLE IF NOT EXISTS events (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_type   TEXT NOT NULL, -- login, died, created_player, level_changed
+    event_type   TEXT NOT NULL,
     steam_id     TEXT NOT NULL REFERENCES players(steam_id),
     character_id INTEGER REFERENCES characters(id),
     occurred_at  TEXT NOT NULL,
-    details      TEXT NOT NULL DEFAULT '{}' -- JSON, as a plain string (no native JSON type in SQLite)
+    details      TEXT NOT NULL DEFAULT '{}', -- JSON, as a plain string (no native JSON type in SQLite)
+    server       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_type_time ON events (event_type, occurred_at DESC);

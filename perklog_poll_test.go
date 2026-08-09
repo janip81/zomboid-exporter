@@ -10,21 +10,23 @@ import (
 // fakeStore is an in-memory eventStore for testing the poll/offset logic
 // in isolation, without a real database.
 type fakeStore struct {
-	offsets map[string]int64
-	logins  int
-	skills  int
+	offsets        map[string]int64
+	logins         int
+	skills         int
+	exporterEvents int
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{offsets: make(map[string]int64)}
 }
 
-func (f *fakeStore) handleLogin(ctx context.Context, ev *perkEvent)         { f.logins++ }
-func (f *fakeStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {}
-func (f *fakeStore) handleDied(ctx context.Context, ev *perkEvent)          {}
-func (f *fakeStore) handleLevelChanged(ctx context.Context, ev *perkEvent)  {}
-func (f *fakeStore) handleSkills(ctx context.Context, ev *perkEvent)        { f.skills++ }
-func (f *fakeStore) Close()                                                 {}
+func (f *fakeStore) handleLogin(ctx context.Context, ev *perkEvent)             { f.logins++ }
+func (f *fakeStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent)     {}
+func (f *fakeStore) handleDied(ctx context.Context, ev *perkEvent)              {}
+func (f *fakeStore) handleLevelChanged(ctx context.Context, ev *perkEvent)      {}
+func (f *fakeStore) handleSkills(ctx context.Context, ev *perkEvent)            { f.skills++ }
+func (f *fakeStore) handleExporterEvent(ctx context.Context, ev *exporterEvent) { f.exporterEvents++ }
+func (f *fakeStore) Close()                                                     {}
 
 func (f *fakeStore) getFileOffset(ctx context.Context, path string) (int64, error) {
 	return f.offsets[path], nil

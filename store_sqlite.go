@@ -20,10 +20,11 @@ var schemaSQLite string
 // native BOOLEAN -- see schema_sqlite.sql for the details).
 type sqliteStore struct {
 	db                  *sql.DB
+	serverName          string
 	activeCharBySteamID map[string]int64
 }
 
-func newSQLiteStore(ctx context.Context, path string) (*sqliteStore, error) {
+func newSQLiteStore(ctx context.Context, path, serverName string) (*sqliteStore, error) {
 	// _pragma params apply on every new connection modernc.org/sqlite opens.
 	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)")
 	if err != nil {
@@ -42,12 +43,62 @@ func newSQLiteStore(ctx context.Context, path string) (*sqliteStore, error) {
 		db.Close()
 		return nil, err
 	}
-	s := &sqliteStore{db: db, activeCharBySteamID: make(map[string]int64)}
+	s := &sqliteStore{db: db, serverName: serverName, activeCharBySteamID: make(map[string]int64)}
+	if err := s.migrateServerColumn(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := s.loadActiveCharacters(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// migrateServerColumn backfills the server column on databases that
+// predate it -- see pgStore.migrateServerColumn's comment for the full
+// rationale. SQLite has no "ADD COLUMN IF NOT EXISTS" or "ALTER COLUMN
+// SET NOT NULL", so existence is checked via PRAGMA table_info first and
+// the column stays nullable-in-principle (schemaSQL already defaults it
+// to ” for fresh installs; the Go code always supplies it going
+// forward).
+func (s *sqliteStore) migrateServerColumn(ctx context.Context) error {
+	for _, tbl := range []string{"players", "characters", "events"} {
+		has, err := s.hasColumn(ctx, tbl, "server")
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := s.db.ExecContext(ctx, `ALTER TABLE `+tbl+` ADD COLUMN server TEXT NOT NULL DEFAULT ''`); err != nil {
+				return err
+			}
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE `+tbl+` SET server = ? WHERE server = ''`, s.serverName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *sqliteStore) hasColumn(ctx context.Context, table, column string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func (s *sqliteStore) Close() {
@@ -77,13 +128,14 @@ func (s *sqliteStore) loadActiveCharacters(ctx context.Context) error {
 
 func (s *sqliteStore) upsertPlayer(ctx context.Context, steamID, username string, seenAt time.Time) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO players (steam_id, last_username, first_seen, last_seen)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO players (steam_id, last_username, first_seen, last_seen, server)
+		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT (steam_id) DO UPDATE
 		SET last_username = excluded.last_username,
-		    last_seen = excluded.last_seen
+		    last_seen = excluded.last_seen,
+		    server = excluded.server
 		WHERE players.last_seen < excluded.last_seen
-	`, steamID, username, iso(seenAt), iso(seenAt))
+	`, steamID, username, iso(seenAt), iso(seenAt), s.serverName)
 	return err
 }
 
@@ -109,9 +161,9 @@ func (s *sqliteStore) activeCharacter(ctx context.Context, steamID string, at ti
 		return 0, err
 	}
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO characters (steam_id, character_number, created_at, is_alive)
-		VALUES (?, ?, ?, 1)
-	`, steamID, nextNum, iso(at))
+		INSERT INTO characters (steam_id, character_number, created_at, is_alive, server)
+		VALUES (?, ?, ?, 1, ?)
+	`, steamID, nextNum, iso(at), s.serverName)
 	if err != nil {
 		return 0, err
 	}
@@ -143,9 +195,9 @@ func (s *sqliteStore) handleLogin(ctx context.Context, ev *perkEvent) {
 	}
 	details := detailsJSON(map[string]any{"hours_survived": ev.HoursSurvived, "x": ev.X, "y": ev.Y, "z": ev.Z})
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details)
-		VALUES ('login', ?, ?, ?, ?)
-	`, ev.SteamID, charID, iso(ev.Timestamp), details)
+		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+		VALUES ('login', ?, ?, ?, ?, ?)
+	`, ev.SteamID, charID, iso(ev.Timestamp), details, s.serverName)
 	if err != nil {
 		slog.Warn("insert login event failed", "err", err)
 	}
@@ -164,9 +216,9 @@ func (s *sqliteStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {
 		return
 	}
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO characters (steam_id, character_number, created_at, is_alive)
-		VALUES (?, ?, ?, 1)
-	`, ev.SteamID, nextNum, iso(ev.Timestamp))
+		INSERT INTO characters (steam_id, character_number, created_at, is_alive, server)
+		VALUES (?, ?, ?, 1, ?)
+	`, ev.SteamID, nextNum, iso(ev.Timestamp), s.serverName)
 	if err != nil {
 		slog.Warn("insert character failed", "err", err)
 		return
@@ -178,9 +230,9 @@ func (s *sqliteStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {
 	}
 	s.activeCharBySteamID[ev.SteamID] = charID
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details)
-		VALUES ('created_player', ?, ?, ?, '{}')
-	`, ev.SteamID, charID, iso(ev.Timestamp))
+		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+		VALUES ('created_player', ?, ?, ?, '{}', ?)
+	`, ev.SteamID, charID, iso(ev.Timestamp), s.serverName)
 	if err != nil {
 		slog.Warn("insert created_player event failed", "err", err)
 	}
@@ -207,9 +259,9 @@ func (s *sqliteStore) handleDied(ctx context.Context, ev *perkEvent) {
 	delete(s.activeCharBySteamID, ev.SteamID)
 	details := detailsJSON(map[string]any{"hours_survived": ev.HoursSurvived, "x": ev.X, "y": ev.Y, "z": ev.Z})
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details)
-		VALUES ('died', ?, ?, ?, ?)
-	`, ev.SteamID, charID, iso(ev.Timestamp), details)
+		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+		VALUES ('died', ?, ?, ?, ?, ?)
+	`, ev.SteamID, charID, iso(ev.Timestamp), details, s.serverName)
 	if err != nil {
 		slog.Warn("insert died event failed", "err", err)
 	}
@@ -230,9 +282,9 @@ func (s *sqliteStore) handleLevelChanged(ctx context.Context, ev *perkEvent) {
 	}
 	details := detailsJSON(map[string]any{"skill": ev.SkillName, "level": ev.SkillLevel})
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details)
-		VALUES ('level_changed', ?, ?, ?, ?)
-	`, ev.SteamID, charID, iso(ev.Timestamp), details)
+		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+		VALUES ('level_changed', ?, ?, ?, ?, ?)
+	`, ev.SteamID, charID, iso(ev.Timestamp), details, s.serverName)
 	if err != nil {
 		slog.Warn("insert level_changed event failed", "err", err)
 	}
@@ -267,6 +319,33 @@ func (s *sqliteStore) handleSkills(ctx context.Context, ev *perkEvent) {
 	stmt.Close()
 	if err := tx.Commit(); err != nil {
 		slog.Warn("commit skill_snapshots (dump) failed", "err", err)
+	}
+}
+
+// handleExporterEvent persists a parsed ExporterLog.txt line generically:
+// event_type is whatever the Lua mod's "type" field says, and the full
+// decoded payload is kept verbatim in details -- see exporterlog.go.
+func (s *sqliteStore) handleExporterEvent(ctx context.Context, ev *exporterEvent) {
+	if ev.SteamID == "" {
+		slog.Warn("dropping ExporterLog event with no steamId", "type", ev.EventType, "username", ev.Username)
+		return
+	}
+	if err := s.upsertPlayer(ctx, ev.SteamID, ev.Username, ev.Timestamp); err != nil {
+		slog.Warn("upsertPlayer failed", "err", err)
+		return
+	}
+	charID, err := s.activeCharacter(ctx, ev.SteamID, ev.Timestamp)
+	if err != nil {
+		slog.Warn("activeCharacter failed", "err", err)
+		return
+	}
+	details := detailsJSON(ev.Fields)
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, ev.EventType, ev.SteamID, charID, iso(ev.Timestamp), details, s.serverName)
+	if err != nil {
+		slog.Warn("insert exporter event failed", "type", ev.EventType, "err", err)
 	}
 }
 

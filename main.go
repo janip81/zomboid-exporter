@@ -277,7 +277,7 @@ func main() {
 	var db eventStore
 	switch {
 	case *dbDSN != "":
-		pg, err := newPgStore(ctx, *dbDSN)
+		pg, err := newPgStore(ctx, *dbDSN, *serverName)
 		if err != nil {
 			// Deliberately non-fatal: a DB outage shouldn't take down
 			// Prometheus scraping, which is the exporter's primary job.
@@ -288,7 +288,7 @@ func main() {
 			slog.Info("connected to Postgres, event history + leaderboards enabled")
 		}
 	case *sqlitePath != "":
-		sq, err := newSQLiteStore(ctx, *sqlitePath)
+		sq, err := newSQLiteStore(ctx, *sqlitePath, *serverName)
 		if err != nil {
 			slog.Error("failed to open SQLite database -- continuing without persistence", "path", *sqlitePath, "err", err)
 		} else {
@@ -301,6 +301,7 @@ func main() {
 	}
 
 	go runPerkLogPipeline(ctx, *dataPath, *serverName, perkMetrics, db)
+	go runExporterLogPipeline(ctx, *dataPath, db)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
