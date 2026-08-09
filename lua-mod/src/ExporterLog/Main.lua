@@ -42,9 +42,16 @@
 -- own copy of stats the server already tracks. ExporterLog.Runtime's
 -- mode detection is a second, belt-and-suspenders layer on top of
 -- this file placement, not a substitute for it.
+-- Bumped by hand on every meaningful change -- the only way to tell
+-- which code is actually running on a given server without diffing
+-- files, since Steam Workshop itself has no version field, only free-
+-- text change notes on the item page.
+ExporterLog = ExporterLog or {}
+ExporterLog.VERSION = "1.0.0"
+
 Events.OnGameStart.Add(function()
     local Runtime = ExporterLog and ExporterLog.Runtime
     if Runtime then
-        print(Runtime.logPrefix() .. ": ExporterLog loaded, mode=" .. Runtime.getMode())
+        print(Runtime.logPrefix() .. ": ExporterLog v" .. ExporterLog.VERSION .. " loaded, mode=" .. Runtime.getMode())
     end
 end)
