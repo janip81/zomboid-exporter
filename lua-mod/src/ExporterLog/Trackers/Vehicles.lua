@@ -85,6 +85,7 @@ local function onEveryMinuteDriving()
                     vehicle = vehicle,
                     previousSquare = currentSquare,
                     pendingKm = 0,
+                    maxSpeedKmh = 0,
                 }
             elseif currentSquare then
                 local rawDist = state.previousSquare:DistToProper(currentSquare)
@@ -94,6 +95,28 @@ local function onEveryMinuteDriving()
                 end
 
                 state.previousSquare = currentSquare
+
+                -- Max speed: only emit on a new record for THIS driving
+                -- session (state.maxSpeedKmh resets to 0 whenever the
+                -- vehicle changes, same as pendingKm above) -- an event-
+                -- volume optimization, not the actual leaderboard. The
+                -- real "fastest ever" / "fastest per vehicle type"
+                -- numbers come from MAX()/MAX()-GROUP-BY over every
+                -- max_speed event in Postgres, same architecture as
+                -- driving_distance -- the vehicle field on every event
+                -- is what makes the per-vehicle-type breakdown free.
+                local okSpeed, speedKmh = pcall(function() return vehicle:getCurrentSpeedKmHour() end)
+                if okSpeed and speedKmh and speedKmh > state.maxSpeedKmh then
+                    state.maxSpeedKmh = speedKmh
+                    local okType, scriptName = pcall(function() return vehicle:getScriptName() end)
+                    ExporterLog.Emit.event({
+                        type = "max_speed",
+                        steamId = ExporterLog.Utils.getPlayerSteamID(p),
+                        username = username,
+                        kmh = ExporterLog.Utils.round2(speedKmh),
+                        vehicle = (okType and scriptName) or "?",
+                    })
+                end
 
                 if state.pendingKm >= 0.1 then
                     -- Per-car-TYPE stats (not per physical instance):
