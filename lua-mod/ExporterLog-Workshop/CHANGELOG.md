@@ -1,5 +1,14 @@
 # ExporterLog changelog
 
+## Update 2026-08-09 (3) — v1.1.0
+
+### New tracked stats
+- **Medical treatment** — bandaging, disinfecting, stitching, and splinting, whether treating yourself or another player. Records which body part, which item was used, and (when treating someone else) who the patient was.
+- **Injuries** — bites, scratches, lacerations, burns, and fractures, per body part.
+
+### Internal
+- `ExporterLog.VERSION` now printed at boot (this update is v1.1.0) — Steam Workshop has no version field of its own, so this is the only way to confirm which code a given server is actually running.
+
 ## Update 2026-08-09 (2)
 
 ### Fixes
