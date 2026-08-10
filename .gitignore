@@ -6,6 +6,7 @@ WORKLOG.md
 
 # Go build artifacts
 /zomboid-exporter
+/discord-bot/zomboid-discord-bot
 *.test
 
 # Local state

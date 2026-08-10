@@ -192,12 +192,15 @@ func pollExporterLogsWithHistory(ctx context.Context, dataPath string, db eventS
 }
 
 // runExporterLogPipeline processes ExporterLog.txt for the lifetime of
-// ctx. A no-op when db is nil -- see pollExporterLogsWithHistory.
-func runExporterLogPipeline(ctx context.Context, dataPath string, db eventStore) {
+// ctx. A no-op when db is nil -- see pollExporterLogsWithHistory. pub may
+// be nil (MQTT publishing disabled); publishing is best-effort and never
+// gates or delays the Postgres/SQLite write.
+func runExporterLogPipeline(ctx context.Context, dataPath string, db eventStore, pub *mqttPublisher) {
 	if db == nil {
 		return
 	}
 	pollExporterLogsWithHistory(ctx, dataPath, db, func(ev *exporterEvent) {
 		db.handleExporterEvent(ctx, ev)
+		pub.publish(ev)
 	})
 }

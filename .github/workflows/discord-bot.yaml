@@ -1,0 +1,66 @@
+name: discord-bot
+
+on:
+  push:
+    branches: [main]
+    tags: ["bot-v*"]
+    paths: &code-paths
+      - "discord-bot/**"
+      - ".github/workflows/discord-bot.yaml"
+  pull_request:
+    paths: *code-paths
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/zomboid-discord-bot
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        working-directory: discord-bot
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: discord-bot/go.mod
+          cache-dependency-path: discord-bot/go.sum
+
+      - name: Test
+        run: go test ./...
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}},prefix=bot-v
+            type=semver,pattern={{major}}.{{minor}},prefix=bot-v
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: discord-bot
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

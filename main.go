@@ -260,6 +260,8 @@ func main() {
 	stale := flag.Duration("stale-threshold", 120*time.Second, "Status file age above which server is considered stale/down")
 	dbDSN := flag.String("db-dsn", "", "Optional external Postgres DSN (e.g. postgres://user:pass@host:5432/dbname). Takes priority over --sqlite-path if both are set.")
 	sqlitePath := flag.String("sqlite-path", "", "Optional path to a SQLite database file (created if missing) -- zero-external-dependency alternative to --db-dsn. Must point at a writable location (the default --data-path mount is typically read-only). If neither this nor --db-dsn is set, PerkLog events still drive Prometheus counters but are not persisted -- player/death/skill history and leaderboards need one of them.")
+	mqttBroker := flag.String("mqtt-broker", "", "Optional MQTT broker URL (e.g. tcp://mosquitto.mqtt.svc.cluster.local:1883) for live ExporterLog event publishing. Publishes each event to zomboid/<server-name>/<event-type>. If unset, MQTT publishing is disabled -- this is purely additive to Postgres/SQLite persistence.")
+	mqttUsername := flag.String("mqtt-username", "", "MQTT broker username, if auth is required (password read from MQTT_PASSWORD env var, never a flag)")
 	flag.Parse()
 
 	if *serverName == "" {
@@ -300,8 +302,21 @@ func main() {
 		slog.Info("no --db-dsn or --sqlite-path set, running Prometheus-only (no player/death/skill history)")
 	}
 
+	var mqttPub *mqttPublisher
+	if *mqttBroker != "" {
+		var err error
+		mqttPub, err = newMQTTPublisher(*mqttBroker, "zomboid/"+*serverName, *mqttUsername, os.Getenv("MQTT_PASSWORD"))
+		if err != nil {
+			slog.Error("failed to connect to MQTT broker -- continuing without live event publishing", "broker", *mqttBroker, "err", err)
+			mqttPub = nil
+		} else {
+			defer mqttPub.close()
+			slog.Info("connected to MQTT broker, publishing live events", "broker", *mqttBroker, "topicPrefix", "zomboid/"+*serverName)
+		}
+	}
+
 	go runPerkLogPipeline(ctx, *dataPath, *serverName, perkMetrics, db)
-	go runExporterLogPipeline(ctx, *dataPath, db)
+	go runExporterLogPipeline(ctx, *dataPath, db, mqttPub)
 	go runConnectionsPipeline(ctx, *dataPath, db)
 
 	mux := http.NewServeMux()
