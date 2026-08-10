@@ -46,20 +46,36 @@ local tickCount = HEARTBEAT_TICKS -- fire on the first real tick, not after a fu
 -- [username] = { state = "indoor"|"outdoor"|"vehicle", streakStartWorldAgeHours = number|nil }
 local envState = {}
 
+-- existence-check-before-call discipline the isRead() debugger freeze
+-- taught (see Reading.lua's identical helper): a plain pcall alone isn't
+-- enough, since PZ's Lua debugger's "break on error" pauses the WHOLE
+-- GAME the instant a bad method call throws, even one a pcall would
+-- otherwise safely catch a moment later. safeCall() checks obj[methodName]
+-- is actually a function BEFORE ever calling it -- a plain table lookup,
+-- which never errors in Lua even for a nonexistent key.
+local function safeCall(obj, methodName, ...)
+    if not obj then return false, nil end
+    local method = obj[methodName]
+    if type(method) ~= "function" then return false, nil end
+    local ok, v = pcall(method, obj, ...)
+    if ok then return true, v end
+    return false, nil
+end
+
 -- Duration is measured in IN-GAME hours (gameTime:getWorldAgeHours()),
 -- same confirmed-real call every other tracker here uses.
 local function currentWorldAgeHours()
-    local ok, gameTime = pcall(function() return getGameTime() end)
-    if not ok or not gameTime then return nil end
-    local ok2, hours = pcall(function() return gameTime:getWorldAgeHours() end)
-    if ok2 then return hours end
+    local okTime, gameTime = pcall(function() return getGameTime() end)
+    if not okTime or not gameTime then return nil end
+    local ok, hours = safeCall(gameTime, "getWorldAgeHours")
+    if ok then return hours end
     return nil
 end
 
 local function classifyState(p)
-    local okVehicle, vehicle = pcall(function() return p:getVehicle() end)
+    local okVehicle, vehicle = safeCall(p, "getVehicle")
     if okVehicle and vehicle then return "vehicle" end
-    local okOutside, isOutside = pcall(function() return p:isOutside() end)
+    local okOutside, isOutside = safeCall(p, "isOutside")
     if not okOutside then return nil end
     if isOutside then return "outdoor" else return "indoor" end
 end
