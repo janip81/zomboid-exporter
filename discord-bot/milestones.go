@@ -15,18 +15,45 @@ type milestone struct {
 	Message string
 }
 
+// seedMilestone is one row for seedMilestones -- kept as a plain struct
+// (not loaded from Postgres) since these are starter definitions checked
+// into git, not runtime data; day-to-day milestone tuning happens by
+// editing the discordbot_milestones table directly (or, later, a web UI),
+// not by redeploying the bot.
+type seedMilestone struct {
+	Name      string
+	EventType string
+	Field     string
+	Threshold float64
+	Tier      string
+	Message   string
+}
+
 // seedMilestones inserts starter milestone definitions if they don't
 // already exist (idempotent -- ON CONFLICT against the unique
-// (event_type, field, threshold) constraint). Starting with just one to
-// validate the schema/evaluation design before building out the rest --
-// see ideas/milestones.md for the full candidate list.
+// (event_type, field, threshold) constraint). See ideas/milestones.md
+// for the full candidate list this is drawn from.
 func seedMilestones(ctx context.Context, db *pgxpool.Pool) error {
-	_, err := db.Exec(ctx, `
-		INSERT INTO discordbot_milestones (name, event_type, field, threshold, tier, message)
-		VALUES ('First Kill', 'kill', 'zombieKills', 1, 'common', 'Subject has discovered violence. Promising.')
-		ON CONFLICT (event_type, field, threshold) DO NOTHING
-	`)
-	return err
+	seeds := []seedMilestone{
+		{"First Kill", "kill", "zombieKills", 1, "common", "Subject has discovered violence. Promising."},
+		{"6h Outdoors Straight", "outdoor_streak", "hours", 6, "common", "Extended environmental exposure recorded."},
+		{"24h Outdoors Straight", "outdoor_streak", "hours", 24, "uncommon", "Subject appears to have misplaced the concept of shelter."},
+		{"72h Outdoors Straight", "outdoor_streak", "hours", 72, "rare", "Walls remain available. The subject remains uninterested."},
+		{"6h Indoors Straight", "indoor_streak", "hours", 6, "common", "Field activity has temporarily ceased."},
+		{"24h Indoors Straight", "indoor_streak", "hours", 24, "common", "Subject has discovered the safest strategy: refusing to participate."},
+		{"72h Indoors Straight", "indoor_streak", "hours", 72, "uncommon", "The Curator would like to remind the subject that there is, allegedly, an outside."},
+		{"7 Days Indoors Straight", "indoor_streak", "hours", 168, "rare", "At this point I am classifying the building as part of the subject."},
+	}
+	for _, s := range seeds {
+		if _, err := db.Exec(ctx, `
+			INSERT INTO discordbot_milestones (name, event_type, field, threshold, tier, message)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (event_type, field, threshold) DO NOTHING
+		`, s.Name, s.EventType, s.Field, s.Threshold, s.Tier, s.Message); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkMilestones returns every enabled milestone for eventType whose
