@@ -54,6 +54,10 @@ func newSQLiteStore(ctx context.Context, path, serverName string) (*sqliteStore,
 		db.Close()
 		return nil, err
 	}
+	if err := s.migrateEventsSteamIDNullable(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := s.loadActiveCharacters(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -150,6 +154,88 @@ func (s *sqliteStore) migrateFileOffsetKeys(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// columnNotNull reports whether the given column is currently declared
+// NOT NULL, via the same PRAGMA table_info(...) query hasColumn uses.
+func (s *sqliteStore) columnNotNull(ctx context.Context, table, column string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return notNull != 0, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// migrateEventsSteamIDNullable rebuilds the events table without the
+// NOT NULL constraint on steam_id, for databases that predate
+// world_stats -- see pgStore.migrateEventsSteamIDNullable's comment for
+// the full rationale (a system-level event like world_stats has no
+// player attached). SQLite has no ALTER COLUMN at all, so this is the
+// standard SQLite pattern for changing a column constraint: create a
+// new table with the desired schema, copy every row across, drop the
+// old table, rename the new one into place. Skipped entirely (harmless
+// no-op) once steam_id is already nullable, so this never runs more
+// than once against a given database.
+func (s *sqliteStore) migrateEventsSteamIDNullable(ctx context.Context) error {
+	notNull, err := s.columnNotNull(ctx, "events", "steam_id")
+	if err != nil {
+		return err
+	}
+	if !notNull {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		CREATE TABLE events_new (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_type   TEXT NOT NULL,
+			steam_id     TEXT REFERENCES players(steam_id),
+			character_id INTEGER REFERENCES characters(id),
+			occurred_at  TEXT NOT NULL,
+			details      TEXT NOT NULL DEFAULT '{}',
+			server       TEXT NOT NULL DEFAULT ''
+		)
+	`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO events_new (id, event_type, steam_id, character_id, occurred_at, details, server)
+		SELECT id, event_type, steam_id, character_id, occurred_at, details, server FROM events
+	`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE events`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE events_new RENAME TO events`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_events_type_time ON events (event_type, occurred_at DESC)`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_events_steam_id ON events (steam_id, occurred_at DESC)`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *sqliteStore) Close() {
@@ -397,6 +483,21 @@ func (s *sqliteStore) canonicalSteamID(username, fallback string) string {
 // event_type is whatever the Lua mod's "type" field says, and the full
 // decoded payload is kept verbatim in details -- see exporterlog.go.
 func (s *sqliteStore) handleExporterEvent(ctx context.Context, ev *exporterEvent) {
+	details := detailsJSON(ev.Fields)
+
+	// Player-less system event (e.g. world_stats) -- see
+	// pgStore.handleExporterEvent's comment on the same check for the
+	// full rationale.
+	if ev.Username == "" && ev.SteamID == "" {
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+			VALUES (?, NULL, NULL, ?, ?, ?)
+		`, ev.EventType, iso(ev.Timestamp), details, s.serverName); err != nil {
+			slog.Warn("insert player-less exporter event failed", "type", ev.EventType, "err", err)
+		}
+		return
+	}
+
 	steamID := s.canonicalSteamID(ev.Username, ev.SteamID)
 	if steamID == "" {
 		slog.Warn("dropping ExporterLog event with no steamId", "type", ev.EventType, "username", ev.Username)
@@ -411,12 +512,10 @@ func (s *sqliteStore) handleExporterEvent(ctx context.Context, ev *exporterEvent
 		slog.Warn("activeCharacter failed", "err", err)
 		return
 	}
-	details := detailsJSON(ev.Fields)
-	_, err = s.db.ExecContext(ctx, `
+	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
 		VALUES (?, ?, ?, ?, ?, ?)
-	`, ev.EventType, steamID, charID, iso(ev.Timestamp), details, s.serverName)
-	if err != nil {
+	`, ev.EventType, steamID, charID, iso(ev.Timestamp), details, s.serverName); err != nil {
 		slog.Warn("insert exporter event failed", "type", ev.EventType, "err", err)
 	}
 }

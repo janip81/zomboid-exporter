@@ -33,6 +33,15 @@ func TestParseExporterLogLine(t *testing.T) {
 			},
 		},
 		{
+			name: "player-less system event (world_stats) has empty steamId AND username -- this exact combination is what handleExporterEvent's player-less branch checks for",
+			line: `[07-08-26 16:40:34.717] {"type":"world_stats","day":10,"month":6,"year":1993,"nightsSurvived":2}.`,
+			want: &exporterEvent{
+				EventType: "world_stats",
+				SteamID:   "",
+				Username:  "",
+			},
+		},
+		{
 			name: "garbage line does not parse",
 			line: `this is not an ExporterLog line at all`,
 			want: nil,

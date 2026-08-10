@@ -50,10 +50,16 @@ CREATE INDEX IF NOT EXISTS idx_skill_snapshots_character
 -- read, and any future Lua-mod-added stat) land here under their own
 -- event_type, with type-specific data in details. A new ExporterLog
 -- stat never needs a schema change -- see handleExporterEvent.
+-- steam_id is nullable -- most events are player-scoped and always set
+-- it, but a system-level event with no player attached (e.g. the Lua
+-- mod's periodic world_stats snapshot) legitimately has none. NULL
+-- always satisfies a FOREIGN KEY constraint regardless of what rows
+-- exist in players, so this doesn't weaken the reference for the
+-- normal player-scoped case.
 CREATE TABLE IF NOT EXISTS events (
     id           BIGSERIAL PRIMARY KEY,
     event_type   TEXT NOT NULL,
-    steam_id     TEXT NOT NULL REFERENCES players(steam_id),
+    steam_id     TEXT REFERENCES players(steam_id),
     character_id BIGINT REFERENCES characters(id),
     occurred_at  TIMESTAMPTZ NOT NULL,
     details      JSONB NOT NULL DEFAULT '{}'::jsonb,

@@ -52,10 +52,13 @@ CREATE INDEX IF NOT EXISTS idx_skill_snapshots_character
 -- read, and any future Lua-mod-added stat) land here under their own
 -- event_type, with type-specific data in details. A new ExporterLog
 -- stat never needs a schema change -- see handleExporterEvent.
+-- steam_id is nullable -- see schema_postgres.sql's comment on the same
+-- column for why (a system-level event like world_stats has no player
+-- attached; NULL always satisfies a FOREIGN KEY regardless).
 CREATE TABLE IF NOT EXISTS events (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type   TEXT NOT NULL,
-    steam_id     TEXT NOT NULL REFERENCES players(steam_id),
+    steam_id     TEXT REFERENCES players(steam_id),
     character_id INTEGER REFERENCES characters(id),
     occurred_at  TEXT NOT NULL,
     details      TEXT NOT NULL DEFAULT '{}', -- JSON, as a plain string (no native JSON type in SQLite)

@@ -48,6 +48,10 @@ func newPgStore(ctx context.Context, dsn, serverName string) (*pgStore, error) {
 		pool.Close()
 		return nil, err
 	}
+	if err := s.migrateEventsSteamIDNullable(ctx); err != nil {
+		pool.Close()
+		return nil, err
+	}
 	if err := s.loadActiveCharacters(ctx); err != nil {
 		pool.Close()
 		return nil, err
@@ -124,6 +128,16 @@ func (s *pgStore) migrateFileOffsetKeys(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// migrateEventsSteamIDNullable drops the NOT NULL constraint on
+// events.steam_id for databases that predate world_stats -- the first
+// event type with no player attached at all (see handleExporterEvent's
+// player-less branch). Idempotent: DROP NOT NULL on an already-nullable
+// column is a harmless no-op in Postgres, no error.
+func (s *pgStore) migrateEventsSteamIDNullable(ctx context.Context) error {
+	_, err := s.pool.Exec(ctx, `ALTER TABLE events ALTER COLUMN steam_id DROP NOT NULL`)
+	return err
 }
 
 func (s *pgStore) Close() {
@@ -350,6 +364,31 @@ func (s *pgStore) canonicalSteamID(username, fallback string) string {
 // event_type is whatever the Lua mod's "type" field says, and the full
 // decoded payload is kept verbatim in details -- see exporterlog.go.
 func (s *pgStore) handleExporterEvent(ctx context.Context, ev *exporterEvent) {
+	details, err := json.Marshal(ev.Fields)
+	if err != nil {
+		slog.Warn("marshal ExporterLog details failed", "type", ev.EventType, "err", err)
+		return
+	}
+
+	// Player-less system event (e.g. world_stats -- the first event
+	// type this mod ever emits with no player attached at all).
+	// Confirmed by BOTH username and steamId being empty: every real
+	// player-scoped event always carries a username even on the rare
+	// occasion steamId resolution itself fails, so that failure case
+	// still falls through to the drop-with-warning path below,
+	// unchanged. No player to upsert or active-character lookup to do
+	// -- steam_id/character_id are just NULL (see
+	// migrateEventsSteamIDNullable for why that's a safe column type).
+	if ev.Username == "" && ev.SteamID == "" {
+		if _, err := s.pool.Exec(ctx, `
+			INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+			VALUES ($1, NULL, NULL, $2, $3::jsonb, $4)
+		`, ev.EventType, ev.Timestamp, string(details), s.serverName); err != nil {
+			slog.Warn("insert player-less exporter event failed", "type", ev.EventType, "err", err)
+		}
+		return
+	}
+
 	steamID := s.canonicalSteamID(ev.Username, ev.SteamID)
 	if steamID == "" {
 		slog.Warn("dropping ExporterLog event with no steamId", "type", ev.EventType, "username", ev.Username)
@@ -364,16 +403,10 @@ func (s *pgStore) handleExporterEvent(ctx context.Context, ev *exporterEvent) {
 		slog.Warn("activeCharacter failed", "err", err)
 		return
 	}
-	details, err := json.Marshal(ev.Fields)
-	if err != nil {
-		slog.Warn("marshal ExporterLog details failed", "type", ev.EventType, "err", err)
-		return
-	}
-	_, err = s.pool.Exec(ctx, `
+	if _, err := s.pool.Exec(ctx, `
 		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
 		VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-	`, ev.EventType, steamID, charID, ev.Timestamp, string(details), s.serverName)
-	if err != nil {
+	`, ev.EventType, steamID, charID, ev.Timestamp, string(details), s.serverName); err != nil {
 		slog.Warn("insert exporter event failed", "type", ev.EventType, "err", err)
 	}
 }
