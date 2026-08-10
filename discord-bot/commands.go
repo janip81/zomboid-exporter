@@ -25,6 +25,7 @@ const (
 var commandTiers = map[string]commandTier{
 	"online":       tierPublic,
 	"serveruptime": tierPublic,
+	"help":         tierPublic,
 	"save":         tierAdmin,
 	"block":        tierAdmin,
 	"unblock":      tierAdmin,
@@ -33,6 +34,7 @@ var commandTiers = map[string]commandTier{
 var slashCommands = []*discordgo.ApplicationCommand{
 	{Name: "online", Description: "List players currently online"},
 	{Name: "serveruptime", Description: "Show how long the server has been up"},
+	{Name: "help", Description: "DM you the list of available commands"},
 	{Name: "save", Description: "Save the world (admin only)"},
 	{
 		Name:        "block",
@@ -140,6 +142,8 @@ func newInteractionHandler(deps botDeps) func(*discordgo.Session, *discordgo.Int
 			handleOnline(s, i, deps)
 		case "serveruptime":
 			handleServerUptime(s, i, deps)
+		case "help":
+			handleHelp(s, i, deps)
 		case "save":
 			handleSave(s, i, deps)
 		case "block":
@@ -162,6 +166,32 @@ func handleOnline(s *discordgo.Session, i *discordgo.InteractionCreate, deps bot
 		return
 	}
 	respond(s, i, fmt.Sprintf("```\n%s\n```", out), false)
+}
+
+const helpText = "**Available commands**\n" +
+	"`/online` — list players currently online\n" +
+	"`/serveruptime` — how long the server has been up\n" +
+	"`/help` — this message, sent as a DM\n\n" +
+	"**Admin only**\n" +
+	"`/save` — save the world\n" +
+	"`/block user:<name>` — block a user from using this bot\n" +
+	"`/unblock user:<name>` — restore a blocked user's access\n"
+
+// handleHelp sends the command list as a DM rather than posting it in the
+// channel -- keeps the channel free of command-reference clutter.
+func handleHelp(s *discordgo.Session, i *discordgo.InteractionCreate, deps botDeps) {
+	channel, err := s.UserChannelCreate(interactionUserID(i))
+	if err != nil {
+		slog.Error("failed to open DM channel", "userID", interactionUserID(i), "err", err)
+		respond(s, i, "Failed to send you a DM -- do you have DMs from server members disabled?", true)
+		return
+	}
+	if _, err := s.ChannelMessageSend(channel.ID, helpText); err != nil {
+		slog.Error("failed to send help DM", "userID", interactionUserID(i), "err", err)
+		respond(s, i, "Failed to send you a DM -- do you have DMs from server members disabled?", true)
+		return
+	}
+	respond(s, i, "Sent you a DM with the command list.", true)
 }
 
 func handleServerUptime(s *discordgo.Session, i *discordgo.InteractionCreate, deps botDeps) {

@@ -76,6 +76,9 @@ func main() {
 					logger.Error("failed to bootstrap admins", "err", err)
 				}
 			}
+			if err := seedMilestones(ctx, dbPool); err != nil {
+				logger.Error("failed to seed milestones", "err", err)
+			}
 		}
 	} else {
 		logger.Warn("--db-host not set, stats/leaderboard/admin-role commands unavailable")
@@ -133,7 +136,7 @@ func main() {
 			opts.SetUsername(*mqttUsername)
 			opts.SetPassword(os.Getenv("MQTT_PASSWORD"))
 		}
-		handler := newMQTTHandler(discordSession, *discordChannelID)
+		handler := newMQTTHandler(discordSession, *discordChannelID, deps)
 		opts.OnConnect = func(c mqtt.Client) {
 			topic := *mqttTopicPrefix + "/#"
 			if token := c.Subscribe(topic, 1, handler); token.Wait() && token.Error() != nil {
@@ -152,23 +155,6 @@ func main() {
 		logger.Warn("--mqtt-broker not set, live event stream unavailable")
 	}
 
-	if *dbHost != "" {
-		dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s", *dbUser, os.Getenv("DB_PASSWORD"), *dbHost, *dbPort, *dbName)
-		dbPool, err := pgxpool.New(ctx, dsn)
-		if err != nil {
-			logger.Error("failed to create Postgres pool", "err", err)
-		} else {
-			defer dbPool.Close()
-			if err := dbPool.Ping(ctx); err != nil {
-				logger.Error("failed to reach Postgres", "err", err)
-			} else {
-				logger.Info("connected to Postgres, stats/leaderboard commands enabled")
-			}
-		}
-	} else {
-		logger.Warn("--db-host not set, stats/leaderboard commands unavailable")
-	}
-
 	logger.Info("zomboid-discord-bot started")
 	<-ctx.Done()
 	logger.Info("shutting down")
@@ -176,11 +162,13 @@ func main() {
 }
 
 // newMQTTHandler returns an MQTT message handler that posts each event to
-// channelID as a Discord message. If channelID is empty, events are only
-// logged -- lets --mqtt-broker be tested without a channel configured yet.
-// world_stats is deliberately never posted: it's periodic housekeeping
-// telemetry with no player attached, not a notable live event.
-func newMQTTHandler(session *discordgo.Session, channelID string) mqtt.MessageHandler {
+// channelID as a Discord message, then checks it against milestones (see
+// milestones.go) and posts any newly-hit ones as a separate, distinct
+// message. If channelID is empty, events are only logged -- lets
+// --mqtt-broker be tested without a channel configured yet. world_stats is
+// deliberately never posted: it's periodic housekeeping telemetry with no
+// player attached, not a notable live event.
+func newMQTTHandler(session *discordgo.Session, channelID string, deps botDeps) mqtt.MessageHandler {
 	return func(client mqtt.Client, msg mqtt.Message) {
 		eventType := eventTypeFromTopic(msg.Topic())
 		if eventType == "world_stats" {
@@ -196,11 +184,24 @@ func newMQTTHandler(session *discordgo.Session, channelID string) mqtt.MessageHa
 		text := formatEvent(eventType, fields)
 		slog.Info("mqtt event received", "topic", msg.Topic(), "text", text)
 
-		if channelID == "" {
-			return
+		if channelID != "" {
+			if _, err := session.ChannelMessageSend(channelID, text); err != nil {
+				slog.Error("failed to post event to Discord", "channelID", channelID, "err", err)
+			}
 		}
-		if _, err := session.ChannelMessageSend(channelID, text); err != nil {
-			slog.Error("failed to post event to Discord", "channelID", channelID, "err", err)
+
+		steamID, _ := fields["steamId"].(string)
+		username, _ := fields["username"].(string)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, hit := range checkMilestones(ctx, deps.db, eventType, steamID, fields) {
+			milestoneText := fmt.Sprintf("🏆 **%s** — %s", username, hit.Message)
+			slog.Info("milestone hit", "name", hit.Name, "steamID", steamID, "username", username)
+			if channelID != "" {
+				if _, err := session.ChannelMessageSend(channelID, milestoneText); err != nil {
+					slog.Error("failed to post milestone to Discord", "channelID", channelID, "err", err)
+				}
+			}
 		}
 	}
 }

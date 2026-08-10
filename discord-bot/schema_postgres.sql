@@ -18,3 +18,31 @@ CREATE TABLE IF NOT EXISTS discordbot_user_roles (
     updated_at      TIMESTAMPTZ NOT NULL,
     updated_by      TEXT NOT NULL
 );
+
+-- Milestone definitions ("The Curator" persona -- see ideas/milestones.md).
+-- event_type/field/threshold decide when it fires (field's value in the
+-- MQTT event payload >= threshold); name is a short human-readable label
+-- (for a future web UI to list/edit these, not shown to players) separate
+-- from message, the actual in-character flavor text that gets posted.
+CREATE TABLE IF NOT EXISTS discordbot_milestones (
+    id         SERIAL PRIMARY KEY,
+    name       TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    field      TEXT NOT NULL,
+    threshold  BIGINT NOT NULL,
+    tier       TEXT NOT NULL,
+    message    TEXT NOT NULL,
+    enabled    BOOLEAN NOT NULL DEFAULT true,
+    UNIQUE (event_type, field, threshold)
+);
+
+-- Which (milestone, player) pairs have already fired, so each milestone
+-- announces at most once per player. steam_id, not discord_user_id --
+-- milestones are about in-game achievements, tied to the PZ player, not
+-- whichever Discord account happens to be watching.
+CREATE TABLE IF NOT EXISTS discordbot_milestone_hits (
+    milestone_id BIGINT NOT NULL REFERENCES discordbot_milestones(id),
+    steam_id     TEXT NOT NULL,
+    hit_at       TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (milestone_id, steam_id)
+);
