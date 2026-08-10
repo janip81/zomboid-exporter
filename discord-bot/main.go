@@ -204,11 +204,21 @@ func newMQTTHandler(session *discordgo.Session, channelID string, deps botDeps) 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for _, hit := range checkMilestones(ctx, deps.db, eventType, steamID, fields) {
-			milestoneText := fmt.Sprintf("🏆 **%s** — %s", username, hit.Message)
 			slog.Info("milestone hit", "name", hit.Name, "steamID", steamID, "username", username)
 			if channelID != "" {
-				if _, err := session.ChannelMessageSend(channelID, milestoneText); err != nil {
+				discordText := fmt.Sprintf("🏆 **%s** — %s", username, hit.Message)
+				if _, err := session.ChannelMessageSend(channelID, discordText); err != nil {
 					slog.Error("failed to post milestone to Discord", "channelID", channelID, "err", err)
+				}
+			}
+			if deps.rconHost != "" {
+				// servermsg's argument is quote-delimited (it can contain
+				// spaces) -- escape any embedded quotes in case a future
+				// milestone message or a username ever has one, rather than
+				// letting it break RCON's own argument parsing.
+				ingameText := strings.ReplaceAll(fmt.Sprintf("Milestone: %s -- %s", username, hit.Message), `"`, "'")
+				if _, err := rconExecute(deps.rconHost, deps.rconPassword, fmt.Sprintf(`servermsg "%s"`, ingameText)); err != nil {
+					slog.Error("failed to broadcast milestone in-game", "err", err)
 				}
 			}
 		}
