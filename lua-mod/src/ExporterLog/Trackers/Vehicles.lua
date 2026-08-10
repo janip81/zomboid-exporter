@@ -218,51 +218,116 @@ local function onExitVehicle(character)
 end
 
 -- ============================================================
--- Vehicle crash/collision -- NOT YET VERIFIED (2026-08-10). No
--- Events.On*Crash/Collision and no vehicle:isWrecked()-style getter
--- exists anywhere in the Lua-visible API (confirmed via exhaustive
--- grep of the whole vanilla Lua tree) -- vehicle:crash(amount, front)
--- is real but only ever called from an ADMIN DEBUG COMMAND to
--- manually apply crash damage, never automatically on a real
--- collision. isCollidedThisFrame/getCollidedObject/getCollideType/
--- isCollidedWithVehicle were suggested externally (not by us) and have
--- ZERO hits anywhere in vanilla Lua source, unlike e.g.
--- zombie:getAttackedBy() earlier this session (which had zero USAGE
--- but did turn out to be real) -- genuinely unknown whether these
--- exist at all. Diagnostic-only for now: hooked on Events.OnTick
--- (every frame) rather than the EveryOneMinute driving poll, since
--- "this frame" implies the flag resets almost immediately -- a
--- once-a-minute check would almost always miss it even if real.
--- pcall failure is logged only once (not every frame) to avoid spam;
--- a real collision (rare) always logs. Strip once resolved either way.
+-- Vehicle crash/collision diagnostic v2 -- NOT YET VERIFIED
+-- (2026-08-10). isCollidedThisFrame/isCollided/getCollidedObject/
+-- getCollideType/isCollidedWithVehicle/getLastCollideTime are
+-- confirmed REAL per the official Java docs -- they're IsoMovingObject
+-- methods, and BaseVehicle inherits from IsoMovingObject. What's NOT
+-- confirmed: whether B42's vehicle PHYSICS collision path (hitting a
+-- tree/sign/wall/vehicle while driving) actually populates them, or
+-- whether they're only meaningful for IsoMovingObject's tile/object
+-- collision system generally. No Events.On*Crash/Collision exists
+-- either way; vehicle:crash(amount, front) is real but only ever
+-- called from an admin debug command, never automatically.
+--
+-- Hooked on Events.OnTick (every frame) since "this frame" implies the
+-- flag resets almost immediately -- the once-a-minute driving poll
+-- would almost always miss it even if real. Support is detected ONCE
+-- (checkCollisionSupport, cached) rather than pcall'd every frame.
+-- Prints only on an actual state CHANGE (isCollidedThisFrame flips to
+-- true, or lastCollideTime changes) -- not every tick -- so a real test
+-- drive stays readable. Keeps a short rolling speed history so the
+-- pre-impact speed is recoverable even if getCurrentSpeedKmHour() has
+-- already dropped by the time the collision flag is observed.
+--
+-- Purely diagnostic -- no ExporterLog event emitted yet. Per explicit
+-- instruction: do NOT classify object types (tree/sign/wall/fence/
+-- vehicle) yet either -- just print raw output for each real test case
+-- and decide the design from what B42 actually returns.
 -- ============================================================
 
-local collisionCheckFailed = false
+local collisionSupportChecked = false
+local collisionSupported = false
+local collisionState = {} -- [username] = { lastCollideTime, wasCollided, speedHistory }
+local SPEED_HISTORY_LEN = 3
+
+local function checkCollisionSupport(vehicle)
+    if collisionSupportChecked then return collisionSupported end
+    collisionSupportChecked = true
+    collisionSupported = pcall(function() return vehicle:isCollidedThisFrame() end)
+    if collisionSupported then
+        print(ExporterLog.Runtime.logPrefix() .. ": VEHICLE_COLLISION_DEBUG isCollidedThisFrame() callable -- watching for changes")
+    else
+        print(ExporterLog.Runtime.logPrefix() .. ": VEHICLE_COLLISION_DEBUG isCollidedThisFrame() unavailable -- collision methods not usable here")
+    end
+    return collisionSupported
+end
+
+-- tostring(obj) alone usually reveals the underlying Java/Lua class
+-- name -- getObjectName()/instanceof are extra identity hints where
+-- available, not required for this to be useful.
+local function describeObject(obj)
+    if not obj then return "nil" end
+    local parts = { tostring(obj) }
+    local okName, name = pcall(function() return obj:getObjectName() end)
+    if okName and name then parts[#parts + 1] = "name=" .. tostring(name) end
+    local okTree, isTree = pcall(function() return instanceof(obj, "IsoTree") end)
+    if okTree and isTree then parts[#parts + 1] = "isTree=true" end
+    local okVehicle, isVehicleObj = pcall(function() return instanceof(obj, "BaseVehicle") end)
+    if okVehicle and isVehicleObj then parts[#parts + 1] = "isVehicle=true" end
+    return table.concat(parts, " ")
+end
 
 local function onTickVehicleCollision()
     ExporterLog.Runtime.forEachTrackedPlayer(function(p)
         local vehicle = Vehicles.getVehicleOf(p)
         if not vehicle or not Vehicles.isDriver(p, vehicle) then return end
+        if not checkCollisionSupport(vehicle) then return end
 
-        local okCollided, collided = pcall(function() return vehicle:isCollidedThisFrame() end)
-        if not okCollided then
-            if not collisionCheckFailed then
-                collisionCheckFailed = true
-                print(ExporterLog.Runtime.logPrefix() .. ": VEHICLE_COLLISION_DEBUG isCollidedThisFrame() failed (method may not exist): " .. tostring(collided))
-            end
-            return
+        local username = p:getUsername()
+        local state = collisionState[username]
+        if not state then
+            state = { lastCollideTime = nil, wasCollided = false, speedHistory = {} }
+            collisionState[username] = state
         end
 
-        if collided then
+        local okSpeed, speedKmh = pcall(function() return vehicle:getCurrentSpeedKmHour() end)
+        if okSpeed then
+            table.insert(state.speedHistory, speedKmh)
+            while #state.speedHistory > SPEED_HISTORY_LEN do
+                table.remove(state.speedHistory, 1)
+            end
+        end
+
+        local okThisFrame, collidedThisFrame = pcall(function() return vehicle:isCollidedThisFrame() end)
+        local okCollided, collided = pcall(function() return vehicle:isCollided() end)
+        local okLastTime, lastCollideTime = pcall(function() return vehicle:getLastCollideTime() end)
+
+        local changed = (okThisFrame and collidedThisFrame and not state.wasCollided)
+            or (okLastTime and lastCollideTime ~= state.lastCollideTime)
+
+        if changed then
             local okObj, obj = pcall(function() return vehicle:getCollidedObject() end)
             local okType, collideType = pcall(function() return vehicle:getCollideType() end)
-            local okVeh, withVehicle = pcall(function() return vehicle:isCollidedWithVehicle() end)
-            local okSpeed, speedKmh = pcall(function() return vehicle:getCurrentSpeedKmHour() end)
-            print(ExporterLog.Runtime.logPrefix() .. ": VEHICLE_COLLISION_DEBUG speed=" .. tostring(okSpeed and speedKmh or "?")
-                .. " object=" .. tostring(okObj and obj or "?")
+            local okWithVeh, withVehicle = pcall(function() return vehicle:isCollidedWithVehicle() end)
+            -- Oldest sample in the short rolling window = closest to
+            -- pre-impact, since physics may have already reduced
+            -- current speed by the time we observe the collision flag.
+            local preSpeed = state.speedHistory[1]
+            print(ExporterLog.Runtime.logPrefix() .. ": VEHICLE_COLLISION_DEBUG"
+                .. " username=" .. username
+                .. " preSpeed=" .. tostring(preSpeed)
+                .. " curSpeed=" .. tostring(okSpeed and speedKmh or "?")
+                .. " isCollided=" .. tostring(okCollided and collided or "?")
+                .. " isCollidedThisFrame=" .. tostring(okThisFrame and collidedThisFrame or "?")
+                .. " lastCollideTime=" .. tostring(okLastTime and lastCollideTime or "?")
+                .. " object=[" .. describeObject(okObj and obj or nil) .. "]"
                 .. " collideType=" .. tostring(okType and collideType or "?")
-                .. " withVehicle=" .. tostring(okVeh and withVehicle or "?"))
+                .. " withVehicle=" .. tostring(okWithVeh and withVehicle or "?"))
         end
+
+        state.wasCollided = okThisFrame and collidedThisFrame or false
+        if okLastTime then state.lastCollideTime = lastCollideTime end
     end)
 end
 
