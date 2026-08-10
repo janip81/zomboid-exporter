@@ -29,6 +29,7 @@ func main() {
 	mqttTopicPrefix := flag.String("mqtt-topic-prefix", "zomboid/those-who-remain", "MQTT topic prefix to subscribe to (subscribes to <prefix>/#)")
 	discordChannelID := flag.String("discord-channel-id", "", "Discord channel ID to post live MQTT events into. If empty, events are only logged, not posted.")
 	discordAppID := flag.String("discord-app-id", "", "Discord Application ID, required to register slash commands")
+	discordGuildID := flag.String("discord-guild-id", "", "Discord server (guild) ID. Guild-scoped command registration is near-instant; global (leave empty) can take up to an hour to propagate to clients.")
 	metricsURL := flag.String("metrics-url", "", "Exporter's Prometheus /metrics URL, e.g. http://zomboid-zomboid-server-metrics.zomboid.svc.cluster.local:9091/metrics (used for /serveruptime)")
 	serverName := flag.String("server-name", "those-who-remain", "Server name, must match the exporter's --server-name (used to match the right series in /serveruptime)")
 	dbHost := flag.String("db-host", "", "Postgres host for stats/leaderboard queries")
@@ -106,10 +107,18 @@ func main() {
 	logger.Info("connected to Discord", "user", discordSession.State.User.Username)
 
 	if *discordAppID != "" {
-		if _, err := discordSession.ApplicationCommandBulkOverwrite(*discordAppID, "", slashCommands); err != nil {
+		if _, err := discordSession.ApplicationCommandBulkOverwrite(*discordAppID, *discordGuildID, slashCommands); err != nil {
 			logger.Error("failed to register slash commands", "err", err)
 		} else {
-			logger.Info("registered slash commands", "count", len(slashCommands))
+			logger.Info("registered slash commands", "count", len(slashCommands), "guildID", *discordGuildID)
+		}
+		// If we now register guild-scoped, clear out any earlier global
+		// registration so the same commands don't show up twice in the
+		// picker once the (slow) global propagation eventually catches up.
+		if *discordGuildID != "" {
+			if _, err := discordSession.ApplicationCommandBulkOverwrite(*discordAppID, "", []*discordgo.ApplicationCommand{}); err != nil {
+				logger.Error("failed to clear global slash commands", "err", err)
+			}
 		}
 	} else {
 		logger.Warn("--discord-app-id not set, slash commands not registered")
