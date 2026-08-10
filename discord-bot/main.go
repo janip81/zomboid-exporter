@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -17,6 +18,9 @@ import (
 	"github.com/gorcon/rcon"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+//go:embed schema_postgres.sql
+var schemaSQL string
 
 func main() {
 	rconHost := flag.String("rcon-host", "", "Zomboid RCON host:port, e.g. zomboid-zomboid-server-rcon.zomboid.svc.cluster.local:27015")
@@ -59,6 +63,9 @@ func main() {
 			logger.Error("failed to create Postgres pool", "err", err)
 		} else if err := pool.Ping(ctx); err != nil {
 			logger.Error("failed to reach Postgres", "err", err)
+			pool.Close()
+		} else if _, err := pool.Exec(ctx, schemaSQL); err != nil {
+			logger.Error("failed to apply schema, admin-role commands unavailable", "err", err)
 			pool.Close()
 		} else {
 			dbPool = pool

@@ -77,23 +77,10 @@ CREATE TABLE IF NOT EXISTS processed_files (
     byte_offset BIGINT NOT NULL
 );
 
--- Everything below is owned/used by discord-bot (a separate binary/module
--- in discord-bot/, connecting to this same database), not the exporter
--- itself -- discordbot_ prefix makes that ownership obvious at a glance.
--- The exporter still applies this schema (schemaSQL is embedded and run
--- here) since it's already the one piece with migration infrastructure;
--- discord-bot just assumes these tables exist.
-
--- Bot's own command-authorization state, keyed by Discord user ID (NOT a
--- Steam ID/player -- a Discord user isn't necessarily a PZ player, and
--- vice versa). role is 'admin', 'moderator', or 'blocked'; any user with
--- no row here gets default public-command access. Deliberately DB-backed
--- rather than a git-editable ConfigMap: blocking a spammer needs to take
--- effect on their very next command, not after an edit+push+ArgoCD
--- sync+pod restart cycle.
-CREATE TABLE IF NOT EXISTS discordbot_user_roles (
-    discord_user_id TEXT PRIMARY KEY,
-    role            TEXT NOT NULL,
-    updated_at      TIMESTAMPTZ NOT NULL,
-    updated_by      TEXT NOT NULL
-);
+-- discord-bot (a separate binary/module in discord-bot/, connecting to
+-- this same database) owns and applies its own tables via its own
+-- go:embed'd schema_postgres.sql -- not here. If nobody enables the bot,
+-- the exporter never creates or needs those tables; if the bot's schema
+-- changes, only the bot needs rebuilding/restarting, not the game server
+-- pod (this table briefly lived here on 2026-08-10 -- moving it out
+-- after hitting exactly that problem).
