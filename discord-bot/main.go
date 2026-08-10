@@ -23,6 +23,10 @@ func main() {
 	mqttUsername := flag.String("mqtt-username", "", "MQTT broker username, if auth is required (password read from MQTT_PASSWORD env var)")
 	mqttTopicPrefix := flag.String("mqtt-topic-prefix", "zomboid/those-who-remain", "MQTT topic prefix to subscribe to (subscribes to <prefix>/#)")
 	discordChannelID := flag.String("discord-channel-id", "", "Discord channel ID to post live MQTT events into. If empty, events are only logged, not posted.")
+	discordAppID := flag.String("discord-app-id", "", "Discord Application ID, required to register slash commands")
+	metricsURL := flag.String("metrics-url", "", "Exporter's Prometheus /metrics URL, e.g. http://zomboid-zomboid-server-metrics.zomboid.svc.cluster.local:9091/metrics (used for /serveruptime)")
+	serverName := flag.String("server-name", "those-who-remain", "Server name, must match the exporter's --server-name (used to match the right series in /serveruptime)")
+	adminUserIDsFile := flag.String("admin-user-ids-file", "/config/admin-user-ids.json", "Path to a ConfigMap-mounted JSON array of Discord user IDs allowed to run admin commands")
 	dbHost := flag.String("db-host", "", "Postgres host for stats/leaderboard queries")
 	dbPort := flag.Int("db-port", 5432, "Postgres port")
 	dbName := flag.String("db-name", "zomboid", "Postgres database name")
@@ -40,20 +44,46 @@ func main() {
 		os.Exit(1)
 	}
 
+	adminUserIDs, err := loadAdminUserIDs(*adminUserIDsFile)
+	if err != nil {
+		logger.Error("failed to load admin user IDs, admin commands stay locked down", "path", *adminUserIDsFile, "err", err)
+		adminUserIDs = map[string]bool{}
+	}
+	logger.Info("loaded admin user IDs", "count", len(adminUserIDs))
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	deps := botDeps{
+		rconHost:     *rconHost,
+		rconPassword: os.Getenv("RCON_PASSWORD"),
+		metricsURL:   *metricsURL,
+		serverName:   *serverName,
+		adminUserIDs: adminUserIDs,
+	}
 
 	discordSession, err := discordgo.New("Bot " + discordToken)
 	if err != nil {
 		logger.Error("failed to create Discord session", "err", err)
 		os.Exit(1)
 	}
+	discordSession.AddHandler(newInteractionHandler(deps))
 	if err := discordSession.Open(); err != nil {
 		logger.Error("failed to connect to Discord", "err", err)
 		os.Exit(1)
 	}
 	defer discordSession.Close()
 	logger.Info("connected to Discord", "user", discordSession.State.User.Username)
+
+	if *discordAppID != "" {
+		if _, err := discordSession.ApplicationCommandBulkOverwrite(*discordAppID, "", slashCommands); err != nil {
+			logger.Error("failed to register slash commands", "err", err)
+		} else {
+			logger.Info("registered slash commands", "count", len(slashCommands))
+		}
+	} else {
+		logger.Warn("--discord-app-id not set, slash commands not registered")
+	}
 
 	if *rconHost != "" {
 		rconConn, err := rcon.Dial(*rconHost, os.Getenv("RCON_PASSWORD"))
