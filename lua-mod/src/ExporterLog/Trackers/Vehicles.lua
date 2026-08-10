@@ -217,6 +217,55 @@ local function onExitVehicle(character)
     if not ok then print(ExporterLog.Runtime.logPrefix() .. ": onExitVehicle error: " .. tostring(err)) end
 end
 
+-- ============================================================
+-- Vehicle crash/collision -- NOT YET VERIFIED (2026-08-10). No
+-- Events.On*Crash/Collision and no vehicle:isWrecked()-style getter
+-- exists anywhere in the Lua-visible API (confirmed via exhaustive
+-- grep of the whole vanilla Lua tree) -- vehicle:crash(amount, front)
+-- is real but only ever called from an ADMIN DEBUG COMMAND to
+-- manually apply crash damage, never automatically on a real
+-- collision. isCollidedThisFrame/getCollidedObject/getCollideType/
+-- isCollidedWithVehicle were suggested externally (not by us) and have
+-- ZERO hits anywhere in vanilla Lua source, unlike e.g.
+-- zombie:getAttackedBy() earlier this session (which had zero USAGE
+-- but did turn out to be real) -- genuinely unknown whether these
+-- exist at all. Diagnostic-only for now: hooked on Events.OnTick
+-- (every frame) rather than the EveryOneMinute driving poll, since
+-- "this frame" implies the flag resets almost immediately -- a
+-- once-a-minute check would almost always miss it even if real.
+-- pcall failure is logged only once (not every frame) to avoid spam;
+-- a real collision (rare) always logs. Strip once resolved either way.
+-- ============================================================
+
+local collisionCheckFailed = false
+
+local function onTickVehicleCollision()
+    ExporterLog.Runtime.forEachTrackedPlayer(function(p)
+        local vehicle = Vehicles.getVehicleOf(p)
+        if not vehicle or not Vehicles.isDriver(p, vehicle) then return end
+
+        local okCollided, collided = pcall(function() return vehicle:isCollidedThisFrame() end)
+        if not okCollided then
+            if not collisionCheckFailed then
+                collisionCheckFailed = true
+                print(ExporterLog.Runtime.logPrefix() .. ": VEHICLE_COLLISION_DEBUG isCollidedThisFrame() failed (method may not exist): " .. tostring(collided))
+            end
+            return
+        end
+
+        if collided then
+            local okObj, obj = pcall(function() return vehicle:getCollidedObject() end)
+            local okType, collideType = pcall(function() return vehicle:getCollideType() end)
+            local okVeh, withVehicle = pcall(function() return vehicle:isCollidedWithVehicle() end)
+            local okSpeed, speedKmh = pcall(function() return vehicle:getCurrentSpeedKmHour() end)
+            print(ExporterLog.Runtime.logPrefix() .. ": VEHICLE_COLLISION_DEBUG speed=" .. tostring(okSpeed and speedKmh or "?")
+                .. " object=" .. tostring(okObj and obj or "?")
+                .. " collideType=" .. tostring(okType and collideType or "?")
+                .. " withVehicle=" .. tostring(okVeh and withVehicle or "?"))
+        end
+    end)
+end
+
 -- Registers every hook exactly once per call, reload-safe (removes
 -- its own previous registration first via Runtime.registerEventOnce).
 -- Safe to call multiple times -- each call is idempotent, never
@@ -225,6 +274,7 @@ function Vehicles.init()
     local Runtime = ExporterLog.Runtime
 
     Runtime.registerEventOnce(Vehicles.callbacks, "onEveryMinuteDriving", Events.EveryOneMinute, onEveryMinuteDriving)
+    Runtime.registerEventOnce(Vehicles.callbacks, "onTickVehicleCollision", Events.OnTick, onTickVehicleCollision)
 
     if Events.OnEnterVehicle then
         Runtime.registerEventOnce(Vehicles.callbacks, "onEnterVehicle", Events.OnEnterVehicle, onEnterVehicle)
