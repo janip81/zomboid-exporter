@@ -1,6 +1,10 @@
 package main
 
-import "github.com/gorcon/rcon"
+import (
+	"strings"
+
+	"github.com/gorcon/rcon"
+)
 
 // rconExecute dials fresh for a single command rather than holding one
 // long-lived connection -- commands are infrequent (Discord slash commands,
@@ -13,4 +17,25 @@ func rconExecute(host, password, command string) (string, error) {
 	}
 	defer conn.Close()
 	return conn.Execute(command)
+}
+
+// parsePlayerList parses PZ RCON's "players" command output, e.g.:
+//
+//	Players connected (2):
+//	-Alice
+//	-Bob
+//
+// Best-effort: any line that isn't the header is treated as a username
+// (with a leading "-" stripped if present) rather than erroring, since
+// this hasn't been verified against every server version's exact format.
+func parsePlayerList(out string) []string {
+	var players []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Players connected") {
+			continue
+		}
+		players = append(players, strings.TrimPrefix(line, "-"))
+	}
+	return players
 }

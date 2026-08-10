@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -83,6 +85,35 @@ func respond(s *discordgo.Session, i *discordgo.InteractionCreate, content strin
 	}
 }
 
+// randomLine picks one flavor line from a pool -- see
+// ideas/curator-style-slashcommands.md, which specifies rotating pools
+// rather than a single fixed line so the persona doesn't feel like a
+// canned bot.
+func randomLine(pool []string) string {
+	return pool[rand.Intn(len(pool))]
+}
+
+var onlineFlavorLines = []string{
+	"The experiment continues.",
+	"I am observing.",
+	"Activity remains within acceptable parameters.",
+	"Several subjects continue to resist statistical inevitability.",
+	"The dead remain numerous. The living, less so.",
+	"Interesting. More of you survived than expected.",
+	"Continue. I require additional data.",
+	"No intervention is currently necessary.",
+	"You are all being recorded.",
+	"Survival remains temporary.",
+}
+
+var onlineEmptyFlavorLines = []string{
+	"The facility is quiet. No surviving subjects are currently active.",
+	"No active subjects detected. Even the dead appear bored.",
+	"The experiment continues unattended.",
+	"Zero subjects online. An unusually peaceful result.",
+	"No survivors detected. I will continue monitoring.",
+}
+
 // authorize does a single role lookup and applies both the universal
 // "blocked" check and the command's tier requirement. If db is nil (no
 // --db-host configured) role stays "": blocking silently no-ops (fails
@@ -100,7 +131,7 @@ func authorize(ctx context.Context, deps botDeps, userID string, tier commandTie
 		}
 	}
 	if role == roleBlocked {
-		return false, "You've been blocked from using this bot."
+		return false, "Your access to the archive has been revoked. Further inquiries will not be entertained."
 	}
 	switch tier {
 	case tierPublic:
@@ -114,7 +145,7 @@ func authorize(ctx context.Context, deps botDeps, userID string, tier commandTie
 			return true, ""
 		}
 	}
-	return false, "You don't have permission to run this command."
+	return false, "You do not possess the required clearance for this command."
 }
 
 func newInteractionHandler(deps botDeps) func(*discordgo.Session, *discordgo.InteractionCreate) {
@@ -156,16 +187,37 @@ func newInteractionHandler(deps botDeps) func(*discordgo.Session, *discordgo.Int
 
 func handleOnline(s *discordgo.Session, i *discordgo.InteractionCreate, deps botDeps) {
 	if deps.rconHost == "" {
-		respond(s, i, "RCON is not configured.", true)
+		respond(s, i, "The observation network is unavailable. RCON has not been configured.", true)
 		return
 	}
 	out, err := rconExecute(deps.rconHost, deps.rconPassword, "players")
 	if err != nil {
 		slog.Error("rcon players failed", "err", err)
-		respond(s, i, "Failed to reach the server.", true)
+		respond(s, i, "I cannot establish contact with the facility. How inconvenient.", true)
 		return
 	}
-	respond(s, i, fmt.Sprintf("```\n%s\n```", out), false)
+
+	players := parsePlayerList(out)
+	var b strings.Builder
+	b.WriteString("CURATOR // ACTIVE SUBJECTS\n")
+	switch len(players) {
+	case 0:
+		b.WriteString("The facility is quiet.\nNo surviving subjects are currently active.\n\n")
+		b.WriteString(randomLine(onlineEmptyFlavorLines))
+	case 1:
+		b.WriteString("One subject remains active.\n")
+		b.WriteString(players[0])
+		b.WriteString("\n\nI am observing.")
+	default:
+		fmt.Fprintf(&b, "%d subjects remain active:\n", len(players))
+		for _, p := range players {
+			b.WriteString(p)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+		b.WriteString(randomLine(onlineFlavorLines))
+	}
+	respond(s, i, b.String(), false)
 }
 
 const helpText = "**Available commands**\n" +
@@ -180,62 +232,68 @@ const helpText = "**Available commands**\n" +
 // handleHelp sends the command list as a DM rather than posting it in the
 // channel -- keeps the channel free of command-reference clutter.
 func handleHelp(s *discordgo.Session, i *discordgo.InteractionCreate, deps botDeps) {
+	const dmFailedMsg = "I attempted to send you the archive privately. Your communications settings prevented delivery."
 	channel, err := s.UserChannelCreate(interactionUserID(i))
 	if err != nil {
 		slog.Error("failed to open DM channel", "userID", interactionUserID(i), "err", err)
-		respond(s, i, "Failed to send you a DM -- do you have DMs from server members disabled?", true)
+		respond(s, i, dmFailedMsg, true)
 		return
 	}
 	if _, err := s.ChannelMessageSend(channel.ID, helpText); err != nil {
 		slog.Error("failed to send help DM", "userID", interactionUserID(i), "err", err)
-		respond(s, i, "Failed to send you a DM -- do you have DMs from server members disabled?", true)
+		respond(s, i, dmFailedMsg, true)
 		return
 	}
-	respond(s, i, "Sent you a DM with the command list.", true)
+	respond(s, i, "The archive has been delivered privately. Try not to lose it.", true)
 }
 
 func handleServerUptime(s *discordgo.Session, i *discordgo.InteractionCreate, deps botDeps) {
 	if deps.metricsURL == "" {
-		respond(s, i, "Uptime metrics are not configured.", true)
+		respond(s, i, "I have no record of when this observation cycle began. Uptime metrics are not configured.", true)
 		return
 	}
 	start, err := fetchServerStartTime(deps.metricsURL, deps.serverName)
 	if err != nil {
 		slog.Error("fetch server start time failed", "err", err)
-		respond(s, i, "Failed to fetch server uptime.", true)
+		respond(s, i, "The facility refuses to disclose how long it has been awake.", true)
 		return
 	}
-	respond(s, i, fmt.Sprintf("⏱️ Server has been up for %s (since %s)",
+	respond(s, i, fmt.Sprintf("⏱️ Observation cycle: **%s**. The facility has been operational since **%s**.",
 		formatDuration(time.Since(start)), start.Format("2006-01-02 15:04 MST")), false)
 }
 
 func handleSave(s *discordgo.Session, i *discordgo.InteractionCreate, deps botDeps) {
 	if deps.rconHost == "" {
-		respond(s, i, "RCON is not configured.", true)
+		respond(s, i, "I cannot preserve the experiment. RCON has not been configured.", true)
 		return
 	}
 	out, err := rconExecute(deps.rconHost, deps.rconPassword, "save")
 	if err != nil {
 		slog.Error("rcon save failed", "err", err)
-		respond(s, i, "Failed to save the world.", true)
+		respond(s, i, "The preservation attempt failed. That is... concerning.", true)
 		return
 	}
 	if out == "" {
-		out = "World save triggered."
+		respond(s, i, "💾 The current state of the experiment has been preserved.", false)
+		return
 	}
-	respond(s, i, fmt.Sprintf("💾 %s", out), false)
+	respond(s, i, fmt.Sprintf("💾 Experiment state preserved. %s", out), false)
 }
 
 // handleBlockUser implements both /block (newRole=roleBlocked) and
 // /unblock (newRole="", clears the row) -- same shape, opposite direction.
 func handleBlockUser(s *discordgo.Session, i *discordgo.InteractionCreate, deps botDeps, newRole userRole) {
 	if deps.db == nil {
-		respond(s, i, "Database is not configured.", true)
+		respond(s, i, "The subject registry is unavailable. Database access has not been configured.", true)
 		return
 	}
 	opts := i.ApplicationCommandData().Options
 	if len(opts) == 0 || opts[0].UserValue(s) == nil {
-		respond(s, i, "Missing user option.", true)
+		if newRole == roleBlocked {
+			respond(s, i, "You must specify which subject is to be restricted.", true)
+		} else {
+			respond(s, i, "You must specify which subject is to be reinstated.", true)
+		}
 		return
 	}
 	target := opts[0].UserValue(s)
@@ -246,19 +304,19 @@ func handleBlockUser(s *discordgo.Session, i *discordgo.InteractionCreate, deps 
 	if newRole == roleBlocked {
 		if err := setUserRole(ctx, deps.db, target.ID, roleBlocked, interactionUserID(i)); err != nil {
 			slog.Error("failed to block user", "target", target.ID, "err", err)
-			respond(s, i, "Failed to block user.", true)
+			respond(s, i, fmt.Sprintf("I was unable to restrict **%s**. They remain... unsupervised.", target.Username), true)
 			return
 		}
-		respond(s, i, fmt.Sprintf("🚫 Blocked %s from using this bot.", target.Username), false)
+		respond(s, i, fmt.Sprintf("🚫 **%s** has been removed from authorized observation channels.", target.Username), false)
 		return
 	}
 
 	if err := clearUserRole(ctx, deps.db, target.ID); err != nil {
 		slog.Error("failed to unblock user", "target", target.ID, "err", err)
-		respond(s, i, "Failed to unblock user.", true)
+		respond(s, i, fmt.Sprintf("I was unable to restore **%s** to the experiment.", target.Username), true)
 		return
 	}
-	respond(s, i, fmt.Sprintf("✅ Restored access for %s.", target.Username), false)
+	respond(s, i, fmt.Sprintf("✅ **%s** has been returned to active observation.", target.Username), false)
 }
 
 func formatDuration(d time.Duration) string {
