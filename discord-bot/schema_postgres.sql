@@ -20,21 +20,65 @@ CREATE TABLE IF NOT EXISTS discordbot_user_roles (
 );
 
 -- Milestone definitions ("The Curator" persona -- see ideas/milestones.md).
--- event_type/field/threshold decide when it fires (field's value in the
--- MQTT event payload >= threshold); name is a short human-readable label
--- (for a future web UI to list/edit these, not shown to players) separate
--- from message, the actual in-character flavor text that gets posted.
+-- name is a short human-readable label (for a future web UI to list/edit
+-- these, not shown to players) separate from message, the actual
+-- in-character flavor text that gets posted.
+--
+-- `kind` picks how the threshold is evaluated (see checkMilestones in
+-- milestones.go):
+--   'field' -- the triggering event's OWN field must already be >=
+--              threshold (e.g. kill's running zombieKills, or
+--              indoor_streak's running hours). Cheapest, but only works
+--              when the Lua tracker already emits a running total.
+--   'count' -- COUNT(*) of every past events row of this event_type
+--              (optionally filtered to filter_field=filter_value, e.g.
+--              fluid=Beer) must be >= threshold. Needs no Lua changes --
+--              reuses whatever's already landing in the shared `events`
+--              table one row per action.
+--   'sum'   -- same as 'count' but SUMs `field` across those matching
+--              rows instead of counting them (e.g. summing driving
+--              distance's per-flush `km` chunks into a running total).
+-- filter_value may be a comma-separated list (matched via ANY) so one
+-- row can cover a category spanning several raw values (e.g. every
+-- alcoholic fluid type for a "1000 alcoholic drinks" milestone).
 CREATE TABLE IF NOT EXISTS discordbot_milestones (
-    id         SERIAL PRIMARY KEY,
-    name       TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    field      TEXT NOT NULL,
-    threshold  BIGINT NOT NULL,
-    tier       TEXT NOT NULL,
-    message    TEXT NOT NULL,
-    enabled    BOOLEAN NOT NULL DEFAULT true,
-    UNIQUE (event_type, field, threshold)
+    id           SERIAL PRIMARY KEY,
+    name         TEXT NOT NULL,
+    event_type   TEXT NOT NULL,
+    kind         TEXT NOT NULL DEFAULT 'field',
+    field        TEXT NOT NULL,
+    filter_field TEXT NOT NULL DEFAULT '',
+    filter_value TEXT NOT NULL DEFAULT '',
+    threshold    DOUBLE PRECISION NOT NULL,
+    tier         TEXT NOT NULL,
+    message      TEXT NOT NULL,
+    enabled      BOOLEAN NOT NULL DEFAULT true
 );
+
+-- Migration for installs that already had the pre-'kind' schema (columns
+-- added here are no-ops once applied; ALTER COLUMN TYPE is also a no-op
+-- once threshold is already DOUBLE PRECISION).
+ALTER TABLE discordbot_milestones ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'field';
+ALTER TABLE discordbot_milestones ADD COLUMN IF NOT EXISTS filter_field TEXT NOT NULL DEFAULT '';
+ALTER TABLE discordbot_milestones ADD COLUMN IF NOT EXISTS filter_value TEXT NOT NULL DEFAULT '';
+ALTER TABLE discordbot_milestones ALTER COLUMN threshold TYPE DOUBLE PRECISION;
+
+DO $$
+BEGIN
+    ALTER TABLE discordbot_milestones DROP CONSTRAINT IF EXISTS discordbot_milestones_event_type_field_threshold_key;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'discordbot_milestones_uniq'
+    ) THEN
+        ALTER TABLE discordbot_milestones ADD CONSTRAINT discordbot_milestones_uniq
+            UNIQUE (event_type, kind, field, filter_field, filter_value, threshold);
+    END IF;
+END $$;
+
+-- Supports the 'count'/'sum' evaluation kinds above: every check filters
+-- to one player's own rows of one event_type first, so this index keeps
+-- it an index lookup instead of a growing sequential scan as the shared
+-- `events` table accumulates history across every player.
+CREATE INDEX IF NOT EXISTS idx_events_steamid_type ON events (steam_id, event_type);
 
 -- Which (milestone, player) pairs have already fired, so each milestone
 -- announces at most once per player. steam_id, not discord_user_id --
