@@ -1,21 +1,53 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// slashCommands is deliberately small and split by tier: online/serveruptime
-// are public (no DefaultMemberPermissions set -- Discord doesn't gate them),
-// save is admin-only, enforced in code via botDeps.adminUserIDs rather than
-// Discord's own role/permission system (see admin.go for why).
+type commandTier int
+
+const (
+	tierPublic commandTier = iota
+	tierModerator
+	tierAdmin
+)
+
+// commandTiers maps each slash command to the minimum role required.
+// Adding a new tiered command later is just one entry here plus a case in
+// newInteractionHandler's switch -- no changes needed to the
+// authorization logic itself.
+var commandTiers = map[string]commandTier{
+	"online":       tierPublic,
+	"serveruptime": tierPublic,
+	"save":         tierAdmin,
+	"block":        tierAdmin,
+	"unblock":      tierAdmin,
+}
+
 var slashCommands = []*discordgo.ApplicationCommand{
 	{Name: "online", Description: "List players currently online"},
 	{Name: "serveruptime", Description: "Show how long the server has been up"},
 	{Name: "save", Description: "Save the world (admin only)"},
+	{
+		Name:        "block",
+		Description: "Block a user from using this bot (admin only)",
+		Options: []*discordgo.ApplicationCommandOption{
+			{Type: discordgo.ApplicationCommandOptionUser, Name: "user", Description: "User to block", Required: true},
+		},
+	},
+	{
+		Name:        "unblock",
+		Description: "Restore a blocked user's access (admin only)",
+		Options: []*discordgo.ApplicationCommandOption{
+			{Type: discordgo.ApplicationCommandOptionUser, Name: "user", Description: "User to unblock", Required: true},
+		},
+	},
 }
 
 type botDeps struct {
@@ -23,7 +55,7 @@ type botDeps struct {
 	rconPassword string
 	metricsURL   string
 	serverName   string
-	adminUserIDs map[string]bool
+	db           *pgxpool.Pool
 }
 
 func interactionUserID(i *discordgo.InteractionCreate) string {
@@ -49,24 +81,71 @@ func respond(s *discordgo.Session, i *discordgo.InteractionCreate, content strin
 	}
 }
 
+// authorize does a single role lookup and applies both the universal
+// "blocked" check and the command's tier requirement. If db is nil (no
+// --db-host configured) role stays "": blocking silently no-ops (fails
+// open -- there's nothing to check against) but admin/moderator tiers
+// still correctly deny (fails closed -- "" never matches a required
+// role), which is the safe direction for both.
+func authorize(ctx context.Context, deps botDeps, userID string, tier commandTier) (bool, string) {
+	var role userRole
+	if deps.db != nil {
+		r, err := getUserRole(ctx, deps.db, userID)
+		if err != nil {
+			slog.Error("failed to look up user role", "userID", userID, "err", err)
+		} else {
+			role = r
+		}
+	}
+	if role == roleBlocked {
+		return false, "You've been blocked from using this bot."
+	}
+	switch tier {
+	case tierPublic:
+		return true, ""
+	case tierModerator:
+		if role == roleModerator || role == roleAdmin {
+			return true, ""
+		}
+	case tierAdmin:
+		if role == roleAdmin {
+			return true, ""
+		}
+	}
+	return false, "You don't have permission to run this command."
+}
+
 func newInteractionHandler(deps botDeps) func(*discordgo.Session, *discordgo.InteractionCreate) {
 	return func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		if i.Type != discordgo.InteractionApplicationCommand {
 			return
 		}
-		switch i.ApplicationCommandData().Name {
+		name := i.ApplicationCommandData().Name
+		tier, known := commandTiers[name]
+		if !known {
+			slog.Warn("unknown slash command received", "name", name)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ok, denyMsg := authorize(ctx, deps, interactionUserID(i), tier)
+		if !ok {
+			respond(s, i, denyMsg, true)
+			return
+		}
+
+		switch name {
 		case "online":
 			handleOnline(s, i, deps)
 		case "serveruptime":
 			handleServerUptime(s, i, deps)
 		case "save":
-			if !deps.adminUserIDs[interactionUserID(i)] {
-				respond(s, i, "You don't have permission to run this command.", true)
-				return
-			}
 			handleSave(s, i, deps)
-		default:
-			slog.Warn("unknown slash command received", "name", i.ApplicationCommandData().Name)
+		case "block":
+			handleBlockUser(s, i, deps, roleBlocked)
+		case "unblock":
+			handleBlockUser(s, i, deps, "")
 		}
 	}
 }
@@ -115,6 +194,41 @@ func handleSave(s *discordgo.Session, i *discordgo.InteractionCreate, deps botDe
 		out = "World save triggered."
 	}
 	respond(s, i, fmt.Sprintf("💾 %s", out), false)
+}
+
+// handleBlockUser implements both /block (newRole=roleBlocked) and
+// /unblock (newRole="", clears the row) -- same shape, opposite direction.
+func handleBlockUser(s *discordgo.Session, i *discordgo.InteractionCreate, deps botDeps, newRole userRole) {
+	if deps.db == nil {
+		respond(s, i, "Database is not configured.", true)
+		return
+	}
+	opts := i.ApplicationCommandData().Options
+	if len(opts) == 0 || opts[0].UserValue(s) == nil {
+		respond(s, i, "Missing user option.", true)
+		return
+	}
+	target := opts[0].UserValue(s)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if newRole == roleBlocked {
+		if err := setUserRole(ctx, deps.db, target.ID, roleBlocked, interactionUserID(i)); err != nil {
+			slog.Error("failed to block user", "target", target.ID, "err", err)
+			respond(s, i, "Failed to block user.", true)
+			return
+		}
+		respond(s, i, fmt.Sprintf("🚫 Blocked %s from using this bot.", target.Username), false)
+		return
+	}
+
+	if err := clearUserRole(ctx, deps.db, target.ID); err != nil {
+		slog.Error("failed to unblock user", "target", target.ID, "err", err)
+		respond(s, i, "Failed to unblock user.", true)
+		return
+	}
+	respond(s, i, fmt.Sprintf("✅ Restored access for %s.", target.Username), false)
 }
 
 func formatDuration(d time.Duration) string {

@@ -75,3 +75,15 @@ CREATE TABLE IF NOT EXISTS processed_files (
     file_path   TEXT PRIMARY KEY,
     byte_offset INTEGER NOT NULL
 );
+
+-- Owned/used by discord-bot, not the exporter -- see schema_postgres.sql's
+-- comment on the same table for the full rationale. discord-bot currently
+-- only supports a Postgres DSN (no --sqlite-path), so this is unused in
+-- practice today, but kept parallel with schema_postgres.sql rather than
+-- letting the two schema files silently diverge.
+CREATE TABLE IF NOT EXISTS discordbot_user_roles (
+    discord_user_id TEXT PRIMARY KEY,
+    role            TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    updated_by      TEXT NOT NULL
+);

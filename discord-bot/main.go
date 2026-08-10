@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,11 +27,11 @@ func main() {
 	discordAppID := flag.String("discord-app-id", "", "Discord Application ID, required to register slash commands")
 	metricsURL := flag.String("metrics-url", "", "Exporter's Prometheus /metrics URL, e.g. http://zomboid-zomboid-server-metrics.zomboid.svc.cluster.local:9091/metrics (used for /serveruptime)")
 	serverName := flag.String("server-name", "those-who-remain", "Server name, must match the exporter's --server-name (used to match the right series in /serveruptime)")
-	adminUserIDsFile := flag.String("admin-user-ids-file", "/config/admin-user-ids.json", "Path to a ConfigMap-mounted JSON array of Discord user IDs allowed to run admin commands")
 	dbHost := flag.String("db-host", "", "Postgres host for stats/leaderboard queries")
 	dbPort := flag.Int("db-port", 5432, "Postgres port")
 	dbName := flag.String("db-name", "zomboid", "Postgres database name")
 	dbUser := flag.String("db-user", "zomboid", "Postgres user (password read from DB_PASSWORD env var)")
+	bootstrapAdminIDs := flag.String("bootstrap-admin-ids", "", "Comma-separated Discord user IDs seeded as admin ONLY if discordbot_user_roles is completely empty (first boot / after a full data wipe). Ignored once any role exists -- day-to-day admin changes go through /block and /unblock, not this flag.")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -44,22 +45,41 @@ func main() {
 		os.Exit(1)
 	}
 
-	adminUserIDs, err := loadAdminUserIDs(*adminUserIDsFile)
-	if err != nil {
-		logger.Error("failed to load admin user IDs, admin commands stay locked down", "path", *adminUserIDsFile, "err", err)
-		adminUserIDs = map[string]bool{}
-	}
-	logger.Info("loaded admin user IDs", "count", len(adminUserIDs))
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Created before the Discord session so botDeps (and therefore the
+	// interaction handler's role checks) has it from the start -- role
+	// checks, not just /stats-style commands, depend on this now.
+	var dbPool *pgxpool.Pool
+	if *dbHost != "" {
+		dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s", *dbUser, os.Getenv("DB_PASSWORD"), *dbHost, *dbPort, *dbName)
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			logger.Error("failed to create Postgres pool", "err", err)
+		} else if err := pool.Ping(ctx); err != nil {
+			logger.Error("failed to reach Postgres", "err", err)
+			pool.Close()
+		} else {
+			dbPool = pool
+			defer dbPool.Close()
+			logger.Info("connected to Postgres, stats/leaderboard/admin-role commands enabled")
+			if *bootstrapAdminIDs != "" {
+				if err := bootstrapAdmins(ctx, dbPool, strings.Split(*bootstrapAdminIDs, ",")); err != nil {
+					logger.Error("failed to bootstrap admins", "err", err)
+				}
+			}
+		}
+	} else {
+		logger.Warn("--db-host not set, stats/leaderboard/admin-role commands unavailable")
+	}
 
 	deps := botDeps{
 		rconHost:     *rconHost,
 		rconPassword: os.Getenv("RCON_PASSWORD"),
 		metricsURL:   *metricsURL,
 		serverName:   *serverName,
-		adminUserIDs: adminUserIDs,
+		db:           dbPool,
 	}
 
 	discordSession, err := discordgo.New("Bot " + discordToken)
