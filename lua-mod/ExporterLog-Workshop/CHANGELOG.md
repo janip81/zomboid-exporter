@@ -1,5 +1,13 @@
 # ExporterLog changelog
 
+## Update 2026-08-10 (3) — v1.5.0
+
+### New tracked stats
+- **Environment (indoor/outdoor/vehicle) streaks** — tracks each player's current continuous streak in one of three states: indoors, outdoors, or in a vehicle. Entering a vehicle correctly ends whatever indoor/outdoor streak was running (sitting in a car parked outside doesn't count as an "outdoor" streak) and starts its own trackable vehicle streak. Emits on every state transition (the completed streak's exact duration, marked `final:true`) plus an hourly heartbeat while a streak is ongoing (`final:false`, the current running total) so a long streak's milestone can be caught before it ends. The `final` flag matters for anyone summing these for lifetime totals later: only `final:true` rows should be summed, since heartbeats repeat the running total rather than adding to it. CONFIRMED live in singleplayer debug: indoor→vehicle→outdoor→vehicle→outdoor all produced correct event shapes and durations, including a fresh (not resumed) streak after exiting a vehicle.
+
+### Fixed
+- **Debugger-freeze bug in the new Environment tracker itself**: initial version called `p:getVehicle()`/`p:isOutside()` via plain `pcall`, the same class of bug that froze the whole game on `item:isRead()` earlier — PZ's "break on error" debugger setting intercepts before `pcall`'s protection kicks in. Fixed with the same existence-check-before-call `safeCall()` helper `Reading.lua` already established. Confirmed live: after the fix, every tracker (including previously-silent ones downstream in file-load order) registered cleanly again.
+
 ## Update 2026-08-10 (2) — v1.4.0
 
 ### New tracked stats

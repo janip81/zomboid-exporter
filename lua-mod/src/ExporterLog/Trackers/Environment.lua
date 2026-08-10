@@ -1,34 +1,48 @@
 -- ExporterLog.Environment -- tracks each player's current continuous
--- indoor/outdoor streak, for milestones like "24h indoors straight" or
--- "72h outdoors straight" (see ideas/milestones.md). Entering a vehicle
--- breaks BOTH streaks -- sitting in a car parked outside shouldn't count
--- toward an "outdoor" streak even though isOutside() would say the
--- underlying tile is outdoors.
+-- indoor/outdoor/vehicle streak, for milestones like "24h indoors
+-- straight" (see ideas/milestones.md) AND for lifetime totals like "total
+-- time spent outdoors" (sum on the Postgres side -- see the "final" field
+-- note below for why a naive SUM(hours) would be wrong without it).
+--
+-- All three states are tracked symmetrically -- entering a vehicle isn't
+-- just a streak-breaker for indoor/outdoor, it's its own trackable streak
+-- too (so "total time in car" is answerable the same way as indoor/
+-- outdoor). Sitting in a car parked outside still correctly does NOT
+-- count toward an outdoor streak, since vehicle is its own distinct state
+-- rather than being folded into whatever isOutside() says the tile is.
 --
 -- character:isOutside() and character:getVehicle() are both CONFIRMED
 -- real -- widely used server-side (server/Farming/SPlantGlobalObject.lua,
 -- server/NPCs/SadisticAIDirector/SadisticMusicDirector.lua for
 -- isOutside(); getVehicle() used throughout vehicle-related server code),
--- not fresh guesses.
+-- not fresh guesses. CONFIRMED LIVE (2026-08-10) in singleplayer debug:
+-- indoor_streak, outdoor_streak, and the vehicle-breaks-both-streaks
+-- transition all fired with correct shapes and durations, including a
+-- fresh (not resumed) streak starting after exiting a vehicle.
 --
--- Emits two distinct event types (indoor_streak / outdoor_streak) rather
--- than one "environment_streak" + a state field -- the bot's milestone
--- matching (discord-bot/milestones.go) already keys purely on event_type,
--- so two event types need zero schema/matching-logic changes, versus a
--- single type needing a new filter column to disambiguate indoor vs.
--- outdoor. Vehicle time never emits its own event -- it's purely a
--- streak-breaker for the other two states.
+-- Emits three distinct event types (indoor_streak / outdoor_streak /
+-- vehicle_streak) rather than one "environment_streak" + a state field --
+-- the bot's milestone matching (discord-bot/milestones.go) already keys
+-- purely on event_type, so distinct types need zero schema/matching-logic
+-- changes, versus one type needing a new filter column to disambiguate.
 --
 -- Emits on: every state transition (so a completed streak's exact final
--- duration is always captured precisely), plus a throttled ~hourly
--- heartbeat while a streak is still ongoing (WorldStats.lua's own
--- TICKS_PER_EMIT=60 pattern) -- the Lua side has no knowledge of what
--- thresholds the bot's milestone table actually contains, so a long
--- streak needs SOME periodic emission or a milestone crossed mid-streak
--- (e.g. 24h while still indoors after days inside) would never be caught
--- until the streak eventually ends. Hourly is the practical compromise
--- between catching thresholds promptly and not flooding events/MQTT/
--- Postgres with a row every single in-game minute for every player.
+-- duration is always captured precisely, marked final=true), plus a
+-- throttled ~hourly heartbeat while a streak is still ongoing
+-- (WorldStats.lua's own TICKS_PER_EMIT=60 pattern, marked final=false) --
+-- the Lua side has no knowledge of what thresholds the bot's milestone
+-- table actually contains, so a long streak needs SOME periodic emission
+-- or a milestone crossed mid-streak (e.g. 24h while still indoors after
+-- days inside) would never be caught until the streak eventually ends.
+-- Hourly is the practical compromise between catching thresholds promptly
+-- and not flooding events/MQTT/Postgres with a row every single in-game
+-- minute for every player.
+--
+-- The "final" field matters for lifetime totals specifically: a 5-hour
+-- streak emits heartbeats at hour 1, 2, 3, 4 (final=false, each the
+-- CURRENT running total, not incremental) then a close at hour 5
+-- (final=true) -- summing every row blindly would give 15, not 5.
+-- Aggregating "total time outdoors" must filter to final=true rows only.
 --
 -- No require(), no cached cross-file locals -- see Vehicles.lua's
 -- header comment for why (confirmed live: require() doesn't resolve
@@ -80,12 +94,13 @@ local function classifyState(p)
     if isOutside then return "outdoor" else return "indoor" end
 end
 
-local function emitStreak(p, username, state, hours)
+local function emitStreak(p, username, state, hours, final)
     ExporterLog.Emit.event({
         type = state .. "_streak",
         steamId = ExporterLog.Utils.getPlayerSteamID(p),
         username = username,
         hours = ExporterLog.Utils.round2(hours),
+        final = final,
     })
 end
 
@@ -106,27 +121,24 @@ local function onEveryMinuteEnvironment()
             -- First observation for this player -- establish baseline
             -- without treating it as a transition, same principle as
             -- Kills.lua's kill baseline and Sleeping.lua's sleep baseline.
-            envState[username] = {
-                state = newState,
-                streakStartWorldAgeHours = (newState ~= "vehicle") and nowHours or nil,
-            }
+            envState[username] = { state = newState, streakStartWorldAgeHours = nowHours }
             return
         end
 
         if newState ~= state.state then
-            -- Transition: if the PREVIOUS state was a trackable streak
-            -- (indoor/outdoor, not vehicle), emit its final exact
-            -- duration before switching states.
-            if state.state ~= "vehicle" and state.streakStartWorldAgeHours and nowHours then
-                emitStreak(p, username, state.state, nowHours - state.streakStartWorldAgeHours)
+            -- Transition: emit the PREVIOUS state's final exact duration
+            -- before switching -- every state is trackable now, including
+            -- vehicle, so this always fires on any state change.
+            if state.streakStartWorldAgeHours and nowHours then
+                emitStreak(p, username, state.state, nowHours - state.streakStartWorldAgeHours, true)
             end
-            state.streakStartWorldAgeHours = (newState ~= "vehicle") and nowHours or nil
+            state.streakStartWorldAgeHours = nowHours
             state.state = newState
-        elseif heartbeat and newState ~= "vehicle" and state.streakStartWorldAgeHours and nowHours then
+        elseif heartbeat and state.streakStartWorldAgeHours and nowHours then
             -- Same state, streak still ongoing, hourly heartbeat: emit
-            -- the current running duration so a long streak's milestone
-            -- can be caught before the streak ever ends.
-            emitStreak(p, username, newState, nowHours - state.streakStartWorldAgeHours)
+            -- the current running duration (final=false) so a long
+            -- streak's milestone can be caught before it ever ends.
+            emitStreak(p, username, newState, nowHours - state.streakStartWorldAgeHours, false)
         end
     end)
 end
