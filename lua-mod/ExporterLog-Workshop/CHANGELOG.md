@@ -1,5 +1,19 @@
 # ExporterLog changelog
 
+## Update 2026-08-10 (2) — v1.4.0
+
+### New tracked stats
+- **World stats** — periodic (~hourly) snapshot of in-game date/time, nights survived, and world age, not tied to any player. CONFIRMED live.
+- **Sleeping** — total hours slept per session, via `awake→asleep`/`asleep→awake` transition detection. CONFIRMED live: a full sleep produced the correct `hours` value, matching world stats' independently-observed time skip during the same nap.
+- **Reading, rewritten for skill books** — the existing `read` event now distinguishes one-shot Literature (unchanged: `amount:1` on completion) from multi-session skill books, which now report `pageStart`/`pageEnd`/`pagesRead`/`totalPages`/`completed` per reading session (interrupted or finished), via both `ISReadABook:stop()` and `:complete()`. CONFIRMED live across both book types, including a cancelled-then-resumed skill book session.
+- **Weapon hits and swings** — per-hit damage (`weapon_hit`: weapon, damage, target type) and per-swing/shot outcome (`weapon_swing`: hit boolean, total damage, targets hit, hardest hit on one target, hardest single projectile). Handles multi-target melee cleaves and multi-pellet shotgun blasts correctly by correlating hits to their originating swing via a shared `attackId`, and by target object identity (not a persisted zombie ID) so "43 damage to one zombie" is distinguishable from "43 spread across three." CONFIRMED live extensively: bare hands, metal baseball bat, shotgun (single and multi-target), single-shot rifle, clean misses, and an accidental shot fired into the air all produced correct, sane output. Accuracy% is `weapon_swing` rows with `hit=true` divided by total rows, per weapon — always ≤100% since it's per-swing, not per-pellet.
+- **Deaths (zombie-kills-at-death)** — supplements PerkLog's own native death tracking (already covers location/hours-survived/deaths-count with zero Lua involvement) with the one fact it doesn't carry. Implemented, hooked to `Events.OnPlayerDeath` (confirmed to exist and register live), but not yet tested against an actual death this session.
+
+## Update 2026-08-10 — v1.3.0
+
+### New tracked stats
+- **Smoking** — cigarettes/cigars smoked, `amount` always 1 (a whole item, not a partial-consumption ratio). CONFIRMED live: B42 routes smoking through the same `ISEatFoodAction` regular eating uses, not a dedicated action — detected via `item:hasTag(ItemTag.SMOKABLE)` inside the existing `eat` hook rather than a separate one, so it works for any current/future item correctly tagged smokable, not just `Base.Cigarettes`/`Base.Cigar`. Cancelling a smoke mid-action correctly produces no event at all, same as cancelling regular eating.
+
 ## Update 2026-08-09 (4) — v1.2.0
 
 ### New tracked stats

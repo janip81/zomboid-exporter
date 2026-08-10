@@ -47,7 +47,7 @@
 -- files, since Steam Workshop itself has no version field, only free-
 -- text change notes on the item page.
 ExporterLog = ExporterLog or {}
-ExporterLog.VERSION = "1.2.0"
+ExporterLog.VERSION = "1.4.0"
 
 Events.OnGameStart.Add(function()
     local Runtime = ExporterLog and ExporterLog.Runtime

@@ -1,5 +1,5 @@
 -- ExporterLog.Consumption -- eating, drinking (item + world source),
--- and pills/medicine. Grouped together because they're all
+-- pills/medicine, and smoking. Grouped together because they're all
 -- monkey-patched TimedAction.complete hooks sharing the same
 -- reload-safe pattern (ExporterLog.Runtime.hookTimedActionOnce).
 --
@@ -142,11 +142,33 @@ local function extractTakeWater(self)
     }
 end
 
+-- CONFIRMED live (2026-08-10): vanilla routes smoking through this
+-- SAME TimedAction, not a dedicated one -- ISSmokingAction (this
+-- session's earlier guess) doesn't exist/never fired; the actual
+-- ISEatFoodAction hook caught a real cigar smoke as
+-- {"item":"Base.Cigar",...,"type":"eat",...}. Per the user's
+-- confirmed B42 source knowledge: cigarette/cigar items carry
+-- ItemTag.SMOKABLE, and the inventory code checks
+-- item:hasTag(ItemTag.SMOKABLE) before queuing this exact same
+-- ISEatFoodAction -- there's no separate class to hook, and hooking
+-- .complete here (rather than the context-menu click) already gets
+-- "cancelling the smoke doesn't count" for free, same as it does for
+-- real eating.
 local function extractEat(self)
+    local isSmokable = false
+    if self.item then
+        local ok, result = pcall(function() return self.item:hasTag(ItemTag.SMOKABLE) end)
+        isSmokable = ok and result or false
+    end
     return {
+        type = isSmokable and "smoke" or nil, -- nil lets hookTimedActionOnce fall back to "eat"
         item = self.item and self.item:getFullType() or "?",
         name = ExporterLog.Utils.getItemDisplayName(self.item),
-        amount = self.percentage,
+        -- Smoking is one whole cigarette/cigar per action, not a
+        -- partial-consumption ratio -- self.percentage is the
+        -- hunger-satisfying fraction eaten, which isn't a meaningful
+        -- concept here (per user: "i dont think we get half").
+        amount = isSmokable and 1 or self.percentage,
     }
 end
 

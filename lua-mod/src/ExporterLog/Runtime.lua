@@ -109,7 +109,14 @@ function Runtime.hookTimedActionOnce(originalsTable, actionClassName, actionClas
         local ok, err = pcall(function()
             local fields = extractFields(self)
             if fields then
-                fields.type = eventName
+                -- extractFields may set fields.type itself to override
+                -- eventName -- e.g. Consumption.lua's extractEat
+                -- reclassifies smokable items (ISEatFoodAction is
+                -- reused by vanilla for smoking, tagged
+                -- ItemTag.SMOKABLE) as "smoke" instead of "eat". Every
+                -- other extractor here never sets fields.type, so this
+                -- is a no-op for them -- behavior identical to before.
+                fields.type = fields.type or eventName
                 fields.username = (self.character and self.character.getUsername) and self.character:getUsername() or "?"
                 fields.steamId = ExporterLog.Utils.getPlayerSteamID(self.character)
                 eventEmitter(fields)
