@@ -145,6 +145,15 @@ local MECHANICS = {
 }
 
 local function onClientCommand(module, command, player, args)
+    -- Temporary broad diagnostic (2026-08-11): confirms Events.OnClientCommand
+    -- itself is even firing/reaching this handler for twr_debug specifically,
+    -- since a client-confirmed successful send with zero server-side trace
+    -- otherwise gives no signal either way. Remove once the round-trip is
+    -- confirmed working.
+    if module == "twr_debug" then
+        print("TWR.Debug: onClientCommand saw module=" .. tostring(module) .. " command=" .. tostring(command) .. " args.mechanic=" .. tostring(args and args.mechanic))
+    end
+
     if module ~= "twr_debug" or command ~= "run" then return end
 
     if not isDebugEnabled() then
@@ -170,6 +179,7 @@ end
 
 local function init()
     TWR.Runtime.registerEventOnce(TWR.Debug, "clientCommand", Events.OnClientCommand, onClientCommand)
+    print("TWR.Debug: OnClientCommand handler registered")
 end
 
 -- Self-initialize: immediate attempt handles F11 reload, OnGameStart
