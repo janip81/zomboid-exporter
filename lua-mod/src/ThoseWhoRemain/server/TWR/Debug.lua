@@ -115,31 +115,50 @@ local function runCorpse(p)
     print("TWR.Debug: runCorpse -- spawnPermanentCorpse " .. (ok and "SUCCEEDED, one tile east" or "FAILED"))
 end
 
-local function runDoor(p)
+-- Shared by runDoor and runDoorUnlockPermanent -- finds the door on the
+-- player's current square, falling back to its 4 orthogonal neighbors.
+-- Prints diagnostics either way so a "no door found" report can be told
+-- apart from a "found the wrong door" report.
+local function findDoorNearPlayer(p, label)
     local okCell, cell = pcall(function() return getCell() end)
     local okSquare, square = safeCall(p, "getCurrentSquare")
     local okX, x = safeCall(p, "getX")
     local okY, y = safeCall(p, "getY")
     local okZ, z = safeCall(p, "getZ")
-    if not (okCell and cell and okX and okY and okZ) then return end
+    if not (okCell and cell and okX and okY and okZ) then return nil end
 
-    print("TWR.Debug: runDoor -- player at (" .. tostring(x) .. "," .. tostring(y) .. "," .. tostring(z) .. "), current square (" .. math.floor(x) .. "," .. math.floor(y) .. ")")
+    print("TWR.Debug: " .. label .. " -- player at (" .. tostring(x) .. "," .. tostring(y) .. "," .. tostring(z) .. "), current square (" .. math.floor(x) .. "," .. math.floor(y) .. ")")
 
     local door = okSquare and square and TWR.Mechanics.Door.findDoorOnSquare(square)
     if not door then
         door = TWR.Mechanics.Door.findNearbyDoor(cell, math.floor(x), math.floor(y), math.floor(z))
     end
     if not door then
-        print("TWR.Debug: runDoor -- no door found on current square or its 4 neighbors")
-        return
+        print("TWR.Debug: " .. label .. " -- no door found on current square or its 4 neighbors")
+        return nil
     end
 
     local okDx, dx = safeCall(door, "getX")
     local okDy, dy = safeCall(door, "getY")
-    print("TWR.Debug: runDoor -- door found at (" .. tostring(okDx and dx or "?") .. "," .. tostring(okDy and dy or "?") .. ")")
+    print("TWR.Debug: " .. label .. " -- door found at (" .. tostring(okDx and dx or "?") .. "," .. tostring(okDy and dy or "?") .. ")")
+
+    return door
+end
+
+local function runDoor(p)
+    local door = findDoorNearPlayer(p, "runDoor")
+    if not door then return end
 
     local keyId = TWR.Mechanics.Door.lockToKey(door, nil, p)
-    print("TWR.Debug: runDoor -- locked, keyId=" .. tostring(keyId) .. ", matching key added to your inventory -- test from the EXTERIOR side")
+    print("TWR.Debug: runDoor -- locked, keyId=" .. tostring(keyId) .. ", matching key added to your inventory -- test from the EXTERIOR side. This is the 'relock' policy: closing the door re-locks it, key required every time. Use 'Unlock nearest door permanently' to test the 'permanent' policy instead.")
+end
+
+local function runDoorUnlockPermanent(p)
+    local door = findDoorNearPlayer(p, "runDoorUnlockPermanent")
+    if not door then return end
+
+    TWR.Mechanics.Door.unlockPermanent(door)
+    print("TWR.Debug: runDoorUnlockPermanent -- door converted to plain/permanently unlocked. Verify: opens freely with no key, and closing it does NOT re-lock it.")
 end
 
 local function runRecipe(p)
@@ -162,6 +181,7 @@ local MECHANICS = {
     deferred_area = runDeferredArea,
     corpse = runCorpse,
     door = runDoor,
+    door_unlock_permanent = runDoorUnlockPermanent,
     recipe = runRecipe,
     map_reveal = runMapReveal,
 }

@@ -36,6 +36,7 @@ local MECHANIC_LABELS = {
     { key = "deferred_area", label = "Deferred-area test (300 tiles away)" },
     { key = "corpse", label = "Spawn permanent corpse" },
     { key = "door", label = "Lock nearest door" },
+    { key = "door_unlock_permanent", label = "Unlock nearest door permanently" },
     { key = "recipe", label = "Teach test recipe" },
     { key = "map_reveal", label = "Reveal map area" },
 }

@@ -120,3 +120,34 @@ function Door.lockToKey(door, keyId, giveKeyToPlayer)
 
     return keyId
 end
+
+-- Converts an already lockToKey()'d door into a plain, permanently
+-- unlocked door -- no key required ever again, closing it does NOT
+-- re-lock it. CONFIRMED live 2026-08-11: a lockToKey()'d door's
+-- modData.CustomLock is what makes ISLockDoor:isValid()
+-- (shared/TimedActions/ISLockDoor.lua) unconditionally reject the
+-- normal Lock/Unlock action for anyone without the matching key --
+-- exactly the "always relock, key required forever" behavior. This
+-- function is the inverse: drops setLockedByKey/setLocked/setIsLocked
+-- back to false and clears modData.CustomLock, so the door goes back
+-- to being an ordinary vanilla door.
+--
+-- This is a primitive only -- it does NOT decide WHEN to call itself.
+-- That decision (permanent vs. relock vs. future consume_key) belongs
+-- to the quest/job action layer, per its own unlock_policy field --
+-- see antagonist/quest-engine-extensibility.md. Door.lua stays generic:
+-- lockToKey() for the initial lock (== "relock" policy behavior
+-- as-is), unlockPermanent() for converting a solved door to
+-- permanently open (== "permanent" policy, the documented default).
+function Door.unlockPermanent(door)
+    safeCall(door, "setLockedByKey", false)
+    safeCall(door, "setLocked", false)
+    safeCall(door, "setIsLocked", false)
+
+    local okModData, modData = safeCall(door, "getModData")
+    if okModData and modData then
+        pcall(function() modData.CustomLock = nil end)
+    end
+
+    safeCall(door, "syncIsoObject", false, 0, nil, nil)
+end
