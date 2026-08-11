@@ -1,0 +1,6 @@
+version=1
+id=378169985
+title=Those Who Remain
+description=Gameplay framework mod: calendar, custom items, client UI, antagonist runtime. Separate Mod ID from ExporterLog (telemetry only). In active development -- expect frequent changes.
+tags=Build 42;Framework
+visibility=unlisted
