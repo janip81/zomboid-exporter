@@ -63,6 +63,7 @@ local function runContainer(p)
     if not (okX and okY and okZ) then return end
 
     local bx, by, bz = math.floor(x) + 1, math.floor(y), math.floor(z)
+    print("TWR.Debug: runContainer -- player at (" .. tostring(x) .. "," .. tostring(y) .. "," .. tostring(z) .. "), target (" .. bx .. "," .. by .. "," .. bz .. ")")
     local crate = TWR.Mechanics.Container.spawnBox(bx, by, bz)
     if not crate then
         print("TWR.Debug: runContainer -- spawnBox failed")

@@ -126,20 +126,35 @@ end
 -- Returns the created IsoThumpable (the "crate"), or nil on failure.
 function Container.spawnBox(x, y, z)
     local okCell, cell = pcall(function() return getCell() end)
-    if not okCell or not cell then return nil end
+    if not okCell or not cell then
+        print("TWR.Mechanics.Container: spawnBox -- getCell() failed: " .. tostring(cell))
+        return nil
+    end
 
     local okSq, square = pcall(function() return cell:getGridSquare(x, y, z) end)
-    if not okSq or not square then return nil end
+    if not okSq or not square then
+        print("TWR.Mechanics.Container: spawnBox -- getGridSquare(" .. x .. "," .. y .. "," .. z .. ") failed/nil: " .. tostring(square))
+        return nil
+    end
 
     local okBo, bo = pcall(function() return ISWoodenContainer:new("carpentry_01_19", "carpentry_01_19") end)
-    if not okBo or not bo then return nil end
+    if not okBo or not bo then
+        print("TWR.Mechanics.Container: spawnBox -- ISWoodenContainer:new() failed: " .. tostring(bo))
+        return nil
+    end
     bo.player = 0
 
-    local okCreate = pcall(function() bo:create(x, y, z, bo.north, bo.sprite) end)
-    if not okCreate then return nil end
+    local okCreate, createErr = pcall(function() bo:create(x, y, z, bo.north, bo.sprite) end)
+    if not okCreate then
+        print("TWR.Mechanics.Container: spawnBox -- bo:create() failed: " .. tostring(createErr))
+        return nil
+    end
 
     local okSpecial, specialObjects = safeCall(square, "getSpecialObjects")
-    if not okSpecial or not specialObjects or specialObjects:size() == 0 then return nil end
+    if not okSpecial or not specialObjects or specialObjects:size() == 0 then
+        print("TWR.Mechanics.Container: spawnBox -- bo:create() ran but no special object found on target square afterward (okSpecial=" .. tostring(okSpecial) .. ")")
+        return nil
+    end
 
     return specialObjects:get(specialObjects:size() - 1)
 end
