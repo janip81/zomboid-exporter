@@ -123,6 +123,8 @@ local function runDoor(p)
     local okZ, z = safeCall(p, "getZ")
     if not (okCell and cell and okX and okY and okZ) then return end
 
+    print("TWR.Debug: runDoor -- player at (" .. tostring(x) .. "," .. tostring(y) .. "," .. tostring(z) .. "), current square (" .. math.floor(x) .. "," .. math.floor(y) .. ")")
+
     local door = okSquare and square and TWR.Mechanics.Door.findDoorOnSquare(square)
     if not door then
         door = TWR.Mechanics.Door.findNearbyDoor(cell, math.floor(x), math.floor(y), math.floor(z))
@@ -131,6 +133,10 @@ local function runDoor(p)
         print("TWR.Debug: runDoor -- no door found on current square or its 4 neighbors")
         return
     end
+
+    local okDx, dx = safeCall(door, "getX")
+    local okDy, dy = safeCall(door, "getY")
+    print("TWR.Debug: runDoor -- door found at (" .. tostring(okDx and dx or "?") .. "," .. tostring(okDy and dy or "?") .. ")")
 
     local keyId = TWR.Mechanics.Door.lockToKey(door, nil, p)
     print("TWR.Debug: runDoor -- locked, keyId=" .. tostring(keyId) .. ", matching key added to your inventory -- test from the EXTERIOR side")
