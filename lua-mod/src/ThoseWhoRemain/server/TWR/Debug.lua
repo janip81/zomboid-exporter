@@ -159,22 +159,20 @@ local MECHANICS = {
 }
 
 local function onClientCommand(module, command, player, args)
-    -- Temporary broad diagnostic (2026-08-11): confirms Events.OnClientCommand
-    -- itself is even firing/reaching this handler for twr_debug specifically,
-    -- since a client-confirmed successful send with zero server-side trace
-    -- otherwise gives no signal either way. Remove once the round-trip is
-    -- confirmed working.
-    if module == "twr_debug" then
-        print("TWR.Debug: onClientCommand saw module=" .. tostring(module) .. " command=" .. tostring(command) .. " args.mechanic=" .. tostring(args and args.mechanic))
-    end
-
     if module ~= "twr_debug" or command ~= "run" then return end
 
-    if not isDebugEnabled() then
-        print("TWR.Debug: twr_debug command received but isDebugEnabled() is false, ignoring")
-        return
-    end
-
+    -- CONFIRMED live 2026-08-11: dropped the server-side isDebugEnabled()
+    -- requirement here. -debug was confirmed actually present in the
+    -- server's own launch args (verified directly in /proc), yet
+    -- isDebugEnabled() still reported false for every real command
+    -- received -- it evidently checks something other than the launch
+    -- flag server-side (the CLIENT's own working debugger, from earlier
+    -- tonight, never depended on this server having any -debug flag at
+    -- all, which was the first sign this assumption was wrong). Access
+    -- level "admin" alone is the real authorization boundary here and
+    -- is sufficient for a throwaway debug tool -- see the client-side
+    -- isDebugEnabled() check in client/TWR/Context/Debug.lua for why
+    -- that one still matters (menu visibility/UX only, not security).
     local okLevel, level = safeCall(player, "getAccessLevel")
     if not okLevel or level ~= "admin" then
         print("TWR.Debug: twr_debug command received from non-admin access level (" .. tostring(level) .. "), ignoring")
