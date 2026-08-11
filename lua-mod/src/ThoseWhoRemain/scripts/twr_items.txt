@@ -1,0 +1,10 @@
+module ThoseWhoRemain
+{
+	item Calendar
+	{
+		DisplayCategory = Literature,
+		ItemType = base:normal,
+		Weight = 0.1,
+		Icon = Book
+	}
+}

@@ -4,13 +4,14 @@ PLAN.md
 ROADMAP.md
 WORKLOG.md
 
-# ideas
-/ideas
 
 # Go build artifacts
 /zomboid-exporter
 /discord-bot/zomboid-discord-bot
 *.test
+
+# Python build-script cache
+__pycache__/
 
 # Local state
 *.db
@@ -28,3 +29,21 @@ lua-mod/ExporterLog_Dev/
 lua-mod/ExporterLog_backup_workshop/
 lua-mod/ExporterLog/42/media/lua/server/ExporterLog/
 lua-mod/ExporterLog-Workshop/Contents/mods/ExporterLog/42/media/lua/server/ExporterLog/
+
+# ThoseWhoRemain Lua mod (the real gameplay mod -- calendar, items,
+# client UI, antagonist runtime -- kept as a separate Mod ID from
+# ExporterLog per MOD-STRUCTURE.md's confirmed decision). Same pattern:
+# only lua-mod/src/ThoseWhoRemain is hand-edited; build-dev-twr.py and
+# build-workshop-twr.py regenerate every package's TWR/ subtree and
+# TWR-owned scripts/translate files -- never edit those copies directly.
+# ThoseWhoRemain_Dev is a disposable singleplayer-only local testing
+# copy, never uploaded anywhere.
+lua-mod/ThoseWhoRemain_Dev/
+lua-mod/ThoseWhoRemain/42/media/lua/shared/TWR/
+lua-mod/ThoseWhoRemain/42/media/lua/client/TWR/
+lua-mod/ThoseWhoRemain/42/media/scripts/twr_items.txt
+lua-mod/ThoseWhoRemain/42/media/lua/shared/Translate/EN/ItemName.json
+lua-mod/ThoseWhoRemain-Workshop/Contents/mods/ThoseWhoRemain/42/media/lua/shared/TWR/
+lua-mod/ThoseWhoRemain-Workshop/Contents/mods/ThoseWhoRemain/42/media/lua/client/TWR/
+lua-mod/ThoseWhoRemain-Workshop/Contents/mods/ThoseWhoRemain/42/media/scripts/twr_items.txt
+lua-mod/ThoseWhoRemain-Workshop/Contents/mods/ThoseWhoRemain/42/media/lua/shared/Translate/EN/ItemName.json
