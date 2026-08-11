@@ -144,8 +144,14 @@ end
 -- matching Base.KeyPadlock item is added to their inventory (mirrors
 -- vanilla's own bookkeeping) -- omit to leave the box permanently
 -- key-locked with no key issued.
-function Container.lockByKey(crate, giveKeyToPlayer)
-    local keyId = ZombRand(100000000)
+--
+-- keyId is optional (generates one via ZombRand if omitted) -- per
+-- CGPT-101 review, a future retryable DB job should generate/snapshot
+-- the keyId once backend-side and pass the SAME value on every retry,
+-- matching Door.lockToKey's already-correct pattern, rather than this
+-- function silently minting a new identity on each call.
+function Container.lockByKey(crate, giveKeyToPlayer, keyId)
+    keyId = keyId or ZombRand(100000000)
     safeCall(crate, "setKeyId", keyId)
     safeCall(crate, "setLockedByPadlock", true)
     safeCall(crate, "sync")
@@ -170,8 +176,11 @@ end
 -- difference is which item represents the lock in inventory
 -- (Base.Padlock, with setNumberOfKey(1) matching vanilla's own
 -- ISPadlockAction bookkeeping).
-function Container.lockByPadlock(crate, giveKeyToPlayer)
-    local keyId = ZombRand(100000000)
+--
+-- keyId is optional, same retry-determinism reasoning as lockByKey
+-- above (per CGPT-101 review).
+function Container.lockByPadlock(crate, giveKeyToPlayer, keyId)
+    keyId = keyId or ZombRand(100000000)
     safeCall(crate, "setLockedByPadlock", true)
     safeCall(crate, "setKeyId", keyId)
     safeCall(crate, "sync")
