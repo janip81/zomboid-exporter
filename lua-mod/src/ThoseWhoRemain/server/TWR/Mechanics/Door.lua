@@ -133,12 +133,17 @@ end
 -- to being an ordinary vanilla door.
 --
 -- This is a primitive only -- it does NOT decide WHEN to call itself.
--- That decision (permanent vs. relock vs. future consume_key) belongs
--- to the quest/job action layer, per its own unlock_policy field --
--- see antagonist/quest-engine-extensibility.md. Door.lua stays generic:
--- lockToKey() for the initial lock (== "relock" policy behavior
--- as-is), unlockPermanent() for converting a solved door to
+-- That decision (permanent vs. relock_on_close) belongs to the
+-- quest/job action layer, per its own unlock_policy field -- see
+-- antagonist/quest-engine-extensibility.md. Door.lua stays generic:
+-- lockToKey() for the initial lock (== "relock_on_close" policy
+-- behavior as-is), unlockPermanent() for converting a solved door to
 -- permanently open (== "permanent" policy, the documented default).
+-- Note: applying "permanent" automatically at the right moment (when
+-- a player actually gets past the door) is NOT implemented anywhere
+-- yet -- that requires the reactive world-event layer the design doc
+-- flags as still needing research. These are just the two low-level
+-- primitives that layer will call.
 function Door.unlockPermanent(door)
     safeCall(door, "setLockedByKey", false)
     safeCall(door, "setLocked", false)
