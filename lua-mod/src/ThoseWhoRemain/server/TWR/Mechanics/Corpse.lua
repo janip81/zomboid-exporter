@@ -112,6 +112,24 @@ function Corpse.spawnPermanentCorpse(x, y, z, outfit, femaleChance, lootItems)
     local okHealth = safeCall(zombie, "setHealth", 0)
     if not okHealth then return false end
 
+    -- DIAGNOSTIC 2026-08-11: dedicated MP live report was "blood on the
+    -- floor, no visible corpse" -- vanilla itself never calls
+    -- zombie:setHealth(0) anywhere (grepped: only animal:setHealth(0)
+    -- exists, via shared/TimedActions/Animals/ISKillAnimal.lua). No
+    -- proven vanilla precedent that this triggers the same
+    -- corpse-creation/sync path a real combat kill does. Checking
+    -- whether a real IsoDeadBody actually exists server-side
+    -- immediately after death, to tell apart "never created" from
+    -- "created but not synced to the client".
+    local okSqNow, squareNow = safeCall(zombie, "getCurrentSquare")
+    if okSqNow and squareNow then
+        local okDead, isDead = safeCall(zombie, "isDead")
+        local okBodiesNow, bodiesNow = safeCall(squareNow, "getDeadBodys")
+        print("TWR.Mechanics.Corpse: spawnPermanentCorpse -- post-death check: isDead=" .. tostring(okDead and isDead) .. ", square getDeadBodys():size()=" .. tostring(okBodiesNow and bodiesNow and bodiesNow:size() or "?"))
+    else
+        print("TWR.Mechanics.Corpse: spawnPermanentCorpse -- post-death check: getCurrentSquare() failed (okSqNow=" .. tostring(okSqNow) .. ")")
+    end
+
     if not handledAtSpawn then
         local okSq, square = safeCall(zombie, "getCurrentSquare")
         table.insert(Corpse.pending, {
