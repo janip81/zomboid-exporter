@@ -22,6 +22,10 @@ def build_package(root):
         shutil.rmtree(root / "42" / "media" / "lua" / "client" / "TWR")
     shutil.copytree(SRC / "client" / "TWR", root / "42" / "media" / "lua" / "client" / "TWR")
 
+    if (root / "42" / "media" / "lua" / "server" / "TWR").exists():
+        shutil.rmtree(root / "42" / "media" / "lua" / "server" / "TWR")
+    shutil.copytree(SRC / "server" / "TWR", root / "42" / "media" / "lua" / "server" / "TWR")
+
     scripts_dest = root / "42" / "media" / "scripts"
     scripts_dest.mkdir(parents=True, exist_ok=True)
     for f in (SRC / "scripts").glob("*.txt"):
