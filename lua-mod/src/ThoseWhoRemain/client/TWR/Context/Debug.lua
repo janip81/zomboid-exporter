@@ -32,6 +32,7 @@ local MECHANIC_LABELS = {
     { key = "door", label = "Lock nearest door" },
     { key = "recipe", label = "Teach test recipe" },
     { key = "map_reveal", label = "Reveal map area" },
+    { key = "container_direct_probe", label = "TEST N: direct-spawn locked container" },
 }
 
 local function onFillWorldObjectContextMenu(player, context, worldobjects, test)

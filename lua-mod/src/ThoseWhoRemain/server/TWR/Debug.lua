@@ -149,6 +149,144 @@ local function runMapReveal(p)
     print("TWR.Debug: runMapReveal -- revealAroundPoint " .. (ok and "SUCCEEDED -- check the map" or "FAILED"))
 end
 
+-- TEST N -- direct authoritative server world-object creation, bypassing
+-- ISWoodenContainer:create() entirely. CONFIRMED root cause of the
+-- dedicated-MP spawnBox() failure (2026-08-11 live test): ISWoodenContainer:
+-- create() calls buildUtil.consumeMaterial(self) (server/BuildingObjects/
+-- ISBuildUtil.lua), whose guard is `if not ISItem or not ISItem.player then
+-- return {} end` -- since Container.spawnBox sets bo.player = 0 (a bare
+-- NUMBER, not nil), `not 0` is false in Lua (0 is truthy), so the guard
+-- passes and the function proceeds to `playerObj:getInventory()` on the
+-- number 0 -- exactly the "Object tried to call nil" crash. ISWoodenContainer
+-- is an ISBuildIsoEntity/player-build helper; there is no safe way to call
+-- consumeMaterial() without a real IsoPlayer.
+--
+-- This probe instead replicates ISWoodenContainer:create() line-for-line
+-- (server/BuildingObjects/ISWoodenContainer.lua) MINUS the two buildUtil.*
+-- calls that involve a player:
+--   KEPT:     IsoThumpable.new(cell, sq, sprite, north, companion) --
+--             companion is the same kind of Lua "ISItem" table
+--             ISBuildingObject-derived classes pass as IsoThumpable's own
+--             5th ctor arg; the actual container is provisioned via
+--             buildUtil.setInfo() calling javaObject:setIsContainer(true)
+--             below, not by a separate ItemContainer.new() call (that
+--             pattern -- ItemContainer.new()+setContainer() -- is used
+--             elsewhere in vanilla for non-IsoThumpable IsoObjects, e.g.
+--             server/Camping/SCampfireGlobalObject.lua's addContainer(),
+--             but is NOT how IsoThumpable-based containers like the wooden
+--             crate work).
+--   KEPT:     buildUtil.setInfo(javaObject, companion) -- CONFIRMED
+--             player-independent (read the full function body): it's
+--             purely javaObject:set*(companion.field) calls off the Lua
+--             table, no ISItem.player access anywhere in it. This is what
+--             actually makes the object a real lootable container
+--             (javaObject:setIsContainer(companion.isContainer)) and sets
+--             canBeLockByPadlock (needed for lockByPadlock/lockByCode to
+--             work later).
+--   DROPPED:  buildUtil.consumeMaterial(self) -- the crash cause, and
+--             semantically wrong anyway: a DB-driven quest job spawning a
+--             quest container has no player materials to consume.
+--   KEPT:     setMaxHealth/setHealth/setBreakSound, sq:AddSpecialObject(),
+--             javaObject:transmitCompleteItemToClients() -- unchanged,
+--             player-independent, confirmed straight from the same
+--             ISWoodenContainer:create().
+--
+-- Deliberately NOT touching TWR.Mechanics.Container.spawnBox() or any of
+-- lockByCode/lockByKey/lockByPadlock yet -- this is an isolated probe per
+-- explicit instruction, only to be promoted once proven live on the real
+-- dedicated MP server (client sees it, can loot it, combo lock works,
+-- survives a server restart).
+local function spawnDirectCrate(x, y, z)
+    local okCell, cell = pcall(function() return getCell() end)
+    if not okCell or not cell then
+        print("TWR.Debug: TEST N -- getCell() failed: " .. tostring(cell))
+        return nil
+    end
+
+    local okSq, square = pcall(function() return cell:getGridSquare(x, y, z) end)
+    if not okSq or not square then
+        print("TWR.Debug: TEST N -- getGridSquare(" .. x .. "," .. y .. "," .. z .. ") failed/nil: " .. tostring(square))
+        return nil
+    end
+
+    local sprite = "carpentry_01_19"
+    -- Same field set ISWoodenContainer:new() sets on itself (grepped from
+    -- ISWoodenContainer.lua) -- everything setInfo() reads that we don't
+    -- explicitly set (canPassThrough, canBarricade, thumpDmg, isDoor,
+    -- isDoorFrame, crossSpeed, canBePlastered, hoppable, isThumpable,
+    -- isFloor) is nil on the real ISWoodenContainer's table too in normal
+    -- vanilla usage, and setInfo() already runs successfully against that
+    -- every time a player builds a real crate -- nil is proven safe there.
+    local companion = {
+        isContainer = true,
+        blockAllTheSquare = true,
+        name = "Wooden Crate",
+        dismantable = true,
+        canBeAlwaysPlaced = true,
+        canBeLockedByPadlock = true,
+        buildLow = true,
+        modData = {},
+    }
+
+    local okJo, javaObject = pcall(function() return IsoThumpable.new(cell, square, sprite, false, companion) end)
+    if not okJo or not javaObject then
+        print("TWR.Debug: TEST N -- IsoThumpable.new() failed: " .. tostring(javaObject))
+        return nil
+    end
+
+    local okInfo, infoErr = pcall(function() buildUtil.setInfo(javaObject, companion) end)
+    if not okInfo then
+        print("TWR.Debug: TEST N -- buildUtil.setInfo() failed: " .. tostring(infoErr))
+        return nil
+    end
+
+    safeCall(javaObject, "setMaxHealth", 200)
+    local okMaxHealth, maxHealth = safeCall(javaObject, "getMaxHealth")
+    if okMaxHealth then
+        safeCall(javaObject, "setHealth", maxHealth)
+    end
+    pcall(function() javaObject:setBreakSound(IsoThumpable.GetBreakFurnitureSound(sprite)) end)
+
+    local okAdd, addErr = pcall(function() square:AddSpecialObject(javaObject) end)
+    if not okAdd then
+        print("TWR.Debug: TEST N -- square:AddSpecialObject() failed: " .. tostring(addErr))
+        return nil
+    end
+
+    pcall(function() javaObject:transmitCompleteItemToClients() end)
+
+    return javaObject
+end
+
+local function runContainerDirectProbe(p)
+    local okX, x = safeCall(p, "getX")
+    local okY, y = safeCall(p, "getY")
+    local okZ, z = safeCall(p, "getZ")
+    if not (okX and okY and okZ) then return end
+
+    local bx, by, bz = math.floor(x) + 1, math.floor(y), math.floor(z)
+    print("TWR.Debug: TEST N -- runContainerDirectProbe -- player at (" .. tostring(x) .. "," .. tostring(y) .. "," .. tostring(z) .. "), target (" .. bx .. "," .. by .. "," .. bz .. ")")
+
+    local crate = spawnDirectCrate(bx, by, bz)
+    if not crate then
+        print("TWR.Debug: TEST N -- spawnDirectCrate FAILED")
+        return
+    end
+
+    local okContainer, container = safeCall(crate, "getContainer")
+    if okContainer and container then
+        local okAdd = safeCall(container, "AddItem", "Base.Twigs")
+        print("TWR.Debug: TEST N -- crate:getContainer() SUCCEEDED, AddItem(Base.Twigs) " .. (okAdd and "SUCCEEDED" or "FAILED"))
+    else
+        print("TWR.Debug: TEST N -- crate:getContainer() FAILED -- object may not actually have a real container")
+    end
+
+    -- Reusing the EXISTING, unchanged TWR.Mechanics.Container.lockByCode --
+    -- generic to any IsoThumpable, not tied to how the crate was created.
+    TWR.Mechanics.Container.lockByCode(crate, 123)
+    print("TWR.Debug: TEST N -- runContainerDirectProbe -- box spawned one tile east via DIRECT server creation (no ISWoodenContainer:create(), no consumeMaterial()), combination-locked to 123, contains a twig. Verify: client sees it, can open/loot it, combo lock works, survives a server restart.")
+end
+
 local MECHANICS = {
     container = runContainer,
     scatter = runScatter,
@@ -157,6 +295,7 @@ local MECHANICS = {
     door = runDoor,
     recipe = runRecipe,
     map_reveal = runMapReveal,
+    container_direct_probe = runContainerDirectProbe,
 }
 
 local function onClientCommand(module, command, player, args)
