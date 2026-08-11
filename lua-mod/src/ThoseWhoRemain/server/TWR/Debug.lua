@@ -196,11 +196,35 @@ local function init()
     print("TWR.Debug: OnClientCommand handler registered")
 end
 
--- Self-initialize: immediate attempt handles F11 reload, OnGameStart
--- fallback handles the one-time first-boot ordering race -- same
--- pattern client/TWR/Context/Calendar.lua already established.
+-- Self-initialize: immediate attempt handles F11 reload. CONFIRMED live
+-- 2026-08-11: the immediate attempt deterministically fails here every
+-- single boot -- root cause is alphabetical same-folder load order
+-- ("Debug.lua" < "Runtime.lua" within server/TWR/), not a nondeterministic
+-- timing race, so TWR.Runtime genuinely does not exist yet at this
+-- file's own load time.
+--
+-- Events.OnGameStart.Add(init) was the fallback here originally (same
+-- pattern proven reliable CLIENT-side, e.g. client/TWR/Context/
+-- Calendar.lua) -- CONFIRMED BROKEN server-side: ran for 2+ hours on a
+-- live pod with the retry never completing (no
+-- "OnClientCommand handler registered" success print ever appeared,
+-- despite the file having that exact print statement). Events.OnGameStart
+-- apparently does not reliably fire on a headless dedicated server the
+-- way it does for a connecting client -- worth remembering for any
+-- future server-side TWR file with a load-time dependency.
+--
+-- Fixed with a self-limiting EveryOneMinute retry instead -- CONFIRMED
+-- reliable server-side all night (TEST F/H/M all depended on it).
+-- Removes itself the moment init() succeeds.
+local function retryInit()
+    local ok = pcall(init)
+    if ok then
+        Events.EveryOneMinute.Remove(retryInit)
+    end
+end
+
 local ok, err = pcall(init)
 if not ok then
-    print("TWR.Debug: init deferred to OnGameStart (dependency not loaded yet): " .. tostring(err))
+    print("TWR.Debug: init deferred, retrying every minute (dependency not loaded yet): " .. tostring(err))
+    Events.EveryOneMinute.Add(retryInit)
 end
-Events.OnGameStart.Add(init)
