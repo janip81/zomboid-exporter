@@ -108,20 +108,67 @@ function Container.scatterIntoExisting(cell, centerX, centerY, z, radius, seed, 
 end
 
 -- Spawns a brand-new lootable box (real IsoThumpable + ItemContainer)
--- at the given square. CONFIRMED real via grep against vanilla's OWN
--- test suite (client/Tests/TimedActionsTests.lua
--- Tests.destroy_crate/dismantle_crate): ISWoodenContainer:new(sprite,
--- sprite):create(x,y,z,north,sprite) with sprite="carpentry_01_19".
--- Retrieved via square:getSpecialObjects():get(...) -- a genuinely
--- different accessor than getObjects(), confirmed only from that same
--- vanilla test code.
+-- at the given square, via DIRECT authoritative server creation --
+-- NOT ISWoodenContainer:create(). CONFIRMED FAIL on dedicated MP
+-- 2026-08-11: ISWoodenContainer:create() calls
+-- buildUtil.consumeMaterial(self) (server/BuildingObjects/
+-- ISBuildUtil.lua), whose guard is `if not ISItem or not ISItem.player
+-- then return {} end`. The old code set bo.player = 0 (a NUMBER, not
+-- nil) -- `not 0` is false in Lua (0 is truthy), so the guard passes
+-- and the function proceeds to `playerObj:getInventory()` on the bare
+-- number 0, throwing "Object tried to call nil". SP is misleadingly
+-- forgiving here: SP runs with isServer()==false, so
+-- consumeMaterial() either short-circuits entirely (debug/cheat mode)
+-- or converts the number via getSpecificPlayer() (a client-only
+-- concept) before ever calling :getInventory() -- neither of those
+-- branches exist on a true dedicated server, where isServer()==true.
 --
--- bo.player defaults to 0 (not tied to any specific connecting
--- player's client player-num) -- CONFIRMED SAFE live 2026-08-11 (TEST
--- I): bo:create() internally calls buildUtil.consumeMaterial(), which
--- was flagged as an unverified risk (the confirmed vanilla usage always
--- sets a real client-side PLAYER_NUM first) but live-tested with NO
--- materials consumed from any player's inventory regardless.
+-- This implementation instead replicates ISWoodenContainer:create()
+-- (server/BuildingObjects/ISWoodenContainer.lua) line-for-line MINUS
+-- the one buildUtil.* call that needs a player:
+--   KEPT:     IsoThumpable.new(cell, sq, sprite, north, companion) --
+--             companion is the same kind of Lua "ISItem" table every
+--             ISBuildingObject-derived class passes as IsoThumpable's
+--             own 5th ctor arg. The container itself is provisioned
+--             via buildUtil.setInfo() calling
+--             javaObject:setIsContainer(true) below, not a separate
+--             ItemContainer.new() call (that pattern is used elsewhere
+--             in vanilla for non-IsoThumpable IsoObjects, e.g.
+--             server/Camping/SCampfireGlobalObject.lua's
+--             addContainer(), but is NOT how IsoThumpable-based
+--             containers like this crate work).
+--   KEPT:     buildUtil.setInfo(javaObject, companion) -- CONFIRMED
+--             player-independent (read the full function body): pure
+--             javaObject:set*(companion.field) calls, no
+--             ISItem.player access anywhere. This is what actually
+--             makes the object a real lootable container and sets
+--             canBeLockByPadlock (needed for lockByCode/lockByKey/
+--             lockByPadlock).
+--   DROPPED:  buildUtil.consumeMaterial(self) -- the crash cause, and
+--             semantically wrong anyway: a DB-driven quest job
+--             spawning a quest container has no player materials to
+--             consume.
+--   KEPT:     setMaxHealth/setHealth/setBreakSound,
+--             sq:AddSpecialObject() -- unchanged, player-independent,
+--             confirmed straight from the same
+--             ISWoodenContainer:create().
+--
+-- Deliberately does NOT call transmitCompleteItemToClients() -- see
+-- Container.finalizeSpawn() below. LIVE FINDING 2026-08-11 (TEST N
+-- round 1): transmitting immediately after creation, before the
+-- caller fills the container and applies a lock, means the client
+-- receives that as the "complete" snapshot -- AddItem()/
+-- setLockedByCode() afterward only mutate server-side Java state with
+-- no follow-up packet, so the item silently never appears
+-- client-side. The caller must fill + lock first, then call
+-- Container.finalizeSpawn(crate) exactly once.
+--
+-- FULLY PROVEN live on the real dedicated MP server 2026-08-11 (TEST
+-- N): crate spawns with no crash, container+item sync to a connected
+-- client, a non-admin ("user" access level, RCON-confirmed) could
+-- NOT see contents or remove the lock without the correct code, and
+-- the correct code both removed the lock and granted loot access.
+-- Survived a full server restart.
 --
 -- Returns the created IsoThumpable (the "crate"), or nil on failure.
 function Container.spawnBox(x, y, z)
@@ -137,26 +184,61 @@ function Container.spawnBox(x, y, z)
         return nil
     end
 
-    local okBo, bo = pcall(function() return ISWoodenContainer:new("carpentry_01_19", "carpentry_01_19") end)
-    if not okBo or not bo then
-        print("TWR.Mechanics.Container: spawnBox -- ISWoodenContainer:new() failed: " .. tostring(bo))
+    local sprite = "carpentry_01_19"
+    -- Same field set ISWoodenContainer:new() sets on itself (grepped
+    -- from ISWoodenContainer.lua) -- everything setInfo() reads that
+    -- we don't explicitly set (canPassThrough, canBarricade,
+    -- thumpDmg, isDoor, isDoorFrame, crossSpeed, canBePlastered,
+    -- hoppable, isThumpable, isFloor) is nil on the real
+    -- ISWoodenContainer's table too in normal vanilla usage, and
+    -- setInfo() already runs successfully against that every time a
+    -- player builds a real crate -- nil is proven safe there.
+    local companion = {
+        isContainer = true,
+        blockAllTheSquare = true,
+        name = "Wooden Crate",
+        dismantable = true,
+        canBeAlwaysPlaced = true,
+        canBeLockedByPadlock = true,
+        buildLow = true,
+        modData = {},
+    }
+
+    local okJo, javaObject = pcall(function() return IsoThumpable.new(cell, square, sprite, false, companion) end)
+    if not okJo or not javaObject then
+        print("TWR.Mechanics.Container: spawnBox -- IsoThumpable.new() failed: " .. tostring(javaObject))
         return nil
     end
-    bo.player = 0
 
-    local okCreate, createErr = pcall(function() bo:create(x, y, z, bo.north, bo.sprite) end)
-    if not okCreate then
-        print("TWR.Mechanics.Container: spawnBox -- bo:create() failed: " .. tostring(createErr))
+    local okInfo, infoErr = pcall(function() buildUtil.setInfo(javaObject, companion) end)
+    if not okInfo then
+        print("TWR.Mechanics.Container: spawnBox -- buildUtil.setInfo() failed: " .. tostring(infoErr))
         return nil
     end
 
-    local okSpecial, specialObjects = safeCall(square, "getSpecialObjects")
-    if not okSpecial or not specialObjects or specialObjects:size() == 0 then
-        print("TWR.Mechanics.Container: spawnBox -- bo:create() ran but no special object found on target square afterward (okSpecial=" .. tostring(okSpecial) .. ")")
+    safeCall(javaObject, "setMaxHealth", 200)
+    local okMaxHealth, maxHealth = safeCall(javaObject, "getMaxHealth")
+    if okMaxHealth then
+        safeCall(javaObject, "setHealth", maxHealth)
+    end
+    pcall(function() javaObject:setBreakSound(IsoThumpable.GetBreakFurnitureSound(sprite)) end)
+
+    local okAdd, addErr = pcall(function() square:AddSpecialObject(javaObject) end)
+    if not okAdd then
+        print("TWR.Mechanics.Container: spawnBox -- square:AddSpecialObject() failed: " .. tostring(addErr))
         return nil
     end
 
-    return specialObjects:get(specialObjects:size() - 1)
+    return javaObject
+end
+
+-- Call exactly once, after the caller has finished filling the
+-- container (AddItem) and applying any lock (lockByCode/lockByKey/
+-- lockByPadlock) -- pushes the ONE full, consistent snapshot to
+-- connected clients. See spawnBox()'s header for why this can't
+-- happen inside spawnBox() itself.
+function Container.finalizeSpawn(crate)
+    safeCall(crate, "transmitCompleteItemToClients")
 end
 
 -- Locks crate with a key, generic to any IsoThumpable (not
