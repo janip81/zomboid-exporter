@@ -8,12 +8,18 @@
 -- menu is built from. context:addSubMenu/addOption are the same
 -- confirmed-real API vanilla uses throughout that file.
 --
--- Only builds the menu client-side when isDebugEnabled() is true --
--- CONFIRMED a real client-side global too (client/DebugUIs/*.lua's own
--- usage). This is a UX nicety only, NOT the security boundary: the
--- server independently re-checks isDebugEnabled() and access level
--- "admin" before doing anything (server/TWR/Debug.lua) -- a client
--- could send the command regardless of whether this menu was shown.
+-- Menu visibility gates on access level "admin" alone -- matches the
+-- server-side boundary (server/TWR/Debug.lua dropped its own
+-- isDebugEnabled() check on 2026-08-11 for the same reason: it
+-- reported false unreliably even with -debug genuinely present in the
+-- server's launch args). CONFIRMED live 2026-08-11: dropped the
+-- client-side isDebugEnabled() check here too after it silently hid
+-- the menu for an admin player following a server restart -- same
+-- unreliability as the server-side global, just noticed later. This
+-- was only ever a UX nicety, never the real security boundary: the
+-- server independently re-checks access level "admin" before doing
+-- anything -- a client could send the command regardless of whether
+-- this menu was shown.
 --
 -- This file is scaffolding, not permanent: delete alongside
 -- server/TWR/Debug.lua once the real DB-driven job system exists.
@@ -36,12 +42,11 @@ local MECHANIC_LABELS = {
 
 local function onFillWorldObjectContextMenu(player, context, worldobjects, test)
     if test then return end
-    if not isDebugEnabled() then return end
 
     local okAccess, level = pcall(function() return getSpecificPlayer(player):getAccessLevel() end)
     if not okAccess or level ~= "admin" then return end
 
-    print("TWR: Context.Debug -- building TWR Debug submenu (isDebugEnabled+admin both passed)")
+    print("TWR: Context.Debug -- building TWR Debug submenu (admin passed)")
 
     local debugOption = context:addOption("TWR Debug", nil, nil)
     local debugMenu = ISContextMenu:getNew(context)
