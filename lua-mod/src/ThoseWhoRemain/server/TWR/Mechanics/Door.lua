@@ -28,6 +28,13 @@
 --
 -- No require(), no cached cross-file locals -- see TWR.Constants'
 -- header for why.
+-- CONFIRMED live 2026-08-11: media/lua/server/ files are ALSO loaded by
+-- a connecting MP client -- see server/TWR/Debug.lua's header for the
+-- full live-reproduced bug. This file has no load-time side effects
+-- (pure function definitions), but guarding anyway for consistency and
+-- so a client never pointlessly parses/executes it.
+if isClient() then return end
+
 TWR = TWR or {}
 TWR.Mechanics = TWR.Mechanics or {}
 TWR.Mechanics.Door = TWR.Mechanics.Door or {}

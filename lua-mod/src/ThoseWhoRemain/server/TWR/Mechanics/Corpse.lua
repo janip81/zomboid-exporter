@@ -29,6 +29,14 @@
 --
 -- No require(), no cached cross-file locals -- see TWR.Constants'
 -- header for why.
+-- CONFIRMED live 2026-08-11: media/lua/server/ files are ALSO loaded by
+-- a connecting MP client -- see server/TWR/Debug.lua's header for the
+-- full live-reproduced bug. Guarding here matters more than in most
+-- Mechanics files: this one registers a real EveryOneMinute watcher
+-- (via spawnPermanentCorpse), which would be an active, wasteful
+-- client-side side effect without this guard.
+if isClient() then return end
+
 TWR = TWR or {}
 TWR.Mechanics = TWR.Mechanics or {}
 TWR.Mechanics.Corpse = TWR.Mechanics.Corpse or {}

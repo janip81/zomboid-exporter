@@ -8,6 +8,15 @@
 --
 -- No require(), no cached cross-file locals -- see TWR.Constants'
 -- header for why.
+--
+-- CONFIRMED live 2026-08-11: media/lua/server/ files are ALSO loaded by
+-- a connecting MP client, not just the real dedicated server -- see
+-- server/TWR/Debug.lua's header for the full live-reproduced bug this
+-- caused. Guarding here too so a connecting client never defines this
+-- server-side copy at all (keeps client/server TWR.Runtime genuinely
+-- separate, matches vanilla's own isClient()-guard convention).
+if isClient() then return end
+
 TWR = TWR or {}
 TWR.Runtime = TWR.Runtime or {}
 

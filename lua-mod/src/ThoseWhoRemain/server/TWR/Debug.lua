@@ -29,6 +29,20 @@
 --
 -- No require(), no cached cross-file locals -- see TWR.Constants'
 -- header for why.
+--
+-- CONFIRMED live 2026-08-11: files under media/lua/server/ are ALSO
+-- loaded and executed by a connecting MP CLIENT, not just the real
+-- dedicated server process (mod content syncs wholesale) -- live-
+-- reproduced bug where a client's own local copy of this file silently
+-- "handled" the debug menu's command end to end (registered its own
+-- handler, printed success) without the real authoritative server ever
+-- seeing it, so nothing actually happened in the game world. Matches
+-- vanilla's own confirmed pattern (grepped: server/TransactionProcessor.lua,
+-- server/Vehicles/VehicleCommands.lua, server/Traps/STrapGlobalObject.lua
+-- all start with exactly this guard) -- isClient() is real, and this is
+-- the standard fix.
+if isClient() then return end
+
 TWR = TWR or {}
 TWR.Debug = TWR.Debug or {}
 
