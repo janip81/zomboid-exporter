@@ -174,6 +174,22 @@ local function onEveryMinuteSleeping()
             local okLoc, loc = pcall(resolveSleepLocation, p)
             state.location = okLoc and loc and loc.location or nil
             state.bedType = okLoc and loc and loc.bedType or nil
+            -- Position at sleep-START, not wake -- reversing the earlier
+            -- decision to omit this: kept out at first because "who
+            -- sleeps mostly at home/hotel/away" wasn't a stat worth
+            -- tracking, but per Jani it's still worth recording in the
+            -- DB for whatever future stat/heatmap use turns out to want
+            -- it -- cheap to capture now, expensive to have skipped it.
+            -- Same reasoning as bed/tent detection above for using
+            -- start, not wake: still standing at the sleep spot at this
+            -- exact tick, sleep's time-acceleration can move/teleport
+            -- the character by the time they wake.
+            local okX, x = pcall(function() return p:getX() end)
+            local okY, y = pcall(function() return p:getY() end)
+            local okZ, z = pcall(function() return p:getZ() end)
+            state.x = okX and x or nil
+            state.y = okY and y or nil
+            state.z = okZ and z or nil
         elseif not isAsleep and state.asleep then
             -- Asleep -> awake: emit the completed session's duration.
             local hours = nil
@@ -187,10 +203,16 @@ local function onEveryMinuteSleeping()
                 hours = hours and ExporterLog.Utils.round2(hours) or nil,
                 location = state.location,
                 bedType = state.bedType,
+                x = state.x,
+                y = state.y,
+                z = state.z,
             })
             state.startWorldAgeHours = nil
             state.location = nil
             state.bedType = nil
+            state.x = nil
+            state.y = nil
+            state.z = nil
         end
 
         state.asleep = isAsleep
