@@ -41,13 +41,23 @@ local function onFillWorldObjectContextMenu(player, context, worldobjects, test)
     local okAccess, level = pcall(function() return getSpecificPlayer(player):getAccessLevel() end)
     if not okAccess or level ~= "admin" then return end
 
+    print("TWR: Context.Debug -- building TWR Debug submenu (isDebugEnabled+admin both passed)")
+
     local debugOption = context:addOption("TWR Debug", nil, nil)
     local debugMenu = ISContextMenu:getNew(context)
     context:addSubMenu(debugOption, debugMenu)
 
     for _, entry in ipairs(MECHANIC_LABELS) do
-        debugMenu:addOption(entry.label, nil, function()
-            sendClientCommand(getSpecificPlayer(player), "twr_debug", "run", { mechanic = entry.key })
+        local mechanicKey = entry.key
+        local mechanicLabel = entry.label
+        debugMenu:addOption(mechanicLabel, nil, function()
+            print("TWR: Context.Debug -- clicked '" .. mechanicLabel .. "', sending twr_debug/run mechanic=" .. mechanicKey)
+            local okSend, sendErr = pcall(function()
+                sendClientCommand(getSpecificPlayer(player), "twr_debug", "run", { mechanic = mechanicKey })
+            end)
+            if not okSend then
+                print("TWR: Context.Debug -- sendClientCommand FAILED: " .. tostring(sendErr))
+            end
         end)
     end
 end
