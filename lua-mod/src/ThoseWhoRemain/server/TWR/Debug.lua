@@ -253,8 +253,16 @@ local function spawnDirectCrate(x, y, z)
         return nil
     end
 
-    pcall(function() javaObject:transmitCompleteItemToClients() end)
-
+    -- LIVE FINDING 2026-08-11: deliberately NOT calling
+    -- transmitCompleteItemToClients() here. First round of TEST N did (right
+    -- after AddSpecialObject, matching ISWoodenContainer:create()'s own
+    -- ordering) -- crate/lock both worked, but the item added afterward via
+    -- container:AddItem() never appeared client-side: the client had
+    -- already received that transmit as the "complete" snapshot BEFORE the
+    -- item existed, and AddItem()/setLockedByCode()+sync() only mutate
+    -- server-side Java state, they don't push a follow-up packet for
+    -- container contents. Caller now does ALL mutations (item, lock) first
+    -- and transmits exactly once at the end with everything already set.
     return javaObject
 end
 
@@ -283,8 +291,14 @@ local function runContainerDirectProbe(p)
 
     -- Reusing the EXISTING, unchanged TWR.Mechanics.Container.lockByCode --
     -- generic to any IsoThumpable, not tied to how the crate was created.
+    -- lockByCode() itself already calls crate:sync() (modData/lock-flag
+    -- sync, confirmed working from round 1 -- the code prompt genuinely
+    -- gated it). transmitCompleteItemToClients() below is the SEPARATE
+    -- full-object resync that round 1 was missing -- called once, last,
+    -- now that the item and lock are both already applied server-side.
     TWR.Mechanics.Container.lockByCode(crate, 123)
-    print("TWR.Debug: TEST N -- runContainerDirectProbe -- box spawned one tile east via DIRECT server creation (no ISWoodenContainer:create(), no consumeMaterial()), combination-locked to 123, contains a twig. Verify: client sees it, can open/loot it, combo lock works, survives a server restart.")
+    pcall(function() crate:transmitCompleteItemToClients() end)
+    print("TWR.Debug: TEST N -- runContainerDirectProbe -- box spawned one tile east via DIRECT server creation (no ISWoodenContainer:create(), no consumeMaterial()), combination-locked to 123, contains a twig, transmitted once with final state. Verify: client sees it, can open/loot it, combo lock works, survives a server restart.")
 end
 
 local MECHANICS = {
