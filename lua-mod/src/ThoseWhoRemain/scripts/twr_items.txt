@@ -7,4 +7,13 @@ module ThoseWhoRemain
 		Weight = 0.1,
 		Icon = Book
 	}
+
+	item RecipeNote
+	{
+		DisplayCategory = Literature,
+		ItemType = base:literature,
+		Weight = 0.1,
+		Icon = Book,
+		LearnedRecipes = AntagonistProbeTestRecipe,
+	}
 }

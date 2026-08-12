@@ -185,6 +185,25 @@ local function runRecipe(p)
     print("TWR.Debug: runRecipe -- teach() " .. (ok and "SUCCEEDED -- check the crafting menu" or "FAILED"))
 end
 
+-- PRODUCTION-PATH alternative to runRecipe() above: instead of an
+-- instant admin grant, gives a real lootable ThoseWhoRemain.RecipeNote
+-- item (scripts/twr_items.txt, LearnedRecipes=AntagonistProbeTestRecipe)
+-- directly to inventory for quick testing. Read it normally (right-click
+-- -> Read) to learn the recipe via vanilla's own ISReadABook.lua
+-- :complete() -> character:ReadLiterature(item) path -- CONFIRMED real,
+-- the same native mechanism magazines/skill books use, no manual
+-- learnRecipe()/sendSyncPlayerFields needed on our end at all. For real
+-- production use, spawn this item into a container/corpse instead of
+-- directly to inventory (a one-line swap, see Container.spawnBox or
+-- Corpse.spawnPermanentCorpse's lootItems for the pattern).
+local function runRecipeNote(p)
+    local okInv, inventory = safeCall(p, "getInventory")
+    if not okInv or not inventory then return end
+
+    local okAdd, item = safeCall(inventory, "AddItem", "ThoseWhoRemain.RecipeNote")
+    print("TWR.Debug: runRecipeNote -- gave ThoseWhoRemain.RecipeNote to inventory " .. (okAdd and "SUCCEEDED -- right-click it and choose Read" or "FAILED"))
+end
+
 local function runMapReveal(p)
     local okX, x = safeCall(p, "getX")
     local okY, y = safeCall(p, "getY")
@@ -214,6 +233,7 @@ local MECHANICS = {
     door = runDoor,
     door_unlock_permanent = runDoorUnlockPermanent,
     recipe = runRecipe,
+    recipe_note = runRecipeNote,
     -- map_reveal DISABLED SERVER-SIDE 2026-08-12 -- removing only the
     -- client-side button (client/TWR/Context/Debug.lua) was NOT enough:
     -- a client on a stale/not-yet-updated Workshop version still had

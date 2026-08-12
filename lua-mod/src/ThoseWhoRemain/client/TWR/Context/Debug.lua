@@ -38,6 +38,7 @@ local MECHANIC_LABELS = {
     { key = "door", label = "Lock nearest door" },
     { key = "door_unlock_permanent", label = "Unlock nearest door permanently" },
     { key = "recipe", label = "Teach test recipe" },
+    { key = "recipe_note", label = "Give lootable recipe note (read it)" },
     -- map_reveal DISABLED 2026-08-12 -- suspected of wiping previously-
     -- explored map data on a real dedicated MP client (confirmed prior
     -- exploration disappeared after a legitimate, small-radius reveal
