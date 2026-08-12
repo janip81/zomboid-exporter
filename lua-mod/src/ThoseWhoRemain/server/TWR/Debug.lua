@@ -176,6 +176,17 @@ local function runMapReveal(p)
     print("TWR.Debug: runMapReveal -- revealAroundPoint " .. (ok and "SUCCEEDED -- check the map" or "FAILED"))
 end
 
+local function runCoords(p)
+    local okX, x = safeCall(p, "getX")
+    local okY, y = safeCall(p, "getY")
+    local okZ, z = safeCall(p, "getZ")
+    if not (okX and okY and okZ) then return end
+
+    local text = "TWR coords: (" .. math.floor(x) .. "," .. math.floor(y) .. "," .. math.floor(z) .. ")"
+    print("TWR.Debug: runCoords -- " .. text)
+    safeCall(p, "Say", text)
+end
+
 local MECHANICS = {
     container = runContainer,
     scatter = runScatter,
@@ -185,6 +196,7 @@ local MECHANICS = {
     door_unlock_permanent = runDoorUnlockPermanent,
     recipe = runRecipe,
     map_reveal = runMapReveal,
+    coords = runCoords,
 }
 
 local function onClientCommand(module, command, player, args)

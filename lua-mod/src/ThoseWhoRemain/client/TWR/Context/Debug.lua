@@ -39,6 +39,7 @@ local MECHANIC_LABELS = {
     { key = "door_unlock_permanent", label = "Unlock nearest door permanently" },
     { key = "recipe", label = "Teach test recipe" },
     { key = "map_reveal", label = "Reveal map area" },
+    { key = "coords", label = "Show my coordinates" },
 }
 
 local function onFillWorldObjectContextMenu(player, context, worldobjects, test)
