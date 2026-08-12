@@ -33,12 +33,16 @@ TWR.Context.callbacks = TWR.Context.callbacks or {}
 local MECHANIC_LABELS = {
     { key = "container", label = "Spawn locked container" },
     { key = "scatter", label = "Scatter into existing containers" },
-    { key = "deferred_area", label = "Deferred-area test (300 tiles away)" },
+    { key = "deferred_area", label = "Deferred-area test (80 tiles east)" },
     { key = "corpse", label = "Spawn permanent corpse" },
     { key = "door", label = "Lock nearest door" },
     { key = "door_unlock_permanent", label = "Unlock nearest door permanently" },
     { key = "recipe", label = "Teach test recipe" },
-    { key = "map_reveal", label = "Reveal map area" },
+    -- map_reveal DISABLED 2026-08-12 -- suspected of wiping previously-
+    -- explored map data on a real dedicated MP client (confirmed prior
+    -- exploration disappeared after a legitimate, small-radius reveal
+    -- call). Root cause not understood yet -- see the URGENT/OPEN note
+    -- in existing-world-test-matrix.md. Do not re-enable until resolved.
     { key = "coords", label = "Show my coordinates" },
 }
 
