@@ -1,40 +1,73 @@
 -- TWR.Mechanics.Corpse -- spawns a PERMANENT corpse (not a merely
--- fake-dead zombie -- see the CONFIRMED distinction below) with a
--- controlled outfit and specific loot.
+-- fake-dead zombie) at a specific (x, y, z), with a controlled outfit
+-- and specific loot, visible immediately to already-connected dedicated
+-- MP clients.
 --
--- CONFIRMED live 2026-08-11 (AntagonistProbe TEST C, existing-world-
--- test-matrix.md "Permanent corpse with controlled outfit + specific
--- loot" row):
+-- CONFIRMED live 2026-08-11 (SP only, AntagonistProbe TEST C):
 --   - addZombiesInOutfit(x,y,z,count,outfit,femaleChance) is the
---     CONFIRMED 6-arg form (client/Tutorial/Steps.lua's own usage) --
---     an earlier 9-positional-arg attempt threw a Kahlua "No
---     implementation found" RuntimeException; Kahlua's Java bridge does
---     strict per-overload type matching, nil trailing args don't match
---     any registered overload.
+--     CONFIRMED 6-arg form (client/Tutorial/Steps.lua's own usage).
 --   - zombie:setFakeDead(true) is NOT permanent -- confirmed live, the
 --     zombie got back up on its own.
---   - zombie:setHealth(0) DOES permanently kill it -- confirmed live,
---     stayed dead.
---   - zombie:addItemToSpawnAtDeath(item), called BEFORE setHealth(0),
---     is a real working method (UNCONFIRMED by grep beforehand -- zero
---     hits anywhere in the installed tree -- but live-tested and
---     works). Preferred path.
---   - Fallback if addItemToSpawnAtDeath is unavailable: poll isDead(),
---     then look up the real IsoDeadBody via
---     square:getDeadBodys() (CONFIRMED real) and add loot to ITS
---     container instead of the zombie's own inventory (the loot UI
---     does not read the zombie's own getInventory() post-death --
---     confirmed live, a "cannot get ID for container: inventorymale"
---     warning and the item never appeared).
+--
+-- CONFIRMED FAIL live 2026-08-12 (dedicated MP): the original SP-proven
+-- approach (spawn healthy, then zombie:setHealth(0)) left
+-- isDead()==true but square:getDeadBodys():size()==0 -- no real corpse
+-- was ever created server-side. Vanilla itself never calls
+-- zombie:setHealth(0) anywhere (grepped: only animal:setHealth(0)
+-- exists, via shared/TimedActions/Animals/ISKillAnimal.lua) -- there
+-- was never a proven precedent this triggered the same
+-- corpse-creation path a real combat kill does.
+--
+-- ROOT CAUSE + FIX, per ChatGPT's decompiled-Java research (B42.20.2)
+-- pointing at GameServer.sendCorpse()/packet AddCorpseToMap, verified
+-- against the installed Lua tree and CONFIRMED live 2026-08-12 (TEST
+-- Q1): a genuinely different code path is required, not a variant of
+-- setHealth(0). The real vanilla corpse-publish sequence, grepped from
+-- shared/Definitions/animal/ButcheringUtil.lua (used twice there):
+--   1. IsoDeadBody.new(entity, wasCorpseAlready) -- CONFIRMED 2-arg
+--      form here (a 3-arg addToSquareAndWorld=true form exists and
+--      technically creates a real getDeadBodys()-visible object too,
+--      but is UNPROVEN by any vanilla usage and did NOT sync live in
+--      testing -- do not use it).
+--   2. body:setX/setY/setZ -- position it explicitly.
+--   3. square:addCorpse(corpse, false) -- CONFIRMED real, and a
+--      genuinely DIFFERENT square method than AddSpecialObject (which
+--      Container.spawnBox uses for crates) -- AddSpecialObject did NOT
+--      sync a corpse live in testing, addCorpse does.
+--   4. corpse:invalidateCorpse() -- CONFIRMED real, always paired with
+--      addCorpse/sendCorpse in both real usages.
+--   5. corpse:setInvalidateNextRender(true) -- CONFIRMED real, same.
+--   6. entity:remove() -- CONFIRMED real -- removes the original
+--      (still-alive) zombie once its dead body exists.
+--   7. sendCorpse(corpse) -- CONFIRMED real, a BARE GLOBAL function
+--      (NOT GameServer.sendCorpse -- that prefix appears nowhere in
+--      the installed tree), called LAST, server-only in vanilla's own
+--      usage. LIVE CONFIRMED 2026-08-12: corpse appeared to an
+--      already-connected client IMMEDIATELY after this call, no
+--      reconnect needed -- sendBecomeCorpse/:becomeCorpse( were also
+--      checked and do NOT exist anywhere, ruling out that half of the
+--      original hypothesis.
+--
+-- Loot: the old addItemToSpawnAtDeath()-before-death approach relied on
+-- native death processing we no longer trigger (we build the dead body
+-- directly from a still-alive zombie, we never actually kill it via the
+-- native path). Since step 1 above gives us a real IsoDeadBody
+-- synchronously, loot is added directly to body:getContainer() instead
+-- -- simpler than the old deferred isDead()-polling watcher, and no
+-- longer needs one at all.
+--
+-- KNOWN OPEN ISSUE (tracked separately, not a sync problem): the
+-- resulting corpse spawns NAKED regardless of the outfit argument --
+-- outfit definitions are compiled binary asset data, not present in
+-- any Lua/script-accessible file, so this needs a different
+-- investigation approach than grep. Do not assume outfit works until
+-- this is separately proven.
 --
 -- No require(), no cached cross-file locals -- see TWR.Constants'
 -- header for why.
 -- CONFIRMED live 2026-08-11: media/lua/server/ files are ALSO loaded by
 -- a connecting MP client -- see server/TWR/Debug.lua's header for the
--- full live-reproduced bug. Guarding here matters more than in most
--- Mechanics files: this one registers a real EveryOneMinute watcher
--- (via spawnPermanentCorpse), which would be an active, wasteful
--- client-side side effect without this guard.
+-- full live-reproduced bug.
 if isClient() then return end
 
 TWR = TWR or {}
@@ -52,48 +85,18 @@ local function safeCall(obj, methodName, ...)
     return false, nil
 end
 
--- Generalizes AntagonistProbe's single pendingLootZombie/pendingLootSquare
--- globals into a list, so several corpse-spawn jobs can be pending loot
--- resolution concurrently.
-Corpse.pending = Corpse.pending or {}
-
-local function checkPendingLoot()
-    if #Corpse.pending == 0 then return end
-
-    local stillPending = {}
-    for _, entry in ipairs(Corpse.pending) do
-        local okDead, dead = safeCall(entry.zombie, "isDead")
-
-        if not okDead or not dead then
-            table.insert(stillPending, entry)
-        elseif entry.handledAtSpawn then
-            -- addItemToSpawnAtDeath already succeeded before death --
-            -- CONFIRMED (2026-08-11) that also running the
-            -- getDeadBodys() fallback here would double-add loot.
-        elseif entry.square then
-            local okBodies, bodies = safeCall(entry.square, "getDeadBodys")
-            if okBodies and bodies then
-                for i = 0, bodies:size() - 1 do
-                    local body = bodies:get(i)
-                    local okC, container = safeCall(body, "getContainer")
-                    if okC and container then
-                        for _, itemType in ipairs(entry.lootItems) do
-                            safeCall(container, "AddItem", itemType)
-                        end
-                        break
-                    end
-                end
-            end
-        end
-    end
-
-    Corpse.pending = stillPending
-end
-
--- Spawns a permanently-dead zombie corpse at (x, y, z) wearing outfit,
--- with lootItems (a list of item type strings) findable on the body.
--- femaleChance is 0-1, same as the confirmed vanilla usage.
+-- Spawns a permanently-dead zombie corpse at (x, y, z) wearing outfit
+-- (see KNOWN OPEN ISSUE above -- outfit is not yet proven to apply),
+-- with lootItems (a list of item type strings) added directly to the
+-- corpse's real container. femaleChance is 0-1, same as the confirmed
+-- vanilla usage. Returns true/false.
 function Corpse.spawnPermanentCorpse(x, y, z, outfit, femaleChance, lootItems)
+    local okCell, cell = pcall(function() return getCell() end)
+    if not okCell or not cell then return false end
+
+    local okSq, square = pcall(function() return cell:getGridSquare(x, y, z) end)
+    if not okSq or not square then return false end
+
     local okList, zombieList = pcall(function()
         return addZombiesInOutfit(x, y, z, 1, outfit, femaleChance or 0)
     end)
@@ -102,45 +105,28 @@ function Corpse.spawnPermanentCorpse(x, y, z, outfit, femaleChance, lootItems)
     local okZ0, zombie = pcall(function() return zombieList:get(0) end)
     if not okZ0 or not zombie then return false end
 
-    local handledAtSpawn = true
-    for _, itemType in ipairs(lootItems or {}) do
-        local okItem, item = pcall(function() return instanceItem(itemType) end)
-        local okAdd = okItem and item and safeCall(zombie, "addItemToSpawnAtDeath", item)
-        if not okAdd then handledAtSpawn = false end
+    local okBody, body = pcall(function() return IsoDeadBody.new(zombie, false) end)
+    if not okBody or not body then return false end
+
+    safeCall(body, "setX", x + 0.5)
+    safeCall(body, "setY", y + 0.5)
+    safeCall(body, "setZ", z)
+
+    local okAdd = pcall(function() square:addCorpse(body, false) end)
+    if not okAdd then return false end
+
+    safeCall(body, "invalidateCorpse")
+    safeCall(body, "setInvalidateNextRender", true)
+    safeCall(zombie, "remove")
+
+    local okContainer, container = safeCall(body, "getContainer")
+    if okContainer and container then
+        for _, itemType in ipairs(lootItems or {}) do
+            safeCall(container, "AddItem", itemType)
+        end
     end
 
-    local okHealth = safeCall(zombie, "setHealth", 0)
-    if not okHealth then return false end
-
-    -- DIAGNOSTIC 2026-08-11: dedicated MP live report was "blood on the
-    -- floor, no visible corpse" -- vanilla itself never calls
-    -- zombie:setHealth(0) anywhere (grepped: only animal:setHealth(0)
-    -- exists, via shared/TimedActions/Animals/ISKillAnimal.lua). No
-    -- proven vanilla precedent that this triggers the same
-    -- corpse-creation/sync path a real combat kill does. Checking
-    -- whether a real IsoDeadBody actually exists server-side
-    -- immediately after death, to tell apart "never created" from
-    -- "created but not synced to the client".
-    local okSqNow, squareNow = safeCall(zombie, "getCurrentSquare")
-    if okSqNow and squareNow then
-        local okDead, isDead = safeCall(zombie, "isDead")
-        local okBodiesNow, bodiesNow = safeCall(squareNow, "getDeadBodys")
-        print("TWR.Mechanics.Corpse: spawnPermanentCorpse -- post-death check: isDead=" .. tostring(okDead and isDead) .. ", square getDeadBodys():size()=" .. tostring(okBodiesNow and bodiesNow and bodiesNow:size() or "?"))
-    else
-        print("TWR.Mechanics.Corpse: spawnPermanentCorpse -- post-death check: getCurrentSquare() failed (okSqNow=" .. tostring(okSqNow) .. ")")
-    end
-
-    if not handledAtSpawn then
-        local okSq, square = safeCall(zombie, "getCurrentSquare")
-        table.insert(Corpse.pending, {
-            zombie = zombie,
-            square = okSq and square or nil,
-            lootItems = lootItems or {},
-            handledAtSpawn = false,
-        })
-    end
-
-    TWR.Runtime.registerEventOnce(Corpse, "lootWatcher", Events.EveryOneMinute, checkPendingLoot)
+    pcall(function() sendCorpse(body) end)
 
     return true
 end
