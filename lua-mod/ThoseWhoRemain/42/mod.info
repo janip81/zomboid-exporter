@@ -1,3 +1,7 @@
 name=Those Who Remain
 description=Gameplay framework mod: calendar, custom items, client UI, antagonist runtime. Kept as a separate Mod ID from ExporterLog (telemetry only) per the confirmed architecture decision in MOD-STRUCTURE.md.
 id=ThoseWhoRemain
+pzversion=42
+modversion=1.0
+versionMin=42.0.0
+author=janip81
