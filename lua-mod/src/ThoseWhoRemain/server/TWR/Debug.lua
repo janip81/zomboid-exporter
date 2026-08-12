@@ -115,6 +115,62 @@ local function runCorpse(p)
     print("TWR.Debug: runCorpse -- spawnPermanentCorpse " .. (ok and "SUCCEEDED, one tile east" or "FAILED"))
 end
 
+-- TEST O -- direct dead-on-spawn corpse, bypassing zombie:setHealth(0)
+-- entirely. CONFIRMED live 2026-08-12: the existing spawn-then-kill
+-- approach (spawn healthy via the 6-arg addZombiesInOutfit, then call
+-- zombie:setHealth(0)) leaves isDead()==true but
+-- square:getDeadBodys():size()==0 -- the zombie is logically dead but
+-- no real IsoDeadBody/corpse world object was ever created. Matches the
+-- earlier spawnBox() pattern: vanilla never actually calls
+-- zombie:setHealth(0) anywhere itself (grepped -- only
+-- animal:setHealth(0) exists, via shared/TimedActions/Animals/
+-- ISKillAnimal.lua), so there's no proven precedent this triggers the
+-- same corpse-creation path a real combat kill does.
+--
+-- CONFIRMED via grep (client/DebugUIs/ISSpawnHordeUI.lua onSpawn(),
+-- vanilla's own zombie-spawn debug tool): addZombiesInOutfit has a
+-- FULLER 17-positional-arg form exposing a `health` parameter directly
+-- at spawn time -- (x, y, z, count, outfit, femaleChance, crawler,
+-- isFallOnFront, isFakeDead, knockedDown, isInvulnerable, isSitting,
+-- health, isRecordingAnims, heightOffset, isRagdolling, onFire).
+-- self.healthSlider:setValues(0, 2, ...) confirms health is a 0-2
+-- multiplier (default 1.0), not a flag -- health=0 at spawn should be a
+-- genuinely different, vanilla-exposed code path from spawning healthy
+-- and killing via Lua afterward. UNTESTED until now.
+local function runCorpseSpawnDeadProbe(p)
+    local okX, x = safeCall(p, "getX")
+    local okY, y = safeCall(p, "getY")
+    local okZ, z = safeCall(p, "getZ")
+    if not (okX and okY and okZ) then return end
+
+    local bx, by, bz = math.floor(x) + 1, math.floor(y), math.floor(z)
+    print("TWR.Debug: TEST O -- runCorpseSpawnDeadProbe -- spawning dead-on-arrival at (" .. bx .. "," .. by .. "," .. bz .. ")")
+
+    local okList, zombieList = pcall(function()
+        return addZombiesInOutfit(bx, by, bz, 1, "Police", 0, false, false, false, false, false, false, 0, false, 0, false, false)
+    end)
+    if not okList or not zombieList then
+        print("TWR.Debug: TEST O -- addZombiesInOutfit (17-arg, health=0) FAILED: " .. tostring(zombieList))
+        return
+    end
+
+    local okZ0, zombie = pcall(function() return zombieList:get(0) end)
+    if not okZ0 or not zombie then
+        print("TWR.Debug: TEST O -- zombieList:get(0) FAILED")
+        return
+    end
+
+    local okCell, cell = pcall(function() return getCell() end)
+    local okSq, square = pcall(function() return okCell and cell:getGridSquare(bx, by, bz) end)
+    local okDead, isDead = safeCall(zombie, "isDead")
+
+    local okBodies, bodies = false, nil
+    if okSq and square then
+        okBodies, bodies = safeCall(square, "getDeadBodys")
+    end
+    print("TWR.Debug: TEST O -- result: isDead=" .. tostring(okDead and isDead) .. ", square getDeadBodys():size()=" .. tostring(okBodies and bodies and bodies:size() or "?"))
+end
+
 -- Shared by runDoor and runDoorUnlockPermanent -- finds the door on the
 -- player's current square, falling back to its 4 orthogonal neighbors.
 -- Prints diagnostics either way so a "no door found" report can be told
@@ -180,6 +236,7 @@ local MECHANICS = {
     scatter = runScatter,
     deferred_area = runDeferredArea,
     corpse = runCorpse,
+    corpse_spawn_dead_probe = runCorpseSpawnDeadProbe,
     door = runDoor,
     door_unlock_permanent = runDoorUnlockPermanent,
     recipe = runRecipe,

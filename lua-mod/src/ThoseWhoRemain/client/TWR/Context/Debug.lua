@@ -35,6 +35,7 @@ local MECHANIC_LABELS = {
     { key = "scatter", label = "Scatter into existing containers" },
     { key = "deferred_area", label = "Deferred-area test (300 tiles away)" },
     { key = "corpse", label = "Spawn permanent corpse" },
+    { key = "corpse_spawn_dead_probe", label = "TEST O: spawn dead-on-arrival corpse" },
     { key = "door", label = "Lock nearest door" },
     { key = "door_unlock_permanent", label = "Unlock nearest door permanently" },
     { key = "recipe", label = "Teach test recipe" },
