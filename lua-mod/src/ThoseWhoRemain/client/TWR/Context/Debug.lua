@@ -38,6 +38,7 @@ local MECHANIC_LABELS = {
     { key = "corpse_spawn_dead_probe", label = "TEST O: spawn near-zero-health corpse (0.01)" },
     { key = "corpse_spawn_control_probe", label = "TEST O-control: spawn normal-health zombie (1.0)" },
     { key = "corpse_direct_body_probe", label = "TEST P: construct IsoDeadBody directly" },
+    { key = "corpse_sendcorpse_probe", label = "TEST Q1: real vanilla sendCorpse() sequence" },
     { key = "door", label = "Lock nearest door" },
     { key = "door_unlock_permanent", label = "Unlock nearest door permanently" },
     { key = "recipe", label = "Teach test recipe" },

@@ -262,6 +262,99 @@ local function runCorpseDirectBodyProbe(p)
     print("TWR.Debug: TEST P -- result: square getDeadBodys():size()=" .. tostring(okBodies and bodies and bodies:size() or "?") .. ", body:getItem()=" .. tostring(okGetItem and item ~= nil))
 end
 
+-- TEST Q1 -- the real vanilla corpse-publish sequence, per ChatGPT's
+-- decompiled-Java research pointing at GameServer.sendCorpse()/packet
+-- type AddCorpseToMap. CONFIRMED via grep (2026-08-12) against
+-- shared/Definitions/animal/ButcheringUtil.lua, used twice (newborn-
+-- animal-death case and onRemoveCorpseFromHook): sendCorpse(...) is a
+-- REAL bare global function (NOT GameServer.sendCorpse -- that prefix
+-- doesn't appear anywhere in the installed tree), called as the LAST
+-- step of a specific sequence:
+--   IsoDeadBody.new(entity, false) -- CONFIRMED 2-arg form here, NOT
+--       TEST P's 3-arg (entity, false, true) -- addToSquareAndWorld
+--       is not part of this real vanilla pattern at all.
+--   body:setX/setY/setZ -- position it explicitly.
+--   square:addCorpse(corpse, false) -- CONFIRMED real, and NOT the
+--       same as AddSpecialObject (which is what TEST P used and which
+--       did NOT sync live) -- addCorpse is a genuinely different,
+--       corpse-specific square method.
+--   corpse:invalidateCorpse() -- CONFIRMED real, used consistently
+--       alongside addCorpse/sendCorpse in both real usages.
+--   corpse:setInvalidateNextRender(true) -- CONFIRMED real, same.
+--   entity:remove() -- CONFIRMED real -- the original entity (animal
+--       in vanilla's usage) is removed from the world once its dead
+--       body exists, matching our own need to remove the zombie.
+--   sendCorpse(corpse) -- CONFIRMED real, called LAST, server-only
+--       (`if isServer() then ... sendCorpse(body) end` in the
+--       onRemoveCorpseFromHook usage).
+--
+-- CONFIRMED via grep: sendBecomeCorpse and :becomeCorpse( do NOT exist
+-- anywhere in the installed tree -- that half of the original
+-- hypothesis doesn't hold up. Only sendCorpse is real. No TEST Q2
+-- needed as a result (nothing to test).
+--
+-- This is the full confirmed vanilla recipe, not just "call sendCorpse
+-- on TEST P's body" -- TEST P's body was built via addToSquareAndWorld
+-- =true (AddSpecialObject-style), which has NO vanilla precedent and
+-- is a different code path than addCorpse. Testing sendCorpse() against
+-- the properly-constructed body is the fair, faithful-to-source test.
+local function runCorpseSendCorpseProbe(p)
+    local okX, x = safeCall(p, "getX")
+    local okY, y = safeCall(p, "getY")
+    local okZ, z = safeCall(p, "getZ")
+    if not (okX and okY and okZ) then return end
+
+    local bx, by, bz = math.floor(x), math.floor(y) - 1, math.floor(z)
+    print("TWR.Debug: TEST Q1 -- runCorpseSendCorpseProbe -- spawning live zombie at (" .. bx .. "," .. by .. "," .. bz .. ") to convert via the real vanilla sendCorpse sequence")
+
+    local okList, zombieList = pcall(function()
+        return addZombiesInOutfit(bx, by, bz, 1, "Police", 0)
+    end)
+    if not okList or not zombieList then
+        print("TWR.Debug: TEST Q1 -- addZombiesInOutfit FAILED: " .. tostring(zombieList))
+        return
+    end
+
+    local okZ0, zombie = pcall(function() return zombieList:get(0) end)
+    if not okZ0 or not zombie then
+        print("TWR.Debug: TEST Q1 -- zombieList:get(0) FAILED")
+        return
+    end
+
+    local okCell, cell = pcall(function() return getCell() end)
+    local okSq, square = pcall(function() return okCell and cell:getGridSquare(bx, by, bz) end)
+    if not okSq or not square then
+        print("TWR.Debug: TEST Q1 -- getGridSquare FAILED")
+        return
+    end
+
+    local okBody, body = pcall(function() return IsoDeadBody.new(zombie, false) end)
+    if not okBody or not body then
+        print("TWR.Debug: TEST Q1 -- IsoDeadBody.new(zombie, false) FAILED: " .. tostring(body))
+        return
+    end
+
+    safeCall(body, "setX", bx + 0.5)
+    safeCall(body, "setY", by + 0.5)
+    safeCall(body, "setZ", bz)
+
+    local okAdd, addErr = pcall(function() square:addCorpse(body, false) end)
+    if not okAdd then
+        print("TWR.Debug: TEST Q1 -- square:addCorpse() FAILED: " .. tostring(addErr))
+        return
+    end
+
+    safeCall(body, "invalidateCorpse")
+    safeCall(body, "setInvalidateNextRender", true)
+    safeCall(zombie, "remove")
+
+    local okSend, sendErr = pcall(function() sendCorpse(body) end)
+    print("TWR.Debug: TEST Q1 -- sendCorpse(body) ok=" .. tostring(okSend) .. " err=" .. tostring(sendErr))
+
+    local okBodies, bodies = safeCall(square, "getDeadBodys")
+    print("TWR.Debug: TEST Q1 -- result: square getDeadBodys():size()=" .. tostring(okBodies and bodies and bodies:size() or "?") .. ". Verify visually WITHOUT reconnecting -- does the corpse appear immediately?")
+end
+
 -- Shared by runDoor and runDoorUnlockPermanent -- finds the door on the
 -- player's current square, falling back to its 4 orthogonal neighbors.
 -- Prints diagnostics either way so a "no door found" report can be told
@@ -330,6 +423,7 @@ local MECHANICS = {
     corpse_spawn_dead_probe = runCorpseSpawnDeadProbe,
     corpse_spawn_control_probe = runCorpseSpawnControlProbe,
     corpse_direct_body_probe = runCorpseDirectBodyProbe,
+    corpse_sendcorpse_probe = runCorpseSendCorpseProbe,
     door = runDoor,
     door_unlock_permanent = runDoorUnlockPermanent,
     recipe = runRecipe,
