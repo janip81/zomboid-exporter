@@ -137,38 +137,62 @@ end
 -- multiplier (default 1.0), not a flag -- health=0 at spawn should be a
 -- genuinely different, vanilla-exposed code path from spawning healthy
 -- and killing via Lua afterward. UNTESTED until now.
-local function runCorpseSpawnDeadProbe(p)
+-- LIVE FINDING round 1: health=0 via the 17-arg form returned a
+-- zombieList whose get(0) failed -- meaning the list came back EMPTY
+-- (zero zombies actually spawned), not that the call errored. This
+-- helper takes health/x-offset as parameters so a control run
+-- (health=1, proves the 17-arg form itself works) and a near-zero
+-- variant (health=0.01, tests whether exactly 0 is a special-cased
+-- "don't spawn" threshold) can both run from one restart cycle.
+local function corpseSpawnDeadProbe(p, health, xOffset, label)
     local okX, x = safeCall(p, "getX")
     local okY, y = safeCall(p, "getY")
     local okZ, z = safeCall(p, "getZ")
     if not (okX and okY and okZ) then return end
 
-    local bx, by, bz = math.floor(x) + 1, math.floor(y), math.floor(z)
-    print("TWR.Debug: TEST O -- runCorpseSpawnDeadProbe -- spawning dead-on-arrival at (" .. bx .. "," .. by .. "," .. bz .. ")")
+    local bx, by, bz = math.floor(x) + xOffset, math.floor(y), math.floor(z)
+    print("TWR.Debug: " .. label .. " -- spawning at (" .. bx .. "," .. by .. "," .. bz .. "), health=" .. tostring(health))
 
     local okList, zombieList = pcall(function()
-        return addZombiesInOutfit(bx, by, bz, 1, "Police", 0, false, false, false, false, false, false, 0, false, 0, false, false)
+        return addZombiesInOutfit(bx, by, bz, 1, "Police", 0, false, false, false, false, false, false, health, false, 0, false, false)
     end)
     if not okList or not zombieList then
-        print("TWR.Debug: TEST O -- addZombiesInOutfit (17-arg, health=0) FAILED: " .. tostring(zombieList))
+        print("TWR.Debug: " .. label .. " -- addZombiesInOutfit FAILED: " .. tostring(zombieList))
         return
     end
 
+    local okSize, listSize = safeCall(zombieList, "size")
+    print("TWR.Debug: " .. label .. " -- zombieList:size()=" .. tostring(okSize and listSize or "?"))
+
     local okZ0, zombie = pcall(function() return zombieList:get(0) end)
     if not okZ0 or not zombie then
-        print("TWR.Debug: TEST O -- zombieList:get(0) FAILED")
+        print("TWR.Debug: " .. label .. " -- zombieList:get(0) FAILED (list is empty -- no zombie was actually placed)")
         return
     end
 
     local okCell, cell = pcall(function() return getCell() end)
     local okSq, square = pcall(function() return okCell and cell:getGridSquare(bx, by, bz) end)
     local okDead, isDead = safeCall(zombie, "isDead")
+    local okHealthNow, healthNow = safeCall(zombie, "getHealth")
 
     local okBodies, bodies = false, nil
     if okSq and square then
         okBodies, bodies = safeCall(square, "getDeadBodys")
     end
-    print("TWR.Debug: TEST O -- result: isDead=" .. tostring(okDead and isDead) .. ", square getDeadBodys():size()=" .. tostring(okBodies and bodies and bodies:size() or "?"))
+    print("TWR.Debug: " .. label .. " -- result: getHealth()=" .. tostring(okHealthNow and healthNow or "?") .. ", isDead=" .. tostring(okDead and isDead) .. ", square getDeadBodys():size()=" .. tostring(okBodies and bodies and bodies:size() or "?"))
+end
+
+-- Control run: health=1 (normal) -- proves the 17-arg form itself
+-- spawns a real, live zombie before testing whether health=0
+-- specifically is what causes zero zombies to be placed.
+local function runCorpseSpawnControlProbe(p)
+    corpseSpawnDeadProbe(p, 1, 1, "TEST O-control (health=1)")
+end
+
+-- Near-zero variant: tests whether exactly 0 is special-cased as
+-- "don't spawn" (round 1 finding) vs. a genuine near-death spawn.
+local function runCorpseSpawnDeadProbe(p)
+    corpseSpawnDeadProbe(p, 0.01, -1, "TEST O (health=0.01)")
 end
 
 -- Shared by runDoor and runDoorUnlockPermanent -- finds the door on the
@@ -237,6 +261,7 @@ local MECHANICS = {
     deferred_area = runDeferredArea,
     corpse = runCorpse,
     corpse_spawn_dead_probe = runCorpseSpawnDeadProbe,
+    corpse_spawn_control_probe = runCorpseSpawnControlProbe,
     door = runDoor,
     door_unlock_permanent = runDoorUnlockPermanent,
     recipe = runRecipe,
