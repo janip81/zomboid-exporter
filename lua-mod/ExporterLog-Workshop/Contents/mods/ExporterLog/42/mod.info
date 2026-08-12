@@ -1,3 +1,7 @@
 name=ExporterLog
 description=Logs extra stats (kills, etc.) to Logs/logs_*/*_ExporterLog.txt for external stats tracking. Server-side only.
 id=ExporterLog
+pzversion=42
+modversion=1.5.0
+versionMin=42.0.0
+author=janip81
