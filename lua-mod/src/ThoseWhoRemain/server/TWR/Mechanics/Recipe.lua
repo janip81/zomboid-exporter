@@ -105,5 +105,27 @@ function Recipe.teach(player, recipeName)
         print("TWR.Mechanics.Recipe: teach -- getKnownRecipes() call FAILED")
     end
 
+    -- DIAGNOSTIC round 2 2026-08-12: still not visible after the
+    -- category=Carpentry fix too. Checking the REAL UI gate directly --
+    -- grepped client/Entity/ISUI/CraftRecipe/ISRecipeScrollingListBox.lua,
+    -- the actual crafting-list renderer uses player:isRecipeKnown
+    -- (craftRecipe, true), a completely different check than
+    -- getKnownRecipes():contains(). Also verifying ScriptManager even
+    -- has the recipe registered at all (a nil result here would mean a
+    -- script-parse failure, independent of any player state).
+    local okSM, scriptManager = pcall(function() return ScriptManager.instance end)
+    if okSM and scriptManager then
+        local okRecipe, craftRecipe = safeCall(scriptManager, "getCraftRecipe", recipeName)
+        if okRecipe and craftRecipe then
+            local okIsKnown, isKnown = safeCall(player, "isRecipeKnown", craftRecipe, true)
+            local okCat, category = safeCall(craftRecipe, "getCategory")
+            print("TWR.Mechanics.Recipe: teach -- ScriptManager HAS the recipe, category=" .. tostring(okCat and category or "?") .. ", player:isRecipeKnown(recipe,true)=" .. tostring(okIsKnown and isKnown or "?"))
+        else
+            print("TWR.Mechanics.Recipe: teach -- ScriptManager.getCraftRecipe('" .. recipeName .. "') returned NIL -- recipe definition never registered")
+        end
+    else
+        print("TWR.Mechanics.Recipe: teach -- ScriptManager.instance not accessible server-side")
+    end
+
     return ok
 end
