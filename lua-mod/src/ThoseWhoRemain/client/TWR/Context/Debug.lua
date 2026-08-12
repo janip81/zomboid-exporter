@@ -46,6 +46,56 @@ local MECHANIC_LABELS = {
     { key = "coords", label = "Show my coordinates" },
 }
 
+-- DIAGNOSTIC 2026-08-12 -- ChatGPT-requested client-side recipe check
+-- (existing-world-test-matrix.md "OPEN 2026-08-12: recipe genuinely
+-- invisible" section). Every server-side check has already confirmed
+-- correct; this runs the SAME checks but from the client's own local
+-- ScriptManager/player state, since server state proves nothing about
+-- what the client actually loaded/received. Purely local -- no
+-- sendClientCommand, no server round-trip.
+local RECIPE_NAME = "AntagonistProbeTestRecipe"
+
+local function runClientRecipeDiagnostic()
+    print("TWR: Context.Debug -- CLIENT recipe diagnostic for '" .. RECIPE_NAME .. "'")
+
+    local okSM, scriptManager = pcall(function() return ScriptManager.instance end)
+    if not okSM or not scriptManager then
+        print("TWR: Context.Debug -- CLIENT ScriptManager.instance not accessible")
+        return
+    end
+
+    local okRecipe, craftRecipe = pcall(function() return scriptManager:getCraftRecipe(RECIPE_NAME) end)
+    if not okRecipe or not craftRecipe then
+        print("TWR: Context.Debug -- CLIENT recipe == nil -- client mod/script loading problem (classification A)")
+        return
+    end
+
+    local okName, name = pcall(function() return craftRecipe:getName() end)
+    local okCat, category = pcall(function() return craftRecipe:getCategory() end)
+    local okNTBL, needToBeLearn = pcall(function() return craftRecipe:getNeedToBeLearn() end)
+    print("TWR: Context.Debug -- CLIENT recipe exists: name=" .. tostring(okName and name or "?") .. " category=" .. tostring(okCat and category or "?") .. " needToBeLearn=" .. tostring(okNTBL and needToBeLearn or "?"))
+
+    local okPlayer, player = pcall(function() return getPlayer() end)
+    if not okPlayer or not player then
+        print("TWR: Context.Debug -- CLIENT getPlayer() failed")
+        return
+    end
+
+    local okKR, knownRecipes = pcall(function() return player:getKnownRecipes() end)
+    local okContains, contains = false, nil
+    if okKR and knownRecipes then
+        okContains, contains = pcall(function() return knownRecipes:contains(RECIPE_NAME) end)
+    end
+    local okIsKnown, isKnown = pcall(function() return player:isRecipeKnown(craftRecipe, true) end)
+    print("TWR: Context.Debug -- CLIENT getKnownRecipes():contains=" .. tostring(okContains and contains or "?") .. " CLIENT isRecipeKnown(recipe,true)=" .. tostring(okIsKnown and isKnown or "?"))
+
+    if okIsKnown and isKnown then
+        print("TWR: Context.Debug -- CLIENT isRecipeKnown==true -- if crafting menu still doesn't show it after a full close+reopen, this is classification C (client list-filter problem), otherwise D (stale window cache)")
+    else
+        print("TWR: Context.Debug -- CLIENT isRecipeKnown==false -- classification B (server->client recipe-knowledge sync problem)")
+    end
+end
+
 local function onFillWorldObjectContextMenu(player, context, worldobjects, test)
     if test then return end
 
@@ -71,6 +121,12 @@ local function onFillWorldObjectContextMenu(player, context, worldobjects, test)
             end
         end)
     end
+
+    -- Local-only diagnostic (no server round-trip) -- see
+    -- runClientRecipeDiagnostic() header comment above.
+    debugMenu:addOption("Client recipe diagnostic (local only)", nil, function()
+        runClientRecipeDiagnostic()
+    end)
 end
 
 local function init()
