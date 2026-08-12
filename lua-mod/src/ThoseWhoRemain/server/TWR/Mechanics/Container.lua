@@ -36,17 +36,26 @@ end
 
 -- Finds the first real container on a square, via the same
 -- obj:getContainer() scan TEST A2 proved. Returns nil if none.
+-- Returns container, obj -- obj (the parent IsoObject) is needed by
+-- callers so they can call obj:transmitCompleteItemToClients() after
+-- mutating the container -- CONFIRMED real vanilla pattern, grepped
+-- server/Map/MapObjects/MOFeedingTrough.lua's own
+-- MOFeedingTrough.generateContainer() (fills trough:getContainer() via
+-- AddItem in a loop) followed immediately by
+-- isoObject:transmitCompleteItemToClients() on the PARENT object, not
+-- the container -- same as Container.finalizeSpawn()'s pattern for
+-- freshly-spawned crates.
 function Container.findExistingContainer(square)
     local okObjs, objects = safeCall(square, "getObjects")
-    if not okObjs or not objects then return nil end
+    if not okObjs or not objects then return nil, nil end
 
     for i = 0, objects:size() - 1 do
         local obj = objects:get(i)
         local okC, container = safeCall(obj, "getContainer")
-        if okC and container then return container end
+        if okC and container then return container, obj end
     end
 
-    return nil
+    return nil, nil
 end
 
 -- Scans a square grid centered on (centerX, centerY, z) out to radius,
@@ -75,9 +84,9 @@ function Container.scatterIntoExisting(cell, centerX, centerY, z, radius, seed, 
         for dy = -radius, radius do
             local okSq, square = pcall(function() return cell:getGridSquare(centerX + dx, centerY + dy, z) end)
             if okSq and square then
-                local container = Container.findExistingContainer(square)
+                local container, obj = Container.findExistingContainer(square)
                 if container then
-                    table.insert(candidates, { container = container, x = centerX + dx, y = centerY + dy })
+                    table.insert(candidates, { container = container, obj = obj, x = centerX + dx, y = centerY + dy })
                 end
             end
         end
@@ -102,6 +111,16 @@ function Container.scatterIntoExisting(cell, centerX, centerY, z, radius, seed, 
             local okAdd = safeCall(candidates[idx].container, "AddItem", itemType)
             if okAdd then
                 placed = placed + 1
+                -- SYNC FIX 2026-08-12: without this, the item was added
+                -- server-side (AddItem succeeded, logged as "placed")
+                -- but did NOT reliably appear to an already-connected
+                -- client -- same class of sync gap as spawnBox/corpse.
+                -- Real vanilla precedent confirms the fix: calling
+                -- obj:transmitCompleteItemToClients() on the PARENT
+                -- object (not the container) after filling it -- see
+                -- findExistingContainer()'s header for the grepped
+                -- MOFeedingTrough.lua source.
+                safeCall(candidates[idx].obj, "transmitCompleteItemToClients")
                 print("TWR.Mechanics.Container: scatterIntoExisting -- placed " .. itemType .. " at (" .. candidates[idx].x .. "," .. candidates[idx].y .. "," .. z .. ")")
             end
         end
