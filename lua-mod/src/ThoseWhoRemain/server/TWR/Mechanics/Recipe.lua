@@ -28,11 +28,11 @@
 -- ruling out both a module mismatch and a simple client-cache/sync
 -- gap (relogging always fully resyncs everything else this session).
 --
--- FIX 2026-08-12 (round 2, real root cause): ChatGPT's own CGPT-021
--- review (probe-code/ROUND2-REVIEW.md) had already flagged this exact
--- gap and pointed at the fix, which was never actually applied here --
--- grepped CONFIRMED real, shared/TimedActions/ISResearchRecipe.lua's
--- own :complete(): after granting recipes (via
+-- FIX 2026-08-12 (round 2): ChatGPT's own CGPT-021 review
+-- (probe-code/ROUND2-REVIEW.md) had already flagged this exact gap and
+-- pointed at the fix, which was never actually applied here -- grepped
+-- CONFIRMED real, shared/TimedActions/ISResearchRecipe.lua's own
+-- :complete(): after granting recipes (via
 -- scriptItem:researchRecipes(character), a different call than our
 -- learnRecipe() but same effect on the known-recipes set), it ALWAYS
 -- follows with `sendSyncPlayerFields(character, 0x00000001)` (the
@@ -41,6 +41,23 @@
 -- silently never updates. learnRecipe() alone was never enough on
 -- dedicated MP -- exact same class of bug as spawnBox/corpse/scatter
 -- this whole session, just a different subsystem.
+--
+-- STILL FAIL after the sync fix too -- a `getKnownRecipes():contains
+-- (recipeName)` diagnostic proved the grant was ALWAYS correct
+-- server-side (size=25, contains=true), ruling that out completely.
+-- Not an ingredient-presence issue either -- B42's crafting UI shows
+-- known recipes regardless of materials on hand (just marked
+-- unavailable/red), confirmed by the user.
+--
+-- FIX 2026-08-12 (round 3, real root cause -- see scripts/
+-- twr_recipes.txt): comparing our recipe definition field-by-field
+-- against real, confirmed-loaded NeedToBeLearn=true recipes (grepped
+-- media/scripts/generated/recipes/recipes_traps.txt etc.) found the
+-- one structural difference -- 600 of 623 real craftRecipe definitions
+-- in the installed tree have a `category = <CategoryName>` field; ours
+-- had none. Added `category = Carpentry` to match (Twigs -> Plank).
+-- Suspected this is required for the crafting UI to place a recipe
+-- into any menu section at all -- PENDING LIVE VERIFICATION.
 --
 -- No require(), no cached cross-file locals -- see TWR.Constants'
 -- header for why.

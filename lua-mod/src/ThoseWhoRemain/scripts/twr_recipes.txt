@@ -5,6 +5,7 @@ module Base
 		time = 100,
 		NeedToBeLearn = true,
 		Tags = AnySurfaceCraft,
+		category = Carpentry,
 		timedAction = Making,
 		inputs
 		{
