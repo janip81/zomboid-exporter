@@ -195,6 +195,73 @@ local function runCorpseSpawnDeadProbe(p)
     corpseSpawnDeadProbe(p, 0.01, -1, "TEST O (health=0.01)")
 end
 
+-- TEST P -- construct a real IsoDeadBody directly, instead of trying to
+-- convert an already-spawned zombie into one after the fact (TEST O's
+-- whole approach). CONFIRMED live 2026-08-12: the original spawn-then-
+-- setHealth(0) approach (Corpse.spawnPermanentCorpse) leaves
+-- getDeadBodys():size()==0 immediately after death -- and per the
+-- user's live report, those SAME corpses only became visible after an
+-- unrelated server restart+relogin the next day. That strongly implies
+-- corpse creation is normally driven by native combat-kill code (or a
+-- save/reload boundary), not by anything a Lua-only setHealth(0) call
+-- triggers -- impractical for a live quest system that can't restart
+-- the server to spawn a corpse.
+--
+-- CONFIRMED via grep: IsoDeadBody.new(entity, wasCorpseAlready,
+-- addToSquareAndWorld) is a real 3-arg constructor, used server-side in
+-- shared/TimedActions/Animals/ISKillAnimalInInventory.lua:kill() and
+-- server/Traps/STrapGlobalObject.lua:removeAnimalCorpse() -- but BOTH
+-- confirmed real usages pass addToSquareAndWorld=false (they convert an
+-- animal into a carryable inventory-item corpse, isoDeadBody:getItem(),
+-- never placed in the world). There is NO vanilla precedent anywhere in
+-- the installed tree for addToSquareAndWorld=true -- this probe is
+-- testing genuinely unproven territory, not confirming a known-working
+-- vanilla pattern (unlike TEST N's IsoThumpable.new(), which matched
+-- ISWoodenContainer:create() almost exactly). The parameter name
+-- strongly implies this is the toggle for "actually place a real world
+-- IsoDeadBody, not just an inventory item" -- worth testing directly.
+local function runCorpseDirectBodyProbe(p)
+    local okX, x = safeCall(p, "getX")
+    local okY, y = safeCall(p, "getY")
+    local okZ, z = safeCall(p, "getZ")
+    if not (okX and okY and okZ) then return end
+
+    local bx, by, bz = math.floor(x), math.floor(y) + 1, math.floor(z)
+    print("TWR.Debug: TEST P -- runCorpseDirectBodyProbe -- spawning live zombie at (" .. bx .. "," .. by .. "," .. bz .. ") to convert directly")
+
+    local okList, zombieList = pcall(function()
+        return addZombiesInOutfit(bx, by, bz, 1, "Police", 0)
+    end)
+    if not okList or not zombieList then
+        print("TWR.Debug: TEST P -- addZombiesInOutfit FAILED: " .. tostring(zombieList))
+        return
+    end
+
+    local okZ0, zombie = pcall(function() return zombieList:get(0) end)
+    if not okZ0 or not zombie then
+        print("TWR.Debug: TEST P -- zombieList:get(0) FAILED")
+        return
+    end
+
+    local okBody, body = pcall(function() return IsoDeadBody.new(zombie, false, true) end)
+    if not okBody or not body then
+        print("TWR.Debug: TEST P -- IsoDeadBody.new(zombie, false, true) FAILED: " .. tostring(body))
+        return
+    end
+
+    print("TWR.Debug: TEST P -- IsoDeadBody.new() call succeeded (no error), checking real state now")
+
+    local okCell, cell = pcall(function() return getCell() end)
+    local okSq, square = pcall(function() return okCell and cell:getGridSquare(bx, by, bz) end)
+    local okBodies, bodies = false, nil
+    if okSq and square then
+        okBodies, bodies = safeCall(square, "getDeadBodys")
+    end
+    local okGetItem, item = safeCall(body, "getItem")
+
+    print("TWR.Debug: TEST P -- result: square getDeadBodys():size()=" .. tostring(okBodies and bodies and bodies:size() or "?") .. ", body:getItem()=" .. tostring(okGetItem and item ~= nil))
+end
+
 -- Shared by runDoor and runDoorUnlockPermanent -- finds the door on the
 -- player's current square, falling back to its 4 orthogonal neighbors.
 -- Prints diagnostics either way so a "no door found" report can be told
@@ -262,6 +329,7 @@ local MECHANICS = {
     corpse = runCorpse,
     corpse_spawn_dead_probe = runCorpseSpawnDeadProbe,
     corpse_spawn_control_probe = runCorpseSpawnControlProbe,
+    corpse_direct_body_probe = runCorpseDirectBodyProbe,
     door = runDoor,
     door_unlock_permanent = runDoorUnlockPermanent,
     recipe = runRecipe,
