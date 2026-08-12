@@ -43,9 +43,11 @@ lua-mod/ThoseWhoRemain/42/media/lua/shared/TWR/
 lua-mod/ThoseWhoRemain/42/media/lua/client/TWR/
 lua-mod/ThoseWhoRemain/42/media/lua/server/TWR/
 lua-mod/ThoseWhoRemain/42/media/scripts/twr_items.txt
+lua-mod/ThoseWhoRemain/42/media/scripts/twr_recipes.txt
 lua-mod/ThoseWhoRemain/42/media/lua/shared/Translate/EN/ItemName.json
 lua-mod/ThoseWhoRemain-Workshop/Contents/mods/ThoseWhoRemain/42/media/lua/shared/TWR/
 lua-mod/ThoseWhoRemain-Workshop/Contents/mods/ThoseWhoRemain/42/media/lua/client/TWR/
 lua-mod/ThoseWhoRemain-Workshop/Contents/mods/ThoseWhoRemain/42/media/lua/server/TWR/
 lua-mod/ThoseWhoRemain-Workshop/Contents/mods/ThoseWhoRemain/42/media/scripts/twr_items.txt
+lua-mod/ThoseWhoRemain-Workshop/Contents/mods/ThoseWhoRemain/42/media/scripts/twr_recipes.txt
 lua-mod/ThoseWhoRemain-Workshop/Contents/mods/ThoseWhoRemain/42/media/lua/shared/Translate/EN/ItemName.json

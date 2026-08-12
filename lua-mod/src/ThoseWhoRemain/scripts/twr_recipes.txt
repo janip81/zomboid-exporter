@@ -1,0 +1,18 @@
+module ThoseWhoRemain
+{
+	craftRecipe AntagonistProbeTestRecipe
+	{
+		time = 100,
+		NeedToBeLearn = true,
+		Tags = AnySurfaceCraft,
+		timedAction = Making,
+		inputs
+		{
+			item 1 [Base.Twigs],
+		}
+		outputs
+		{
+			item 1 Base.Plank,
+		}
+	}
+}

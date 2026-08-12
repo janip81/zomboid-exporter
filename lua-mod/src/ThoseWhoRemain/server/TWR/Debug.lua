@@ -96,13 +96,31 @@ local function runDeferredArea(p)
     local okZ, z = safeCall(p, "getZ")
     if not (okX and okY and okZ) then return end
 
-    local tx, ty, tz = math.floor(x) + 300, math.floor(y) - 300, math.floor(z)
+    -- FIX 2026-08-12: was a fixed +300x/-300y diagonal offset from
+    -- whatever spot the player happened to click from -- user hit open
+    -- ocean once already. Shrunk to a much smaller single-axis offset
+    -- (due east only) to keep the watched point closer to wherever the
+    -- player already is (more likely inhabited/dry land), and switched
+    -- the payload from scatterIntoExisting (existing containers -- see
+    -- Container.lua's REVERTED note, still has an unresolved sync gap)
+    -- to spawnBox/finalizeSpawn (fresh crate -- fully proven safe on
+    -- dedicated MP), so this test isolates deferred-area triggering
+    -- itself instead of being coupled to a second, separately-broken
+    -- mechanic.
+    local tx, ty, tz = math.floor(x) + 80, math.floor(y), math.floor(z)
     print("TWR.Debug: runDeferredArea -- watching (" .. tx .. "," .. ty .. "," .. tz .. "), walk there to trigger")
     TWR.Mechanics.DeferredArea.waitForSquare(tx, ty, tz, function(square)
-        local okCell, cell = pcall(function() return getCell() end)
-        if not okCell or not cell then return end
-        local placed = TWR.Mechanics.Container.scatterIntoExisting(cell, tx, ty, tz, 20, 42, 1, "Base.Twigs")
-        print("TWR.Debug: runDeferredArea -- area loaded, placed " .. placed .. " twig(s)")
+        local crate = TWR.Mechanics.Container.spawnBox(tx, ty, tz)
+        if not crate then
+            print("TWR.Debug: runDeferredArea -- area loaded, spawnBox FAILED")
+            return
+        end
+        local okC, container = safeCall(crate, "getContainer")
+        if okC and container then
+            safeCall(container, "AddItem", "Base.Twigs")
+        end
+        TWR.Mechanics.Container.finalizeSpawn(crate)
+        print("TWR.Debug: runDeferredArea -- area loaded, crate spawned at (" .. tx .. "," .. ty .. "," .. tz .. ") with a twig")
     end)
 end
 
@@ -172,8 +190,9 @@ local function runMapReveal(p)
     local okY, y = safeCall(p, "getY")
     if not (okX and okY) then return end
 
-    local ok = TWR.Mechanics.MapReveal.revealAroundPoint(p, x, y, 20)
-    print("TWR.Debug: runMapReveal -- revealAroundPoint " .. (ok and "SUCCEEDED -- check the map" or "FAILED"))
+    local radius = 60
+    local ok = TWR.Mechanics.MapReveal.revealAroundPoint(p, x, y, radius)
+    print("TWR.Debug: runMapReveal -- revealAroundPoint center (" .. math.floor(x) .. "," .. math.floor(y) .. "), radius " .. radius .. " " .. (ok and "SUCCEEDED -- open the map (M) and look there" or "FAILED"))
 end
 
 local function runCoords(p)
