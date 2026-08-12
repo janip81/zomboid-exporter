@@ -112,16 +112,25 @@ function Corpse.spawnPermanentCorpse(x, y, z, outfit, femaleChance, lootItems)
     -- real via grep, client/Tutorial/Steps.lua (used right before its
     -- own IsoDeadBody.new(zombie, false) call, same conversion we do
     -- below): setDressInRandomOutfit(false) + dressInNamedOutfit(name)
-    -- is the real controlled (non-random) outfit API, and
-    -- resetModelNextFrame() is what forces the visual model to actually
-    -- refresh. addZombiesInOutfit's own outfit parameter alone was NOT
-    -- enough -- live-confirmed dedicated MP corpses spawned naked
-    -- despite it. This matches the session's broader pattern: state set
-    -- server-side needs an explicit refresh/sync call, not just being
-    -- set.
+    -- is the real controlled (non-random) outfit API. Round 1 (2026-08-12)
+    -- of this fix omitted DoZombieInventory(), assuming it was purely
+    -- about loot items (worried about conflicting with our own
+    -- controlled lootItems below) -- CONFIRMED STILL NAKED live despite
+    -- setDressInRandomOutfit/dressInNamedOutfit/resetModelNextFrame all
+    -- running with no errors. "Police" itself is NOT gender-restricted
+    -- (grepped shared/NPCs/ZombiesZoneDefinition.lua -- unlike
+    -- OfficeWorkerSkirt/OfficeWorker in that same table, which DO carry
+    -- an explicit gender= field -- so gender mismatch is not the cause
+    -- here). Hypothesis for round 2: dressInNamedOutfit() only SELECTS
+    -- the outfit definition; DoZombieInventory() may be the step that
+    -- actually EQUIPS the corresponding worn clothing items onto the
+    -- character model (the name may not literally mean "just loot") --
+    -- matches the exact, only call this file omitted from the otherwise
+    -- fully-replicated vanilla sequence. PENDING LIVE VERIFICATION.
     safeCall(zombie, "setDressInRandomOutfit", false)
     safeCall(zombie, "dressInNamedOutfit", outfit)
     safeCall(zombie, "resetModelNextFrame")
+    safeCall(zombie, "DoZombieInventory")
 
     local okBody, body = pcall(function() return IsoDeadBody.new(zombie, false) end)
     if not okBody or not body then return false end
