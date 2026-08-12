@@ -1,4 +1,4 @@
-module ThoseWhoRemain
+module Base
 {
 	craftRecipe AntagonistProbeTestRecipe
 	{

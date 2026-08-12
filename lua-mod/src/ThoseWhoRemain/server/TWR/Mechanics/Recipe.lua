@@ -16,6 +16,15 @@
 -- production need, bypassing whatever discovery gate (e.g. B42's new
 -- "Research" mechanic) the recipe would otherwise require.
 --
+-- FIX 2026-08-12: scripts/twr_recipes.txt was first ported using
+-- `module ThoseWhoRemain` (matching this mod's own item-definition
+-- convention) instead of the exact `module Base` the original
+-- AntagonistProbe TEST D used when it was confirmed working live
+-- ("craftable... got a plank"). learnRecipe() still succeeded silently
+-- either way (no error to signal the mismatch), but nothing appeared in
+-- the crafting menu -- switched twr_recipes.txt back to `module Base`
+-- to match the only precedent actually proven live.
+--
 -- No require(), no cached cross-file locals -- see TWR.Constants'
 -- header for why.
 -- CONFIRMED live 2026-08-11: media/lua/server/ files are ALSO loaded by
