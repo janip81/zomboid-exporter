@@ -52,7 +52,27 @@ function Container.findExistingContainer(square)
     for i = 0, objects:size() - 1 do
         local obj = objects:get(i)
         local okC, container = safeCall(obj, "getContainer")
-        if okC and container then return container, obj end
+        if okC and container then
+            -- DIAGNOSTIC 2026-08-12: user reported items landing in an
+            -- invisible/duplicate object sharing the same square as a
+            -- real, visible piece of furniture (twig appeared in the
+            -- inventory-adjacent loot panel but not on the wall shelf
+            -- clicked in-world) -- logging every object on the square
+            -- plus which index/type/sprite got picked to find out
+            -- whether this square really does have more than one
+            -- container-holding object on it.
+            local okType, typeName = pcall(function() return obj:getClass():getSimpleName() end)
+            local okSprite, spriteName = pcall(function() return obj:getSprite():getName() end)
+            print("TWR.Mechanics.Container: findExistingContainer -- square has " .. objects:size() .. " object(s), picked index " .. i .. " type=" .. (okType and tostring(typeName) or "?") .. " sprite=" .. (okSprite and tostring(spriteName) or "?"))
+            for j = 0, objects:size() - 1 do
+                local otherObj = objects:get(j)
+                local okOT, otType = pcall(function() return otherObj:getClass():getSimpleName() end)
+                local okOS, otSprite = pcall(function() return otherObj:getSprite():getName() end)
+                local okOC = safeCall(otherObj, "getContainer")
+                print("TWR.Mechanics.Container: findExistingContainer --   [" .. j .. "] type=" .. (okOT and tostring(otType) or "?") .. " sprite=" .. (okOS and tostring(otSprite) or "?") .. " hasContainer=" .. tostring(okOC))
+            end
+            return container, obj
+        end
     end
 
     return nil, nil
