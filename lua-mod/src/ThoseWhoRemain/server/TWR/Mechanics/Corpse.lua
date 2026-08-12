@@ -56,15 +56,19 @@
 -- -- simpler than the old deferred isDead()-polling watcher, and no
 -- longer needs one at all.
 --
--- OUTFIT FIX 2026-08-12: the original approach (relying solely on
--- addZombiesInOutfit's own outfit parameter) left corpses naked on
--- dedicated MP despite outfit being correctly specified. Fixed by
--- explicitly calling setDressInRandomOutfit(false) +
+-- OUTFIT FIX 2026-08-12 (CONFIRMED, 2 rounds): the original approach
+-- (relying solely on addZombiesInOutfit's own outfit parameter) left
+-- corpses naked on dedicated MP despite outfit being correctly
+-- specified. Round 1 -- setDressInRandomOutfit(false) +
 -- dressInNamedOutfit(outfit) + resetModelNextFrame() on the zombie
--- before conversion -- see the CONFIRMED real vanilla precedent
--- (client/Tutorial/Steps.lua) inline below. PENDING LIVE VERIFICATION --
--- do not assume this is proven until confirmed against a real
--- dedicated MP client.
+-- before conversion (matching the real vanilla precedent in
+-- client/Tutorial/Steps.lua) -- still spawned naked live. Round 2 added
+-- zombie:DoZombieInventory(), the one call round 1 deliberately omitted
+-- (worried it would conflict with the controlled lootItems below) --
+-- CONFIRMED LIVE: corpse now spawns visually dressed in the correct
+-- outfit, with loot still correct and separate. DoZombieInventory()
+-- is apparently what actually equips the worn clothing model, not just
+-- loot -- dressInNamedOutfit() alone only selects the definition.
 --
 -- No require(), no cached cross-file locals -- see TWR.Constants'
 -- header for why.
@@ -121,12 +125,11 @@ function Corpse.spawnPermanentCorpse(x, y, z, outfit, femaleChance, lootItems)
     -- (grepped shared/NPCs/ZombiesZoneDefinition.lua -- unlike
     -- OfficeWorkerSkirt/OfficeWorker in that same table, which DO carry
     -- an explicit gender= field -- so gender mismatch is not the cause
-    -- here). Hypothesis for round 2: dressInNamedOutfit() only SELECTS
-    -- the outfit definition; DoZombieInventory() may be the step that
-    -- actually EQUIPS the corresponding worn clothing items onto the
-    -- character model (the name may not literally mean "just loot") --
-    -- matches the exact, only call this file omitted from the otherwise
-    -- fully-replicated vanilla sequence. PENDING LIVE VERIFICATION.
+    -- here). Round 2 added DoZombieInventory() back -- it turns out to be
+    -- the step that actually EQUIPS the worn clothing model, not just
+    -- loot; dressInNamedOutfit() alone only selects the definition.
+    -- CONFIRMED LIVE 2026-08-12: corpse now spawns visually dressed
+    -- correctly, loot still correct and separate.
     safeCall(zombie, "setDressInRandomOutfit", false)
     safeCall(zombie, "dressInNamedOutfit", outfit)
     safeCall(zombie, "resetModelNextFrame")
