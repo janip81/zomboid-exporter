@@ -1,6 +1,22 @@
 -- TWR.Mechanics.MapReveal -- reveals a rectangular area on a player's
 -- in-game map, server-authoritative.
 --
+-- *** DANGER -- DO NOT CALL, ANYWHERE, UNTIL THIS WARNING IS REMOVED ***
+-- CONFIRMED LIVE 2026-08-12 (dedicated MP, zomboid-test): a legitimate,
+-- correctly-coordinated revealAroundPoint() call was followed by the
+-- calling player's ENTIRE previously-explored in-game map (M key)
+-- disappearing -- including the immediate area around their own
+-- character, not just remote history. Root cause NOT understood --
+-- see the "URGENT/OPEN" section of existing-world-test-matrix.md for
+-- the two live hypotheses and what research is needed. The debug menu
+-- entry that called this has been removed on both the client and
+-- server side specifically because disabling only one side was proven
+-- live to be insufficient (a stale client Workshop version still
+-- triggered it through the server dispatch table). Do not re-wire this
+-- function to anything, in any mod, until the real mechanism is
+-- understood via decompiled-Java research -- and it must NEVER be run
+-- against the real production server under any circumstances.
+--
 -- CONFIRMED live 2026-08-11 (AntagonistProbe TEST E, existing-world-
 -- test-matrix.md "Map-enabled flyer / map reveal" row). Traced from
 -- client/PZAPI/ui/organisms/PrintMedia.lua's real "reveal on map"
