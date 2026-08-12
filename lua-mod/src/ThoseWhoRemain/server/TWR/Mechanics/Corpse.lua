@@ -56,12 +56,15 @@
 -- -- simpler than the old deferred isDead()-polling watcher, and no
 -- longer needs one at all.
 --
--- KNOWN OPEN ISSUE (tracked separately, not a sync problem): the
--- resulting corpse spawns NAKED regardless of the outfit argument --
--- outfit definitions are compiled binary asset data, not present in
--- any Lua/script-accessible file, so this needs a different
--- investigation approach than grep. Do not assume outfit works until
--- this is separately proven.
+-- OUTFIT FIX 2026-08-12: the original approach (relying solely on
+-- addZombiesInOutfit's own outfit parameter) left corpses naked on
+-- dedicated MP despite outfit being correctly specified. Fixed by
+-- explicitly calling setDressInRandomOutfit(false) +
+-- dressInNamedOutfit(outfit) + resetModelNextFrame() on the zombie
+-- before conversion -- see the CONFIRMED real vanilla precedent
+-- (client/Tutorial/Steps.lua) inline below. PENDING LIVE VERIFICATION --
+-- do not assume this is proven until confirmed against a real
+-- dedicated MP client.
 --
 -- No require(), no cached cross-file locals -- see TWR.Constants'
 -- header for why.
@@ -104,6 +107,21 @@ function Corpse.spawnPermanentCorpse(x, y, z, outfit, femaleChance, lootItems)
 
     local okZ0, zombie = pcall(function() return zombieList:get(0) end)
     if not okZ0 or not zombie then return false end
+
+    -- Explicit controlled-outfit dressing + visual refresh -- CONFIRMED
+    -- real via grep, client/Tutorial/Steps.lua (used right before its
+    -- own IsoDeadBody.new(zombie, false) call, same conversion we do
+    -- below): setDressInRandomOutfit(false) + dressInNamedOutfit(name)
+    -- is the real controlled (non-random) outfit API, and
+    -- resetModelNextFrame() is what forces the visual model to actually
+    -- refresh. addZombiesInOutfit's own outfit parameter alone was NOT
+    -- enough -- live-confirmed dedicated MP corpses spawned naked
+    -- despite it. This matches the session's broader pattern: state set
+    -- server-side needs an explicit refresh/sync call, not just being
+    -- set.
+    safeCall(zombie, "setDressInRandomOutfit", false)
+    safeCall(zombie, "dressInNamedOutfit", outfit)
+    safeCall(zombie, "resetModelNextFrame")
 
     local okBody, body = pcall(function() return IsoDeadBody.new(zombie, false) end)
     if not okBody or not body then return false end
