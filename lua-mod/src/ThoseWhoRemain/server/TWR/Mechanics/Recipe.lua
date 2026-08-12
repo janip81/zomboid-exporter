@@ -103,7 +103,11 @@ function Recipe.forget(player, recipeName)
     local okKR, knownRecipes = safeCall(player, "getKnownRecipes")
     if not okKR or not knownRecipes then return false end
 
-    local ok = safeCall(knownRecipes, "remove", recipeName)
+    local okBefore, containsBefore = safeCall(knownRecipes, "contains", recipeName)
+    local ok, removed = safeCall(knownRecipes, "remove", recipeName)
+    local okAfter, containsAfter = safeCall(knownRecipes, "contains", recipeName)
+    print("TWR.Mechanics.Recipe: forget -- contains before=" .. tostring(okBefore and containsBefore or "?") .. " remove() returned=" .. tostring(ok and removed or "call failed") .. " contains after=" .. tostring(okAfter and containsAfter or "?"))
+
     pcall(function() sendSyncPlayerFields(player, 0x00000001) end)
     return ok
 end
