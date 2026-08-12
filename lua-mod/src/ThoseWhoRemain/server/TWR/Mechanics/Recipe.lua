@@ -74,5 +74,19 @@ function Recipe.teach(player, recipeName)
     -- already-connected dedicated MP client -- learnRecipe() alone only
     -- updates server-side state.
     pcall(function() sendSyncPlayerFields(player, 0x00000001) end)
+
+    -- DIAGNOSTIC 2026-08-12: still not visible after both the module
+    -- fix and the sync-field fix -- checking whether the grant itself
+    -- actually took effect server-side (getKnownRecipes()) before
+    -- troubleshooting sync/display further.
+    local okKR, knownRecipes = safeCall(player, "getKnownRecipes")
+    if okKR and knownRecipes then
+        local okSize, size = safeCall(knownRecipes, "size")
+        local okContains, contains = safeCall(knownRecipes, "contains", recipeName)
+        print("TWR.Mechanics.Recipe: teach -- getKnownRecipes() size=" .. tostring(okSize and size or "?") .. " contains('" .. recipeName .. "')=" .. tostring(okContains and contains or "?"))
+    else
+        print("TWR.Mechanics.Recipe: teach -- getKnownRecipes() call FAILED")
+    end
+
     return ok
 end
