@@ -45,6 +45,10 @@ end
 -- isoObject:transmitCompleteItemToClients() on the PARENT object, not
 -- the container -- same as Container.finalizeSpawn()'s pattern for
 -- freshly-spawned crates.
+-- Returns container, obj. obj is returned for callers that might need
+-- the parent IsoObject, but see the REVERTED note in scatterIntoExisting
+-- below -- do NOT call transmitCompleteItemToClients() on it if it's an
+-- already-existing (not freshly server-created) object.
 function Container.findExistingContainer(square)
     local okObjs, objects = safeCall(square, "getObjects")
     if not okObjs or not objects then return nil, nil end
@@ -52,27 +56,7 @@ function Container.findExistingContainer(square)
     for i = 0, objects:size() - 1 do
         local obj = objects:get(i)
         local okC, container = safeCall(obj, "getContainer")
-        if okC and container then
-            -- DIAGNOSTIC 2026-08-12: user reported items landing in an
-            -- invisible/duplicate object sharing the same square as a
-            -- real, visible piece of furniture (twig appeared in the
-            -- inventory-adjacent loot panel but not on the wall shelf
-            -- clicked in-world) -- logging every object on the square
-            -- plus which index/type/sprite got picked to find out
-            -- whether this square really does have more than one
-            -- container-holding object on it.
-            local okType, typeName = pcall(function() return obj:getClass():getSimpleName() end)
-            local okSprite, spriteName = pcall(function() return obj:getSprite():getName() end)
-            print("TWR.Mechanics.Container: findExistingContainer -- square has " .. objects:size() .. " object(s), picked index " .. i .. " type=" .. (okType and tostring(typeName) or "?") .. " sprite=" .. (okSprite and tostring(spriteName) or "?"))
-            for j = 0, objects:size() - 1 do
-                local otherObj = objects:get(j)
-                local okOT, otType = pcall(function() return otherObj:getClass():getSimpleName() end)
-                local okOS, otSprite = pcall(function() return otherObj:getSprite():getName() end)
-                local okOC = safeCall(otherObj, "getContainer")
-                print("TWR.Mechanics.Container: findExistingContainer --   [" .. j .. "] type=" .. (okOT and tostring(otType) or "?") .. " sprite=" .. (okOS and tostring(otSprite) or "?") .. " hasContainer=" .. tostring(okOC))
-            end
-            return container, obj
-        end
+        if okC and container then return container, obj end
     end
 
     return nil, nil
@@ -131,22 +115,30 @@ function Container.scatterIntoExisting(cell, centerX, centerY, z, radius, seed, 
             local okAdd = safeCall(candidates[idx].container, "AddItem", itemType)
             if okAdd then
                 placed = placed + 1
-                -- SYNC FIX 2026-08-12: without this, the item was added
-                -- server-side (AddItem succeeded, logged as "placed")
-                -- but did NOT reliably appear to an already-connected
-                -- client -- same class of sync gap as spawnBox/corpse.
-                -- Real vanilla precedent confirms the fix: calling
-                -- obj:transmitCompleteItemToClients() on the PARENT
-                -- object (not the container) after filling it -- see
-                -- findExistingContainer()'s header for the grepped
-                -- MOFeedingTrough.lua source.
-                local objType = "nil"
-                if candidates[idx].obj then
-                    local okType, typeName = pcall(function() return candidates[idx].obj:getClass():getSimpleName() end)
-                    if okType then objType = typeName end
-                end
-                local okTransmit = safeCall(candidates[idx].obj, "transmitCompleteItemToClients")
-                print("TWR.Mechanics.Container: scatterIntoExisting -- placed " .. itemType .. " at (" .. candidates[idx].x .. "," .. candidates[idx].y .. "," .. z .. "), objType=" .. objType .. ", transmit=" .. tostring(okTransmit))
+                -- REVERTED 2026-08-12: transmitCompleteItemToClients()
+                -- was added here believing it fixed a sync gap (item
+                -- added server-side but invisible client-side), citing
+                -- MOFeedingTrough.lua as vanilla precedent. That
+                -- precedent was misread -- MOFeedingTrough only ever
+                -- calls it on a BRAND-NEW object it just constructed
+                -- (ReplaceExistingObject destroys the old one via
+                -- square:transmitRemoveItemFromSquare THEN builds a
+                -- fresh IsoFeedingTrough before transmitting) -- there
+                -- is no real vanilla precedent for calling it on an
+                -- already-existing, already-client-loaded worldgen
+                -- object. LIVE CONFIRMED this causes real harm: the
+                -- user reported the item appearing in the
+                -- inventory-adjacent loot panel while the visually
+                -- clicked wall shelf stayed empty -- a duplicate ghost
+                -- copy of the object was created client-side rather
+                -- than the original being updated in place. Reverted
+                -- rather than risk further ghost/duplicate objects in a
+                -- real save. scatterIntoExisting's original sync gap
+                -- (item added server-side, not reliably visible without
+                -- a relog) is UNRESOLVED -- do not call this on existing
+                -- containers again without a genuinely different,
+                -- targeted sync mechanism (not full-object transmit).
+                print("TWR.Mechanics.Container: scatterIntoExisting -- placed " .. itemType .. " at (" .. candidates[idx].x .. "," .. candidates[idx].y .. "," .. z .. ")")
             end
         end
     end
