@@ -185,6 +185,11 @@ local function runRecipe(p)
     print("TWR.Debug: runRecipe -- teach() " .. (ok and "SUCCEEDED -- check the crafting menu" or "FAILED"))
 end
 
+local function runRecipeForget(p)
+    local ok = TWR.Mechanics.Recipe.forget(p, "AntagonistProbeTestRecipe")
+    print("TWR.Debug: runRecipeForget -- forget() " .. (ok and "SUCCEEDED -- recipe should be gone from the crafting menu" or "FAILED"))
+end
+
 -- PRODUCTION-PATH alternative to runRecipe() above: instead of an
 -- instant admin grant, gives a real lootable ThoseWhoRemain.RecipeNote
 -- item (scripts/twr_items.txt, LearnedRecipes=AntagonistProbeTestRecipe)
@@ -233,6 +238,7 @@ local MECHANICS = {
     door = runDoor,
     door_unlock_permanent = runDoorUnlockPermanent,
     recipe = runRecipe,
+    recipe_forget = runRecipeForget,
     recipe_note = runRecipeNote,
     -- map_reveal DISABLED SERVER-SIDE 2026-08-12 -- removing only the
     -- client-side button (client/TWR/Context/Debug.lua) was NOT enough:

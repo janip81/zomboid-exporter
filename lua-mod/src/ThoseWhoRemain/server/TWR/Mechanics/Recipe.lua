@@ -91,41 +91,19 @@ function Recipe.teach(player, recipeName)
     -- already-connected dedicated MP client -- learnRecipe() alone only
     -- updates server-side state.
     pcall(function() sendSyncPlayerFields(player, 0x00000001) end)
+    return ok
+end
 
-    -- DIAGNOSTIC 2026-08-12: still not visible after both the module
-    -- fix and the sync-field fix -- checking whether the grant itself
-    -- actually took effect server-side (getKnownRecipes()) before
-    -- troubleshooting sync/display further.
+-- No vanilla "unlearn" API exists (grepped, zero hits anywhere in the
+-- installed tree -- PZ never expects a player to forget a recipe in
+-- normal gameplay). Debug-only convenience: removes directly from the
+-- known-recipes list and reuses the same PF_Recipes sync call teach()
+-- uses, so debug-testing runs don't leave permanent state behind.
+function Recipe.forget(player, recipeName)
     local okKR, knownRecipes = safeCall(player, "getKnownRecipes")
-    if okKR and knownRecipes then
-        local okSize, size = safeCall(knownRecipes, "size")
-        local okContains, contains = safeCall(knownRecipes, "contains", recipeName)
-        print("TWR.Mechanics.Recipe: teach -- getKnownRecipes() size=" .. tostring(okSize and size or "?") .. " contains('" .. recipeName .. "')=" .. tostring(okContains and contains or "?"))
-    else
-        print("TWR.Mechanics.Recipe: teach -- getKnownRecipes() call FAILED")
-    end
+    if not okKR or not knownRecipes then return false end
 
-    -- DIAGNOSTIC round 2 2026-08-12: still not visible after the
-    -- category=Carpentry fix too. Checking the REAL UI gate directly --
-    -- grepped client/Entity/ISUI/CraftRecipe/ISRecipeScrollingListBox.lua,
-    -- the actual crafting-list renderer uses player:isRecipeKnown
-    -- (craftRecipe, true), a completely different check than
-    -- getKnownRecipes():contains(). Also verifying ScriptManager even
-    -- has the recipe registered at all (a nil result here would mean a
-    -- script-parse failure, independent of any player state).
-    local okSM, scriptManager = pcall(function() return ScriptManager.instance end)
-    if okSM and scriptManager then
-        local okRecipe, craftRecipe = safeCall(scriptManager, "getCraftRecipe", recipeName)
-        if okRecipe and craftRecipe then
-            local okIsKnown, isKnown = safeCall(player, "isRecipeKnown", craftRecipe, true)
-            local okCat, category = safeCall(craftRecipe, "getCategory")
-            print("TWR.Mechanics.Recipe: teach -- ScriptManager HAS the recipe, category=" .. tostring(okCat and category or "?") .. ", player:isRecipeKnown(recipe,true)=" .. tostring(okIsKnown and isKnown or "?"))
-        else
-            print("TWR.Mechanics.Recipe: teach -- ScriptManager.getCraftRecipe('" .. recipeName .. "') returned NIL -- recipe definition never registered")
-        end
-    else
-        print("TWR.Mechanics.Recipe: teach -- ScriptManager.instance not accessible server-side")
-    end
-
+    local ok = safeCall(knownRecipes, "remove", recipeName)
+    pcall(function() sendSyncPlayerFields(player, 0x00000001) end)
     return ok
 end
