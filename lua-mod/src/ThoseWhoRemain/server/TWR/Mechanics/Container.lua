@@ -120,8 +120,13 @@ function Container.scatterIntoExisting(cell, centerX, centerY, z, radius, seed, 
                 -- object (not the container) after filling it -- see
                 -- findExistingContainer()'s header for the grepped
                 -- MOFeedingTrough.lua source.
-                safeCall(candidates[idx].obj, "transmitCompleteItemToClients")
-                print("TWR.Mechanics.Container: scatterIntoExisting -- placed " .. itemType .. " at (" .. candidates[idx].x .. "," .. candidates[idx].y .. "," .. z .. ")")
+                local objType = "nil"
+                if candidates[idx].obj then
+                    local okType, typeName = pcall(function() return candidates[idx].obj:getClass():getSimpleName() end)
+                    if okType then objType = typeName end
+                end
+                local okTransmit = safeCall(candidates[idx].obj, "transmitCompleteItemToClients")
+                print("TWR.Mechanics.Container: scatterIntoExisting -- placed " .. itemType .. " at (" .. candidates[idx].x .. "," .. candidates[idx].y .. "," .. z .. "), objType=" .. objType .. ", transmit=" .. tostring(okTransmit))
             end
         end
     end
