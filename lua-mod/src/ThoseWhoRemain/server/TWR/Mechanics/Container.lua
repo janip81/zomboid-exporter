@@ -100,7 +100,10 @@ function Container.scatterIntoExisting(cell, centerX, centerY, z, radius, seed, 
         if not usedIndices[idx] then
             usedIndices[idx] = true
             local okAdd = safeCall(candidates[idx].container, "AddItem", itemType)
-            if okAdd then placed = placed + 1 end
+            if okAdd then
+                placed = placed + 1
+                print("TWR.Mechanics.Container: scatterIntoExisting -- placed " .. itemType .. " at (" .. candidates[idx].x .. "," .. candidates[idx].y .. "," .. z .. ")")
+            end
         end
     end
 

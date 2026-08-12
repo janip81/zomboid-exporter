@@ -85,6 +85,7 @@ local function runScatter(p)
     local okZ, z = safeCall(p, "getZ")
     if not (okCell and cell and okX and okY and okZ) then return end
 
+    print("TWR.Debug: runScatter -- center (" .. math.floor(x) .. "," .. math.floor(y) .. "," .. math.floor(z) .. "), radius 15")
     local placed = TWR.Mechanics.Container.scatterIntoExisting(cell, math.floor(x), math.floor(y), math.floor(z), 15, 42, 3, "Base.Twigs")
     print("TWR.Debug: runScatter -- placed " .. placed .. " twigs into existing containers within 15 tiles")
 end
