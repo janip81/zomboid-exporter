@@ -214,7 +214,13 @@ local MECHANICS = {
     door = runDoor,
     door_unlock_permanent = runDoorUnlockPermanent,
     recipe = runRecipe,
-    map_reveal = runMapReveal,
+    -- map_reveal DISABLED SERVER-SIDE 2026-08-12 -- removing only the
+    -- client-side button (client/TWR/Context/Debug.lua) was NOT enough:
+    -- a client on a stale/not-yet-updated Workshop version still had
+    -- the old button and could still trigger this. Confirmed live --
+    -- user's map broke a SECOND time via exactly this path. Do not
+    -- re-add until the suspected data-loss root cause (see URGENT/OPEN
+    -- note in existing-world-test-matrix.md) is resolved.
     coords = runCoords,
 }
 
