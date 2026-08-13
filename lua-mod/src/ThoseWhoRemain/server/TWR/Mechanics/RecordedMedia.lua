@@ -176,25 +176,69 @@ end
 -- discoveryKey from the SERVER's own view of that item's modData.
 -- args.contentId/discoveryKey are still accepted for debug-log
 -- comparison only and are never trusted for the emitted signal.
+-- FIX 2026-08-13, found live: the first cut of this only checked
+-- player:getInventory(), which REJECTED a completely legitimate
+-- "Watch Tape" click on a tape still sitting inside a just-opened
+-- nearby crate (never picked up) -- the KVLS fixture test itself hit
+-- this. Widened to also search containers on nearby squares (radius
+-- 2, same proximity-scan pattern as Container.findExistingContainer),
+-- not just the player's carried inventory. Still fully
+-- server-authoritative: this only ever reads modData off an item the
+-- server itself found in the world/inventory near the reporting
+-- player, never trusts anything the client claims about identity.
+local SEARCH_RADIUS = 2
+
+local function findNearbyItemById(player, itemID)
+    local okInv, inv = safeCall(player, "getInventory")
+    if okInv and inv then
+        local okItem, item = safeCall(inv, "getItemById", itemID)
+        if okItem and item then return item end
+    end
+
+    local okX, x = safeCall(player, "getX")
+    local okY, y = safeCall(player, "getY")
+    local okZ, z = safeCall(player, "getZ")
+    if not (okX and okY and okZ) then return nil end
+
+    local okCell, cell = pcall(function() return getCell() end)
+    if not okCell or not cell then return nil end
+
+    for dx = -SEARCH_RADIUS, SEARCH_RADIUS do
+        for dy = -SEARCH_RADIUS, SEARCH_RADIUS do
+            local okSq, square = pcall(function() return cell:getGridSquare(math.floor(x) + dx, math.floor(y) + dy, math.floor(z)) end)
+            if okSq and square then
+                local okObjs, objects = safeCall(square, "getObjects")
+                if okObjs and objects then
+                    for i = 0, objects:size() - 1 do
+                        local okC, container = safeCall(objects:get(i), "getContainer")
+                        if okC and container then
+                            local okItem, item = safeCall(container, "getItemById", itemID)
+                            if okItem and item then return item end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
 local function onMediaPlayed(module, command, player, args)
     if module ~= "twr_media" or command ~= "played" then return end
 
     local itemID = args and args.itemID
     local okName, username = safeCall(player, "getUsername")
 
-    local okInv, inv = safeCall(player, "getInventory")
-    local okItem, item = false, nil
-    if okInv and inv and itemID ~= nil then
-        okItem, item = safeCall(inv, "getItemById", itemID)
-    end
+    local item = itemID ~= nil and findNearbyItemById(player, itemID) or nil
 
     local okData, modData = false, nil
-    if okItem and item then
+    if item then
         okData, modData = safeCall(item, "getModData")
     end
 
     if not (okData and modData and modData.TWR_isVHS) then
-        print("TWR.Mechanics.RecordedMedia: onMediaPlayed -- REJECTED, no matching TWR VHS item in player's own inventory (player="
+        print("TWR.Mechanics.RecordedMedia: onMediaPlayed -- REJECTED, no matching TWR VHS item in player's inventory or nearby containers (player="
             .. (okName and username or "?") .. " itemID=" .. tostring(itemID)
             .. " claimed contentId=" .. tostring(args and args.contentId) .. ") -- possible stale close or forged command, not trusted")
         return
