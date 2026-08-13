@@ -29,24 +29,38 @@ local function onWatchTape(playerNum, item)
     if not okData or not modData or not modData.TWR_vhsText then return end
 
     local panel = ISMediaInfo.openPanel(playerNum, modData.TWR_vhsText)
+    if not panel then return end
 
-    -- Report "playback completed" the moment the player closes the
-    -- panel, not when they open it -- wrap this specific panel
-    -- instance's destroy() once, restore immediately after so we don't
-    -- affect any other future ISMediaInfo use.
-    if panel and not panel._twrWrapped then
+    -- ISMediaInfo is a CLASS-LEVEL SINGLETON (confirmed via its own
+    -- source: openPanel() reuses ISMediaInfo.instance and just swaps
+    -- the text if one is already open, rather than making a new
+    -- window). That means if a player opens a second TWR tape without
+    -- closing the first, the SAME panel instance gets reused -- so the
+    -- reported contentId/discoveryKey must be refreshed on every call,
+    -- not just captured once when destroy() is first wrapped, or a
+    -- second tape's close would incorrectly report the first tape's
+    -- identity. Store current identity ON the panel and read it back
+    -- inside destroy(); only wrap destroy() itself once.
+    panel._twrCurrentModData = modData
+    panel._twrCurrentPlayerNum = playerNum
+
+    if not panel._twrWrapped then
         panel._twrWrapped = true
         local originalDestroy = panel.destroy
         panel.destroy = function(self)
-            local okSend, sendErr = pcall(function()
-                sendClientCommand(getSpecificPlayer(playerNum), "twr_media", "played", {
-                    contentId = modData.TWR_contentId,
-                    mediaId = modData.TWR_mediaId,
-                    discoveryKey = modData.TWR_discoveryKey,
-                })
-            end)
-            if not okSend then
-                print("TWR: Context.RecordedMedia -- sendClientCommand FAILED: " .. tostring(sendErr))
+            local reportData = self._twrCurrentModData
+            local reportPlayerNum = self._twrCurrentPlayerNum
+            if reportData then
+                local okSend, sendErr = pcall(function()
+                    sendClientCommand(getSpecificPlayer(reportPlayerNum), "twr_media", "played", {
+                        contentId = reportData.TWR_contentId,
+                        mediaId = reportData.TWR_mediaId,
+                        discoveryKey = reportData.TWR_discoveryKey,
+                    })
+                end)
+                if not okSend then
+                    print("TWR: Context.RecordedMedia -- sendClientCommand FAILED: " .. tostring(sendErr))
+                end
             end
             originalDestroy(self)
         end
