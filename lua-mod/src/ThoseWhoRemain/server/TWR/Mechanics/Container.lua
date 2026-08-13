@@ -208,15 +208,29 @@ function Container.scatterAcrossMap(points, radius, seed, itemType)
     return pending
 end
 
--- Resolver TWR.PendingActions.OnChunkLoaded calls once `pending`'s
--- target chunk loads. Contract (see PendingActions.lua's header):
--- return true, resolved (resolved = {mechanic, placed, requested,
--- artifactType, x, y, z, targetType, targetSummary}) on success, or
--- false, errorCode, errorDetail on failure. Must NOT call
--- TWR.Emit.jobResult itself -- PendingActions.lua is the single place
--- that does, so every migrated mechanic's audit behavior stays
--- centralized and consistent.
+-- Entry point TWR.PendingActions.OnChunkLoaded actually calls (looked
+-- up as TWR.Mechanics.Container.resolvePendingAction). Dispatches on
+-- pending.actionType to the concrete resolver -- Container handles more
+-- than one actionType (scatter_items, spawn_container), so this module
+-- owns its own internal dispatch rather than PendingActions.lua needing
+-- to know about every action type every module supports.
 function Container.resolvePendingAction(pending)
+    if pending.actionType == "scatter_items" then
+        return Container.resolveScatterItems(pending)
+    elseif pending.actionType == "spawn_container" then
+        return Container.resolveSpawnContainer(pending)
+    end
+    return false, "UNKNOWN_ACTION_TYPE", "Container.resolvePendingAction: no resolver for actionType=" .. tostring(pending.actionType)
+end
+
+-- Resolver for actionType="scatter_items". Contract (see
+-- PendingActions.lua's header): return true, resolved (resolved =
+-- {mechanic, placed, requested, artifactType, x, y, z, targetType,
+-- targetSummary}) on success, or false, errorCode, errorDetail on
+-- failure. Must NOT call TWR.Emit.jobResult itself -- PendingActions.lua
+-- is the single place that does, so every migrated mechanic's audit
+-- behavior stays centralized and consistent.
+function Container.resolveScatterItems(pending)
     local okCell, cell = pcall(function() return getCell() end)
     if not okCell or not cell then
         return false, "WORLD_UNAVAILABLE", "getCell() failed"
@@ -252,7 +266,7 @@ function Container.resolvePendingAction(pending)
         placed, placements = Container.scatterIntoExisting(cell, pending.targetX, pending.targetY, pending.targetZ, usedRadius, seed, 1, itemType)
         if placed > 0 then break end
     end
-    print("TWR.Mechanics.Container: resolvePendingAction -- jobId=" .. tostring(pending.jobId) .. " (" .. pending.targetX .. "," .. pending.targetY .. "," .. pending.targetZ .. ") placed=" .. placed .. " (radius used=" .. usedRadius .. ", radius passes=" .. radiusAttempts .. ")")
+    print("TWR.Mechanics.Container: resolveScatterItems -- jobId=" .. tostring(pending.jobId) .. " (" .. pending.targetX .. "," .. pending.targetY .. "," .. pending.targetZ .. ") placed=" .. placed .. " (radius used=" .. usedRadius .. ", radius passes=" .. radiusAttempts .. ")")
 
     if placed > 0 then
         -- Record the ACTUAL resolved container square (placements[1]),
@@ -276,6 +290,58 @@ function Container.resolvePendingAction(pending)
     end
 
     return false, "NO_ELIGIBLE_TARGET", "no existing container found within radius " .. usedRadius .. " after " .. radiusAttempts .. " radius pass(es)"
+end
+
+-- Resolver for actionType="spawn_container" -- second mechanic
+-- migrated onto TWR.PendingActions (2026-08-13), promoting the "Deferred-
+-- area test" debug entry off DeferredArea.waitForSquare for the same
+-- reason scatterAcrossMap was: a fresh-crate spawn queued at a remote,
+-- not-yet-loaded square is exactly the kind of pending state that used
+-- to vanish with zero trace on any server restart. Same contract as
+-- resolveScatterItems above -- see PendingActions.lua's header.
+--
+-- params: { itemType (optional, default Base.Twigs), lockCode (optional
+-- int -- if present, combination-locks the crate via lockByCode, same
+-- as runContainer's own convention; if omitted the crate is left
+-- unlocked, matching the original runDeferredArea debug test exactly).
+function Container.resolveSpawnContainer(pending)
+    local params = pending.params or {}
+    local itemType = params.itemType or "Base.Twigs"
+
+    local crate = Container.spawnBox(pending.targetX, pending.targetY, pending.targetZ)
+    if not crate then
+        return false, "SPAWN_FAILED", "Container.spawnBox() failed"
+    end
+
+    local placed = 0
+    if itemType then
+        local okC, container = safeCall(crate, "getContainer")
+        if okC and container then
+            local okAdd = safeCall(container, "AddItem", itemType)
+            if okAdd then placed = 1 end
+        end
+    end
+
+    local lockSummary = "unlocked"
+    if params.lockCode then
+        Container.lockByCode(crate, params.lockCode)
+        lockSummary = "combination-locked (code " .. tostring(params.lockCode) .. ")"
+    end
+
+    Container.finalizeSpawn(crate)
+    print("TWR.Mechanics.Container: resolveSpawnContainer -- jobId=" .. tostring(pending.jobId) .. " (" .. pending.targetX .. "," .. pending.targetY .. "," .. pending.targetZ .. ") placed=" .. placed .. " (" .. lockSummary .. ")")
+
+    return true, {
+        mechanic = "Container.spawnBox",
+        placed = placed,
+        requested = 1,
+        artifactType = "container",
+        x = pending.targetX,
+        y = pending.targetY,
+        z = pending.targetZ,
+        targetType = "world_object",
+        targetSummary = "freshly spawned crate, " .. lockSummary,
+    }
 end
 
 -- Spawns a brand-new lootable box (real IsoThumpable + ItemContainer)

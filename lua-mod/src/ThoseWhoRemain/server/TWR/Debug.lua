@@ -215,32 +215,23 @@ local function runDeferredArea(p)
     local okZ, z = safeCall(p, "getZ")
     if not (okX and okY and okZ) then return end
 
-    -- FIX 2026-08-12: was a fixed +300x/-300y diagonal offset from
-    -- whatever spot the player happened to click from -- user hit open
-    -- ocean once already. Shrunk to a much smaller single-axis offset
-    -- (due east only) to keep the watched point closer to wherever the
-    -- player already is (more likely inhabited/dry land), and switched
-    -- the payload from scatterIntoExisting (existing containers -- see
-    -- Container.lua's REVERTED note, still has an unresolved sync gap)
-    -- to spawnBox/finalizeSpawn (fresh crate -- fully proven safe on
-    -- dedicated MP), so this test isolates deferred-area triggering
-    -- itself instead of being coupled to a second, separately-broken
-    -- mechanic.
+    -- FIX 2026-08-13: promoted off DeferredArea.waitForSquare onto
+    -- TWR.PendingActions -- same reason scatterAcrossMap was: a queued
+    -- crate spawn at a not-yet-loaded square used to vanish with zero
+    -- trace on any server restart. Now persists via
+    -- Container.resolveSpawnContainer -- survives a restart before the
+    -- admin gets there, same as the map-scatter test.
+    --
+    -- Offset: +80 tiles east only (single-axis, moderate) -- history:
+    -- was a fixed +/-300 diagonal offset originally, admin hit open
+    -- ocean once, shrunk to keep the watched point closer to wherever
+    -- the player already is (more likely inhabited/dry land).
     local tx, ty, tz = math.floor(x) + 80, math.floor(y), math.floor(z)
-    print("TWR.Debug: runDeferredArea -- watching (" .. tx .. "," .. ty .. "," .. tz .. "), walk there to trigger")
-    TWR.Mechanics.DeferredArea.waitForSquare(tx, ty, tz, function(square)
-        local crate = TWR.Mechanics.Container.spawnBox(tx, ty, tz)
-        if not crate then
-            print("TWR.Debug: runDeferredArea -- area loaded, spawnBox FAILED")
-            return
-        end
-        local okC, container = safeCall(crate, "getContainer")
-        if okC and container then
-            safeCall(container, "AddItem", "Base.Twigs")
-        end
-        TWR.Mechanics.Container.finalizeSpawn(crate)
-        print("TWR.Debug: runDeferredArea -- area loaded, crate spawned at (" .. tx .. "," .. ty .. "," .. tz .. ") with a twig")
-    end)
+    local jobId = "debug-deferredarea-" .. ZombRand(1000000000)
+    print("TWR.Debug: runDeferredArea -- queuing persistent spawn_container at (" .. tx .. "," .. ty .. "," .. tz .. "), walk there to trigger (survives restart)")
+    TWR.PendingActions.request(jobId, jobId .. "-artifact", "spawn_container", "Container", tx, ty, tz, {
+        itemType = "Base.Twigs",
+    })
 end
 
 local function runCorpse(p)
