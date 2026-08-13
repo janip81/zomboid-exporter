@@ -667,6 +667,61 @@ local function runCheckTVContent(p)
     print("TWR.Debug: runCheckTVContent -- scan complete, checked " .. checked .. " television(s)")
 end
 
+-- VHS quest-signal groundwork: confirms deviceData:getMediaData() is a
+-- real, Lua-callable API (per CGPT-020's official-API research, not yet
+-- confirmed live before this probe) and that the object it returns can
+-- be matched back to a contentId via reference equality against
+-- shared/TWR/RecordedMediaRegistry.lua's registry table -- the exact
+-- mechanism a future automatic "player is watching contentId=X" quest
+-- trigger would depend on. This is READ-ONLY, no signal is emitted.
+local function findContentIdForMediaData(mediaData)
+    if not (TWR.RecordedMediaRegistry and TWR.RecordedMediaRegistry.registry) then
+        return nil
+    end
+    for contentId, data in pairs(TWR.RecordedMediaRegistry.registry) do
+        if data == mediaData then
+            return contentId
+        end
+    end
+    return nil
+end
+
+local function runCheckMediaIdentity(p)
+    local okX, x = safeCall(p, "getX")
+    local okY, y = safeCall(p, "getY")
+    local okZ, z = safeCall(p, "getZ")
+    if not (okX and okY and okZ) then return end
+
+    local okCell, cell = pcall(function() return getCell() end)
+    if not okCell or not cell then return end
+
+    local checked = 0
+    for dx = -FIND_TV_RADIUS, FIND_TV_RADIUS do
+        for dy = -FIND_TV_RADIUS, FIND_TV_RADIUS do
+            local okSq, square = pcall(function() return cell:getGridSquare(math.floor(x) + dx, math.floor(y) + dy, math.floor(z)) end)
+            if okSq and square then
+                local okDD, deviceData = safeCall(square, "getDeviceData")
+                if okDD and deviceData then
+                    local okHas, hasMedia = safeCall(deviceData, "hasMedia")
+                    local okPlaying, isPlaying = safeCall(deviceData, "isPlayingMedia")
+                    if okHas and hasMedia then
+                        checked = checked + 1
+                        local okMD, mediaData = safeCall(deviceData, "getMediaData")
+                        local contentId = okMD and mediaData and findContentIdForMediaData(mediaData)
+                        print("TWR.Debug: runCheckMediaIdentity -- [" .. checked .. "] square=(" .. (math.floor(x) + dx) .. "," .. (math.floor(y) + dy) .. "," .. math.floor(z) .. ")"
+                            .. " hasMedia=" .. describe(okHas, hasMedia)
+                            .. " isPlayingMedia=" .. describe(okPlaying, isPlaying)
+                            .. " getMediaData()=" .. describe(okMD, mediaData ~= nil and "non-nil object" or mediaData)
+                            .. " resolvedContentId=" .. tostring(contentId))
+                    end
+                end
+            end
+        end
+    end
+
+    print("TWR.Debug: runCheckMediaIdentity -- scan complete, checked " .. checked .. " device(s) with hasMedia=true")
+end
+
 local function runCoords(p)
     local okX, x = safeCall(p, "getX")
     local okY, y = safeCall(p, "getY")
@@ -697,6 +752,7 @@ local MECHANICS = {
     find_nearby_tv = runFindNearbyTV,
     check_tv_content = runCheckTVContent,
     vhs_lines_test = runVHSLinesTest,
+    check_media_identity = runCheckMediaIdentity,
     -- map_reveal DISABLED SERVER-SIDE 2026-08-12 -- removing only the
     -- client-side button (client/TWR/Context/Debug.lua) was NOT enough:
     -- a client on a stale/not-yet-updated Workshop version still had
