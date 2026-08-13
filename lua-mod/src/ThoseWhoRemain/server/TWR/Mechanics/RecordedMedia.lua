@@ -49,7 +49,7 @@
 -- "recorded_media" mechanic. In particular UNCONFIRMED: whether
 -- ISMediaInfo.openPanel works correctly when called from a context
 -- menu option we add ourselves (vs. its normal call site), and whether
--- the close-triggers-discovery wiring (Trigger.MediaPlaybackCompleted)
+-- the close-triggers-discovery wiring (Trigger.RecordedMediaViewed)
 -- actually fires reliably. Update antagonist/DONE.md / antagonist/tests/
 -- once actually confirmed, not before.
 --
@@ -156,27 +156,69 @@ function RecordedMedia.resolvePendingAction(pending)
     }
 end
 
--- Trigger.MediaPlaybackCompleted -- server-side handler for the
--- client's "I closed the ISMediaInfo panel for this item" report (see
--- client/TWR/Context/RecordedMedia.lua). This is the discovery signal:
--- picking the tape up must NOT count, only this does. Logs via the
--- existing TWR.Emit pipeline (ThoseWhoRemainLog.txt -> exporter ->
--- Postgres) rather than inventing a new channel.
+-- Trigger.RecordedMediaViewed ("recorded_media_viewed", renamed from
+-- the original MediaPlaybackCompleted per CGPT-016 -- this reports the client
+-- closing the ISMediaInfo panel for an inventory item, NOT real
+-- vanilla TV/VCR playback: no television, no inserted tape, no
+-- electricity, no elapsed duration are involved. That's an honest,
+-- useful DB-fed "viewed this clue" signal on its own; it just isn't
+-- equivalent to vanilla media playback, and the name must not imply
+-- otherwise. Whether TWR VHS clues should ALSO require a real
+-- powered-TV interaction is Jani's call, not decided here --
+-- see antagonist/tests/priority-mechanics-p1-p4-chatgpt-review.md.
+--
+-- CGPT-017 fix: the server previously trusted args.contentId/
+-- discoveryKey verbatim from the client -- any client could have
+-- claimed an arbitrary discovery by hand-crafting the command. Now
+-- the client only sends the ITEM'S ID (see
+-- client/TWR/Context/RecordedMedia.lua); the server looks that item up
+-- in the player's OWN inventory and reads contentId/mediaId/
+-- discoveryKey from the SERVER's own view of that item's modData.
+-- args.contentId/discoveryKey are still accepted for debug-log
+-- comparison only and are never trusted for the emitted signal.
 local function onMediaPlayed(module, command, player, args)
     if module ~= "twr_media" or command ~= "played" then return end
 
-    local discoveryKey = args and args.discoveryKey
-    local contentId = args and args.contentId
+    local itemID = args and args.itemID
     local okName, username = safeCall(player, "getUsername")
+
+    local okInv, inv = safeCall(player, "getInventory")
+    local okItem, item = false, nil
+    if okInv and inv and itemID ~= nil then
+        okItem, item = safeCall(inv, "getItemById", itemID)
+    end
+
+    local okData, modData = false, nil
+    if okItem and item then
+        okData, modData = safeCall(item, "getModData")
+    end
+
+    if not (okData and modData and modData.TWR_isVHS) then
+        print("TWR.Mechanics.RecordedMedia: onMediaPlayed -- REJECTED, no matching TWR VHS item in player's own inventory (player="
+            .. (okName and username or "?") .. " itemID=" .. tostring(itemID)
+            .. " claimed contentId=" .. tostring(args and args.contentId) .. ") -- possible stale close or forged command, not trusted")
+        return
+    end
+
+    -- Authoritative identity: from the server's own item, not from args.
+    local discoveryKey = modData.TWR_discoveryKey
+    local contentId = modData.TWR_contentId
 
     print("TWR.Mechanics.RecordedMedia: onMediaPlayed -- player=" .. (okName and username or "?")
         .. " contentId=" .. tostring(contentId) .. " discoveryKey=" .. tostring(discoveryKey))
 
+    -- TEMPORARY DIAGNOSTIC PLUMBING (CGPT-018): reusing TWR.Emit.jobResult
+    -- here conflates job execution / physical artifact / player-discovery
+    -- signal into one record with a throwaway random jobId. This is
+    -- intentional short-term wiring, not the durable schema -- route
+    -- through a real twr_signals/twr_discoveries path once the quest
+    -- engine has one (antagonist/quest-db/), and stop emitting into
+    -- twr_world_artifacts' artifactKey for this at that point.
     if TWR.Emit and TWR.Emit.jobResult then
         TWR.Emit.jobResult({
             jobId = "media-played-" .. tostring(discoveryKey) .. "-" .. tostring(ZombRand(1000000000)),
             attemptNo = 1,
-            actionType = "media_playback_completed",
+            actionType = "recorded_media_viewed",
             mechanic = "RecordedMedia.onMediaPlayed",
             result = "applied",
             placed = 1,

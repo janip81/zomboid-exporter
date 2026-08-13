@@ -11,7 +11,7 @@
 -- -- confirmed a standalone generic rich-text window, no RecMedia
 -- dependency) directly with the item's own modData text. On close,
 -- reports back to the server via sendClientCommand so
--- Trigger.MediaPlaybackCompleted (server-side, RecordedMedia.lua's
+-- Trigger.RecordedMediaViewed (server-side, RecordedMedia.lua's
 -- onMediaPlayed) can distinguish "picked up" from "actually watched."
 --
 -- UNCONFIRMED LIVE: whether wrapping ISMediaInfo.destroy per-instance
@@ -43,6 +43,8 @@ local function onWatchTape(playerNum, item)
     -- inside destroy(); only wrap destroy() itself once.
     panel._twrCurrentModData = modData
     panel._twrCurrentPlayerNum = playerNum
+    local okID, itemID = pcall(function() return item:getID() end)
+    panel._twrCurrentItemID = okID and itemID or nil
 
     if not panel._twrWrapped then
         panel._twrWrapped = true
@@ -50,9 +52,16 @@ local function onWatchTape(playerNum, item)
         panel.destroy = function(self)
             local reportData = self._twrCurrentModData
             local reportPlayerNum = self._twrCurrentPlayerNum
-            if reportData then
+            local reportItemID = self._twrCurrentItemID
+            -- itemID is the load-bearing field -- the server looks this
+            -- item up in the player's OWN inventory and reads identity
+            -- from ITS OWN view of the modData (CGPT-017 fix). The
+            -- contentId/mediaId/discoveryKey sent here are for debug-log
+            -- comparison only; the server does not trust them.
+            if reportData and reportItemID ~= nil then
                 local okSend, sendErr = pcall(function()
                     sendClientCommand(getSpecificPlayer(reportPlayerNum), "twr_media", "played", {
+                        itemID = reportItemID,
                         contentId = reportData.TWR_contentId,
                         mediaId = reportData.TWR_mediaId,
                         discoveryKey = reportData.TWR_discoveryKey,
