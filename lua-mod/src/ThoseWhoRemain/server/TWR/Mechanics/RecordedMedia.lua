@@ -302,6 +302,130 @@ local function onMediaPlayed(module, command, player, args)
     end
 end
 
+-- Automatic Tier-3 quest-signal trigger, replacing the Tier-1
+-- onMediaPlayed/twr_media:played command above -- that command depended
+-- on the inventory-direct "Watch Tape" client UI, which was removed
+-- entirely per Jani's requirement that real VHS must go through a real
+-- TV/VCR. It is now unreachable (no client caller exists for it
+-- anymore) but is left in place rather than deleted, since it's a
+-- harmless, already-server-authoritative no-op without a caller and
+-- ripping it out isn't needed for this change.
+--
+-- CONFIRMED live 2026-08-13 via server/TWR/Debug.lua's
+-- check_media_identity probe: deviceData:getMediaData() is real and
+-- Lua-callable, and reference-matches back to a contentId in
+-- RecordedMediaRegistry.registry, both for a stopped device
+-- (hasMedia=true) and a playing one (isPlayingMedia=true) -- exactly
+-- the mechanism CGPT-020 Q3 proposed as authoritative "which TWR
+-- recording is this TV playing" identity while a real vanilla tape sits
+-- inserted.
+--
+-- Polls every real minute (Events.EveryOneMinute -- same cadence
+-- already used project-wide for background checks, e.g.
+-- Mechanics/DeferredArea.lua, Mechanics/PendingActions.lua's boot
+-- sweep; not a new special-cased timer). For every connected player,
+-- scans nearby squares (same getDeviceData()-per-square pattern already
+-- proven live in Debug.lua's runFindNearbyTV/runCheckMediaIdentity) for
+-- a device actively isPlayingMedia()==true whose getMediaData()
+-- resolves to a registered contentId. Emits the discovery signal once
+-- per (player, contentId) "viewing session" -- debounced via
+-- activeView so it doesn't re-fire every single poll tick while the
+-- player keeps watching, but does re-fire if they stop and restart, or
+-- switch to a different tape/TV.
+--
+-- KNOWN LIMITATION: a recording that starts and finishes entirely
+-- within one poll window could be missed if neither poll catches it
+-- mid-playback. Acceptable for now (same cadence as this project's
+-- other background signals); revisit with a finer poll interval only
+-- if real (non-test) content durations turn out to need it.
+local POLL_RADIUS = 6
+local activeView = {} -- username -> contentId currently credited
+
+local function findContentIdForMediaData(mediaData)
+    if not (TWR.RecordedMediaRegistry and TWR.RecordedMediaRegistry.registry) then
+        return nil
+    end
+    for contentId, data in pairs(TWR.RecordedMediaRegistry.registry) do
+        if data == mediaData then
+            return contentId
+        end
+    end
+    return nil
+end
+
+local function findPlayingContentIdNear(player)
+    local okX, x = safeCall(player, "getX")
+    local okY, y = safeCall(player, "getY")
+    local okZ, z = safeCall(player, "getZ")
+    if not (okX and okY and okZ) then return nil end
+
+    local okCell, cell = pcall(function() return getCell() end)
+    if not okCell or not cell then return nil end
+
+    for dx = -POLL_RADIUS, POLL_RADIUS do
+        for dy = -POLL_RADIUS, POLL_RADIUS do
+            local okSq, square = pcall(function() return cell:getGridSquare(math.floor(x) + dx, math.floor(y) + dy, math.floor(z)) end)
+            if okSq and square then
+                local okDD, deviceData = safeCall(square, "getDeviceData")
+                if okDD and deviceData then
+                    local okPlaying, isPlaying = safeCall(deviceData, "isPlayingMedia")
+                    if okPlaying and isPlaying then
+                        local okMD, mediaData = safeCall(deviceData, "getMediaData")
+                        if okMD and mediaData then
+                            local contentId = findContentIdForMediaData(mediaData)
+                            if contentId then return contentId end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function emitDeviceViewed(username, contentId)
+    print("TWR.Mechanics.RecordedMedia: pollDeviceMedia -- player=" .. tostring(username)
+        .. " contentId=" .. tostring(contentId) .. " (real TV/device playback)")
+    if TWR.Emit and TWR.Emit.jobResult then
+        TWR.Emit.jobResult({
+            jobId = "media-device-played-" .. tostring(contentId) .. "-" .. tostring(ZombRand(1000000000)),
+            attemptNo = 1,
+            actionType = "recorded_media_viewed",
+            mechanic = "RecordedMedia.pollDeviceMedia",
+            result = "applied",
+            placed = 1,
+            requested = 1,
+            artifactKey = contentId,
+            artifactType = "recorded_media_discovery",
+            targetType = "player",
+            targetSummary = "player=" .. tostring(username) .. " contentId=" .. tostring(contentId) .. " via real TV/device",
+        })
+    end
+end
+
+local function pollDeviceMedia()
+    local okPlayers, players = pcall(function() return getOnlinePlayers() end)
+    if not okPlayers or not players then return end
+    for i = 0, players:size() - 1 do
+        local player = players:get(i)
+        local okName, username = safeCall(player, "getUsername")
+        if okName and username then
+            local contentId = findPlayingContentIdNear(player)
+            local prev = activeView[username]
+            if contentId then
+                if prev ~= contentId then
+                    activeView[username] = contentId
+                    emitDeviceViewed(username, contentId)
+                end
+            elseif prev then
+                activeView[username] = nil
+            end
+        end
+    end
+end
+
+Events.EveryOneMinute.Add(pollDeviceMedia)
+
 -- FIX 2026-08-13: check TWR.Runtime exists first instead of calling
 -- into it and relying on pcall() to catch the resulting Java
 -- exception -- see server/TWR/Debug.lua's identical fix for the full
