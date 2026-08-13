@@ -357,9 +357,11 @@ local function runReadable(p)
 end
 
 -- P2 (VHS/RecordedMedia) debug test -- gives a dummy DB-shaped VHS
--- tape directly to inventory. Right-click it -> "Watch Tape" (custom
--- TWR option, NOT vanilla's native Read/Watch -- see
--- Mechanics/RecordedMedia.lua header for why).
+-- tape directly to inventory. No direct "watch" shortcut anymore --
+-- removed 2026-08-13 per Jani: a real VHS must require a real TV/VCR,
+-- like vanilla. This just proves item creation/give works; the actual
+-- watch path is not wired to anything yet -- see
+-- antagonist/tests/vhs-device-research.md.
 local function runRecordedMedia(p)
     local okInv, inventory = safeCall(p, "getInventory")
     if not okInv or not inventory then return end
@@ -380,7 +382,7 @@ local function runRecordedMedia(p)
     if okAdd then
         pcall(function() sendAddItemToContainer(inventory, item) end)
     end
-    print("TWR.Debug: runRecordedMedia -- gave dummy VHS tape " .. (okAdd and "SUCCEEDED -- right-click it and choose Watch Tape" or "FAILED"))
+    print("TWR.Debug: runRecordedMedia -- gave dummy VHS tape " .. (okAdd and "SUCCEEDED (no watch path wired yet -- needs a real TV)" or "FAILED"))
 end
 
 -- P3 (controlled key) debug test -- gives a key with a fixed,
@@ -480,7 +482,7 @@ local function runFixtureKVLS(p)
 
     print("TWR.Debug: runFixtureKVLS -- locked container+VHS at (" .. tx .. "," .. ty .. "," .. tz .. "), key_id=" .. FIXTURE_TEST_KEY_ID
         .. " " .. (key and "key given SUCCEEDED" or ("key FAILED: " .. tostring(keyErr)))
-        .. " -- unlock with the key, take the tape, Watch Tape. KVLS-3 onward (quest-step advance / sleep / final reward) intentionally not wired, needs the real quest dispatcher.")
+        .. " -- unlock with the key, take the tape (no direct watch path -- needs a real TV, see vhs-device-research.md). KVLS-3 onward (quest-step advance / sleep / final reward) intentionally not wired, needs the real quest dispatcher.")
 end
 
 local function runCoords(p)

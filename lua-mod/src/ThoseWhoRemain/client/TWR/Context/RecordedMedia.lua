@@ -1,22 +1,20 @@
--- TWR.Context.RecordedMedia -- adds a "Watch Tape" inventory context
--- option for any item carrying modData.TWR_isVHS (see
--- server/TWR/Mechanics/RecordedMedia.lua's header for why this
--- bypasses vanilla's native RecMedia registry entirely).
+-- TWR.Context.RecordedMedia -- displays DB-fed VHS content via the
+-- native ISMediaInfo popup (client/RecordedMedia/ISMediaInfo.lua --
+-- confirmed a standalone generic rich-text window, no RecMedia
+-- registry dependency).
 --
--- Hooks Events.OnFillInventoryObjectContextMenu -- CONFIRMED real
--- (grepped: client/ISUI/ISInventoryPaneContextMenu.lua:935
--- `triggerEvent("OnFillInventoryObjectContextMenu", player, context, items)`).
---
--- Opens the native ISMediaInfo popup (client/RecordedMedia/ISMediaInfo.lua
--- -- confirmed a standalone generic rich-text window, no RecMedia
--- dependency) directly with the item's own modData text. On close,
--- reports back to the server via sendClientCommand so
--- Trigger.RecordedMediaViewed (server-side, RecordedMedia.lua's
--- onMediaPlayed) can distinguish "picked up" from "actually watched."
---
--- UNCONFIRMED LIVE: whether wrapping ISMediaInfo.destroy per-instance
--- like this reliably fires for every close path (OK button vs window
--- X vs Esc) -- see antagonist/tests/ once tested.
+-- REMOVED 2026-08-13 per Jani's explicit direction: the direct
+-- right-click "Watch Tape" inventory shortcut. A real VHS tape must
+-- require a real TV/VCR to watch, exactly like vanilla -- right-
+-- clicking a tape in your own inventory and reading it like a book is
+-- not acceptable, even as an interim mechanic. TWR.Context.watchTape()
+-- below is kept as the reusable display+report helper (still correct
+-- and still needed) -- it is simply not wired to any player-facing
+-- trigger right now. The real trigger will be whatever hook fires once
+-- a real IsoTelevision accepts and plays a TWR-flagged tape -- see
+-- antagonist/tests/vhs-device-research.md for the researched device
+-- chain (IsoTelevision + DeviceData + ISDeviceMediaAction) this needs
+-- to hook into, not yet built.
 --
 -- No require(), no cached cross-file locals -- see TWR.Constants'
 -- header for why.
@@ -24,7 +22,9 @@ TWR = TWR or {}
 TWR.Context = TWR.Context or {}
 TWR.Context.callbacks = TWR.Context.callbacks or {}
 
-local function onWatchTape(playerNum, item)
+-- Kept for reuse once a real TV-driven trigger calls it. NOT currently
+-- called from anywhere -- see file header.
+function TWR.Context.watchTape(playerNum, item)
     local okData, modData = pcall(function() return item:getModData() end)
     if not okData or not modData or not modData.TWR_vhsText then return end
 
@@ -76,32 +76,7 @@ local function onWatchTape(playerNum, item)
     end
 end
 
-local function onFillInventoryObjectContextMenu(player, context, items)
-    for _, item in ipairs(items) do
-        -- items entries can be plain InventoryItem or {items={...}} stacks
-        -- (same shape vanilla's own handlers defend against elsewhere in
-        -- ISInventoryPaneContextMenu.lua) -- normalize to a single item.
-        local realItem = item
-        if type(item) == "table" and item.items then
-            realItem = item.items[1]
-        end
-        if realItem then
-            local okData, modData = pcall(function() return realItem:getModData() end)
-            if okData and modData and modData.TWR_isVHS then
-                context:addOption("Watch Tape", nil, function()
-                    onWatchTape(player, realItem)
-                end)
-            end
-        end
-    end
-end
-
-local function init()
-    TWR.Runtime.registerEventOnce(TWR.Context.callbacks, "onFillInventoryObjectContextMenuRecordedMedia", Events.OnFillInventoryObjectContextMenu, onFillInventoryObjectContextMenu)
-end
-
-local ok, err = pcall(init)
-if not ok then
-    print("TWR: Context.RecordedMedia init deferred to OnGameStart (dependency not loaded yet): " .. tostring(err))
-end
-Events.OnGameStart.Add(init)
+-- REMOVED 2026-08-13: the OnFillInventoryObjectContextMenu hook that
+-- added "Watch Tape" as a direct right-click option -- see file header.
+-- No context-menu registration, no init() needed right now; this file
+-- currently only defines TWR.Context.watchTape() for later reuse.
