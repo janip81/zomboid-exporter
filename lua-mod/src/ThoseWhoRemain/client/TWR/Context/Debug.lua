@@ -34,6 +34,8 @@ local MECHANIC_LABELS = {
     { key = "container", label = "Spawn locked container" },
     { key = "scatter", label = "Scatter into existing containers" },
     { key = "map_scatter", label = "Scatter across map (5 real points, deferred)" },
+    { key = "pending_spawn_create", label = "SGOS probe: create pending spawn (+200 east)" },
+    { key = "pending_spawn_status", label = "SGOS probe: report pending spawn status" },
     { key = "deferred_area", label = "Deferred-area test (80 tiles east)" },
     { key = "corpse", label = "Spawn permanent corpse" },
     { key = "door", label = "Lock nearest door" },
