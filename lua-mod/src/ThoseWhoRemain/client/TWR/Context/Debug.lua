@@ -42,6 +42,10 @@ local MECHANIC_LABELS = {
     { key = "recipe", label = "Teach test recipe" },
     { key = "recipe_forget", label = "Forget test recipe (debug reset)" },
     { key = "recipe_note", label = "Give lootable recipe note (read it)" },
+    { key = "readable", label = "Give dummy readable note (P1 test)" },
+    { key = "recorded_media", label = "Give dummy VHS tape (P2 test)" },
+    { key = "controlled_key", label = "Give dummy controlled key (P3 test)" },
+    { key = "fixture_kvls", label = "Spawn key+VHS fixture (P4 KVLS-1/2 test)" },
     -- map_reveal DISABLED 2026-08-12 -- suspected of wiping previously-
     -- explored map data on a real dedicated MP client (confirmed prior
     -- exploration disappeared after a legitimate, small-radius reveal

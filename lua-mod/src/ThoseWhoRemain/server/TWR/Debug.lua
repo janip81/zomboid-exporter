@@ -329,6 +329,150 @@ local function runMapReveal(p)
     print("TWR.Debug: runMapReveal -- revealAroundPoint center (" .. math.floor(x) .. "," .. math.floor(y) .. "), radius " .. radius .. " " .. (ok and "SUCCEEDED -- open the map (M) and look there" or "FAILED"))
 end
 
+-- P1 (readable content) debug test -- gives a dummy DB-shaped readable
+-- item directly to inventory. Uses the just-confirmed
+-- sendAddItemToContainer() MP-sync fix (antagonist/DONE.md,
+-- 2026-08-13) rather than the old transmitCompleteItemToClients()
+-- dead end.
+local function runReadable(p)
+    local okInv, inventory = safeCall(p, "getInventory")
+    if not okInv or not inventory then return end
+
+    local item, err = TWR.Mechanics.Readable.buildItem({
+        contentId = "dummy.paper.001",
+        displayName = "Folded Paper",
+        text = "dummy test content",
+        discoveryKey = "dummy_readable_001",
+    })
+    if not item then
+        print("TWR.Debug: runReadable -- buildItem FAILED: " .. tostring(err))
+        return
+    end
+
+    local okAdd = safeCall(inventory, "AddItem", item)
+    if okAdd then
+        pcall(function() sendAddItemToContainer(inventory, item) end)
+    end
+    print("TWR.Debug: runReadable -- gave dummy readable item " .. (okAdd and "SUCCEEDED -- right-click it and choose Read Note" or "FAILED"))
+end
+
+-- P2 (VHS/RecordedMedia) debug test -- gives a dummy DB-shaped VHS
+-- tape directly to inventory. Right-click it -> "Watch Tape" (custom
+-- TWR option, NOT vanilla's native Read/Watch -- see
+-- Mechanics/RecordedMedia.lua header for why).
+local function runRecordedMedia(p)
+    local okInv, inventory = safeCall(p, "getInventory")
+    if not okInv or not inventory then return end
+
+    local item, err = TWR.Mechanics.RecordedMedia.buildItem({
+        contentId = "dummy.vhs.001",
+        mediaId = "TWR_DummyTape01",
+        displayName = "Home Video",
+        lines = { "Dummy line one.", "Dummy line two." },
+        discoveryKey = "dummy_vhs_001",
+    })
+    if not item then
+        print("TWR.Debug: runRecordedMedia -- buildItem FAILED: " .. tostring(err))
+        return
+    end
+
+    local okAdd = safeCall(inventory, "AddItem", item)
+    if okAdd then
+        pcall(function() sendAddItemToContainer(inventory, item) end)
+    end
+    print("TWR.Debug: runRecordedMedia -- gave dummy VHS tape " .. (okAdd and "SUCCEEDED -- right-click it and choose Watch Tape" or "FAILED"))
+end
+
+-- P3 (controlled key) debug test -- gives a key with a fixed,
+-- hardcoded-for-the-test keyId directly to the triggering admin.
+-- Running this twice in a row should give two keys that are
+-- INTERCHANGEABLE (same keyId), proving retry-stability -- unlike
+-- Container.lockByKey/Door.lockToKey's own debug commands, which
+-- generate a fresh random keyId every time.
+local DUMMY_TEST_KEY_ID = 424242
+
+local function runControlledKey(p)
+    local item, err = TWR.Mechanics.Key.giveTo(p, DUMMY_TEST_KEY_ID, {
+        displayName = "Dummy Test Key",
+        contentId = "dummy.key.001",
+    })
+    print("TWR.Debug: runControlledKey -- " .. (item and ("gave key with keyId=" .. DUMMY_TEST_KEY_ID .. " SUCCEEDED (run again -- should give an interchangeable duplicate, not a new keyId)") or ("FAILED: " .. tostring(err))))
+end
+
+-- P4 -- dummy key->VHS->location->sleep integration fixture, per
+-- antagonist/quest-db/quest-fixtures/dummy-key-vhs-location-sleep.md.
+-- Covers KVLS-1 (one stable keyId reused for key+lock) and KVLS-2
+-- (DB-shaped VHS creation) concretely, chaining P1-P3 above through
+-- ALREADY-PROVEN Container.spawnBox/lockByKey (existing-world-test-
+-- matrix.md TEST I/J). KVLS-3 onward (authoritative playback ->
+-- quest-step advancement -> sleep consumes the stable location ->
+-- exactly-one final reward, with restart/MP redelivery safety) is
+-- deliberately NOT built here -- the fixture doc's own status line
+-- says VHS creation "must be source/API checked and live-proven
+-- before this fixture can become fully TEST_READY", and its "Required
+-- engine vocabulary" section depends on the real quest dispatcher /
+-- twr_jobs reconciliation design that doesn't exist yet. Faking that
+-- with one-off state-tracking Lua here would violate the fixture
+-- doc's own "do not patch the fixture with one-off Lua" rule. P2's
+-- onMediaPlayed already fires (with discoveryKey="fixture_kvls_vhs_alpha")
+-- the moment the matching tape is watched -- wiring that into a real
+-- step advance is TODO once an engine exists to advance.
+local FIXTURE_TEST_KEY_ID = 990001
+
+local function runFixtureKVLS(p)
+    local okX, x = safeCall(p, "getX")
+    local okY, y = safeCall(p, "getY")
+    local okZ, z = safeCall(p, "getZ")
+    if not (okX and okY and okZ) then return end
+
+    local tx, ty, tz = math.floor(x) + 3, math.floor(y), math.floor(z)
+
+    -- Step 02: locked container holding Test VHS Alpha, key_id =
+    -- test_key_id, unlock_policy=permanent (CustomLock -- matches
+    -- quest-engine-extensibility.md's adopted pattern).
+    local crate = TWR.Mechanics.Container.spawnBox(tx, ty, tz)
+    if not crate then
+        print("TWR.Debug: runFixtureKVLS -- Container.spawnBox FAILED")
+        return
+    end
+
+    local vhs, vhsErr = TWR.Mechanics.RecordedMedia.buildItem({
+        contentId = "fixture.media.vhs.alpha",
+        mediaId = "TWR_TEST_VHS_ALPHA",
+        displayName = "Test VHS Alpha",
+        lines = {
+            "TEST RECORDING",
+            "Proceed to the designated test location.",
+            "Sleep there to continue.",
+            "END TEST RECORDING",
+        },
+        discoveryKey = "fixture_kvls_vhs_alpha",
+    })
+    if vhs then
+        local okC, container = safeCall(crate, "getContainer")
+        if okC and container then
+            safeCall(container, "AddItem", vhs)
+        end
+    else
+        print("TWR.Debug: runFixtureKVLS -- RecordedMedia.buildItem FAILED: " .. tostring(vhsErr))
+    end
+
+    TWR.Mechanics.Container.lockByKey(crate, nil, FIXTURE_TEST_KEY_ID)
+
+    -- Step 01: place the matching test key. Given directly to the
+    -- triggering admin for this manual debug run -- there's no real
+    -- player-targeting/delivery system yet for a world-placed key
+    -- (same open gap Key.resolvePendingAction's own comment flags).
+    local key, keyErr = TWR.Mechanics.Key.giveTo(p, FIXTURE_TEST_KEY_ID, {
+        displayName = "Test Key Alpha",
+        contentId = "fixture.key.alpha",
+    })
+
+    print("TWR.Debug: runFixtureKVLS -- locked container+VHS at (" .. tx .. "," .. ty .. "," .. tz .. "), key_id=" .. FIXTURE_TEST_KEY_ID
+        .. " " .. (key and "key given SUCCEEDED" or ("key FAILED: " .. tostring(keyErr)))
+        .. " -- unlock with the key, take the tape, Watch Tape. KVLS-3 onward (quest-step advance / sleep / final reward) intentionally not wired, needs the real quest dispatcher.")
+end
+
 local function runCoords(p)
     local okX, x = safeCall(p, "getX")
     local okY, y = safeCall(p, "getY")
@@ -352,6 +496,10 @@ local MECHANICS = {
     recipe = runRecipe,
     recipe_forget = runRecipeForget,
     recipe_note = runRecipeNote,
+    readable = runReadable,
+    recorded_media = runRecordedMedia,
+    controlled_key = runControlledKey,
+    fixture_kvls = runFixtureKVLS,
     -- map_reveal DISABLED SERVER-SIDE 2026-08-12 -- removing only the
     -- client-side button (client/TWR/Context/Debug.lua) was NOT enough:
     -- a client on a stale/not-yet-updated Workshop version still had

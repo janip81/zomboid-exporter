@@ -1,0 +1,211 @@
+-- TWR.Mechanics.RecordedMedia -- generic DB-suppliable "VHS tape"
+-- readable/watchable content.
+--
+-- SOURCE-CONFIRMED against installed B42.20.2, and this is a
+-- DELIBERATE ARCHITECTURE DEVIATION from vanilla's own RecMedia system
+-- -- see the long comment below for why, this is not an oversight.
+--
+-- Vanilla's real VHS/CD/radio content system (shared/RecordedMedia/
+-- recorded_media.lua, ~10.5k lines; shared/RecordedMedia/ISRecordedMedia.lua)
+-- requires:
+--   1. Registration via Events.OnInitRecordedMedia (`_rc:register(category,
+--      uuid, itemDisplayName, spawning)` + `data:setExtra(...)` +
+--      `data:addLine(text,...)` per line) -- this ONLY fires once at
+--      server/game boot, there is no live "register a new one right now"
+--      API found anywhere in the installed tree.
+--   2. A translation-key round-trip (RM_<uuid> keys resolved from
+--      shared/Translate/EN/Recorded_Media.json) for every string.
+--   3. An item script with `MediaCategory = Home-VHS` (confirmed real
+--      item: Base.VHS_Home) bound to one specific registered entry via
+--      the native `item:setRecordedMediaData(mediaDataObject)`.
+--   4. The vanilla "Watch/Read" context option (client/ISUI/
+--      ISInventoryPaneContextMenu.lua:544) only appears when
+--      `item:getMediaData()` is non-nil, i.e. only for items already
+--      bound to a REGISTERED entry -- and it displays
+--      `item:getMediaData():getTranslatedExtra()`, a single static
+--      string, not the per-line `lines` table (those appear to be used
+--      by the in-world radio/audio playback path, not this reader).
+--
+-- That whole chain is boot-time/static by construction -- exactly the
+-- "new story idea = new Lua file / mod reload" trap Jani explicitly
+-- wants avoided. So instead of fighting the native registry, this
+-- module bypasses it entirely: it reuses the confirmed-generic
+-- `ISMediaInfo.openPanel(playerNum, text)` UI (client/RecordedMedia/
+-- ISMediaInfo.lua) directly -- that function is a thin, standalone
+-- rich-text popup with NO dependency on the RecMedia registry, no
+-- registration step, no translation keys. Content lives in the item's
+-- own modData (server-settable at ANY time, not just boot), and a
+-- small custom context-menu option (client/TWR/Context/RecordedMedia.lua)
+-- opens it. This is the same "runtime modData, native UI, no new
+-- custom window" pattern already proven by the Calendar item and the
+-- Readable.lua module above.
+--
+-- Uses Base.VHS_Home by default (confirmed real vanilla item,
+-- MediaCategory = Home-VHS, media/scripts/generated/items/normal.txt)
+-- purely for its sprite/name -- we never touch its native
+-- RecordedMediaData binding.
+--
+-- NOT YET PROVEN LIVE. Debug-menu hook: server/TWR/Debug.lua
+-- "recorded_media" mechanic. In particular UNCONFIRMED: whether
+-- ISMediaInfo.openPanel works correctly when called from a context
+-- menu option we add ourselves (vs. its normal call site), and whether
+-- the close-triggers-discovery wiring (Trigger.MediaPlaybackCompleted)
+-- actually fires reliably. Update antagonist/DONE.md / antagonist/tests/
+-- once actually confirmed, not before.
+--
+-- No require(), no cached cross-file locals -- see TWR.Constants'
+-- header for why.
+if isClient() then return end
+
+TWR = TWR or {}
+TWR.Mechanics = TWR.Mechanics or {}
+TWR.Mechanics.RecordedMedia = TWR.Mechanics.RecordedMedia or {}
+
+local RecordedMedia = TWR.Mechanics.RecordedMedia
+
+local function safeCall(obj, methodName, ...)
+    if not obj then return false, nil end
+    local method = obj[methodName]
+    if type(method) ~= "function" then return false, nil end
+    local ok, v = pcall(method, obj, ...)
+    if ok then return true, v end
+    return false, nil
+end
+
+local DEFAULT_ITEM_TYPE = "Base.VHS_Home"
+
+-- Builds one VHS-tape item instance carrying the DB-suppliable payload
+-- in modData. Does not place it anywhere.
+--
+-- payload:
+--   contentId     (optional string) -- modData tag for future DB tracking.
+--   mediaId       (optional string) -- modData tag, matches Jani's
+--                 desired payload shape (distinct from contentId).
+--   displayName   (optional string) -- item's in-world/inventory name.
+--   lines         (optional array of strings) -- joined with newlines
+--                 into the text ISMediaInfo.openPanel displays. This is
+--                 OUR OWN simple text-join, not vanilla's colored
+--                 `lines` table format (that format is tied to the
+--                 registry path we're bypassing).
+--   itemType      (optional string) -- defaults to Base.VHS_Home.
+--   discoveryKey  (optional string) -- modData tag; used by the
+--                 client-side "watched" report so the backend can tell
+--                 pickup apart from actual playback/discovery.
+function RecordedMedia.buildItem(payload)
+    payload = payload or {}
+    local itemType = payload.itemType or DEFAULT_ITEM_TYPE
+    local okItem, item = pcall(function() return instanceItem(itemType) end)
+    if not okItem or not item then
+        return nil, "INSTANCE_FAILED"
+    end
+
+    if payload.displayName then
+        safeCall(item, "setName", payload.displayName)
+        safeCall(item, "setCustomName", true)
+    end
+
+    local text = table.concat(payload.lines or { "dummy test content" }, "\n")
+
+    local okData, modData = safeCall(item, "getModData")
+    if okData and modData then
+        modData.TWR_isVHS = true
+        modData.TWR_vhsText = text
+        if payload.contentId then modData.TWR_contentId = payload.contentId end
+        if payload.mediaId then modData.TWR_mediaId = payload.mediaId end
+        if payload.discoveryKey then modData.TWR_discoveryKey = payload.discoveryKey end
+    end
+
+    return item
+end
+
+-- Spawns a VHS tape directly on the ground at (x,y,z).
+function RecordedMedia.spawnOnGround(x, y, z, payload)
+    local okSq, square = pcall(function() return getCell():getGridSquare(x, y, z) end)
+    if not okSq or not square then
+        return nil, "SQUARE_NOT_LOADED"
+    end
+
+    local item, err = RecordedMedia.buildItem(payload)
+    if not item then
+        return nil, err
+    end
+
+    safeCall(square, "AddWorldInventoryItem", item, 0.5, 0.5, 0)
+    return item
+end
+
+-- PendingActions-compatible resolver. handlerModule = "RecordedMedia",
+-- actionType = "spawn_vhs".
+function RecordedMedia.resolvePendingAction(pending)
+    local params = pending.params or {}
+    local item, err = RecordedMedia.spawnOnGround(pending.targetX, pending.targetY, pending.targetZ, params)
+    if not item then
+        return false, err or "SPAWN_FAILED", "RecordedMedia.spawnOnGround() failed"
+    end
+
+    return true, {
+        mechanic = "RecordedMedia.spawnOnGround",
+        placed = 1,
+        requested = 1,
+        artifactType = "recorded_media",
+        x = pending.targetX,
+        y = pending.targetY,
+        z = pending.targetZ,
+        targetType = "ground",
+        targetSummary = "ground-spawned VHS tape (" .. tostring(params.itemType or DEFAULT_ITEM_TYPE) .. ")",
+    }
+end
+
+-- Trigger.MediaPlaybackCompleted -- server-side handler for the
+-- client's "I closed the ISMediaInfo panel for this item" report (see
+-- client/TWR/Context/RecordedMedia.lua). This is the discovery signal:
+-- picking the tape up must NOT count, only this does. Logs via the
+-- existing TWR.Emit pipeline (ThoseWhoRemainLog.txt -> exporter ->
+-- Postgres) rather than inventing a new channel.
+local function onMediaPlayed(module, command, player, args)
+    if module ~= "twr_media" or command ~= "played" then return end
+
+    local discoveryKey = args and args.discoveryKey
+    local contentId = args and args.contentId
+    local okName, username = safeCall(player, "getUsername")
+
+    print("TWR.Mechanics.RecordedMedia: onMediaPlayed -- player=" .. (okName and username or "?")
+        .. " contentId=" .. tostring(contentId) .. " discoveryKey=" .. tostring(discoveryKey))
+
+    if TWR.Emit and TWR.Emit.jobResult then
+        TWR.Emit.jobResult({
+            jobId = "media-played-" .. tostring(discoveryKey) .. "-" .. tostring(ZombRand(1000000000)),
+            attemptNo = 1,
+            actionType = "media_playback_completed",
+            mechanic = "RecordedMedia.onMediaPlayed",
+            result = "applied",
+            placed = 1,
+            requested = 1,
+            artifactKey = discoveryKey,
+            artifactType = "recorded_media_discovery",
+            targetType = "player",
+            targetSummary = "player=" .. tostring(okName and username or "?") .. " contentId=" .. tostring(contentId),
+        })
+    end
+end
+
+local function init()
+    TWR.Runtime.registerEventOnce(RecordedMedia, "mediaPlayed", Events.OnClientCommand, onMediaPlayed)
+    print("TWR.Mechanics.RecordedMedia: OnClientCommand handler registered")
+end
+
+-- Self-limiting EveryOneMinute retry -- same pattern as
+-- server/TWR/Debug.lua's own retryInit (confirmed reliable there).
+-- Removes itself the moment init() succeeds.
+local function retryInit()
+    local ok = pcall(init)
+    if ok then
+        Events.EveryOneMinute.Remove(retryInit)
+    end
+end
+
+local ok, err = pcall(init)
+if not ok then
+    print("TWR.Mechanics.RecordedMedia: init deferred, retrying every minute (dependency not loaded yet): " .. tostring(err))
+    Events.EveryOneMinute.Add(retryInit)
+end
