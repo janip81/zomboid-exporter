@@ -459,6 +459,16 @@ local function runFixtureKVLS(p)
 
     TWR.Mechanics.Container.lockByKey(crate, nil, FIXTURE_TEST_KEY_ID)
 
+    -- FIX 2026-08-13, found live: this call was missing entirely.
+    -- Per Container.finalizeSpawn()'s own header comment, it must be
+    -- called exactly once, after filling (AddItem) and locking are
+    -- done, to push the one full consistent snapshot to connected
+    -- clients -- without it, the crate can exist and pass the
+    -- server-side existence check while never actually being
+    -- transmitted to any client, i.e. invisible in-game despite being
+    -- completely real server-side.
+    TWR.Mechanics.Container.finalizeSpawn(crate)
+
     -- Step 01: place the matching test key. Given directly to the
     -- triggering admin for this manual debug run -- there's no real
     -- player-targeting/delivery system yet for a world-placed key
