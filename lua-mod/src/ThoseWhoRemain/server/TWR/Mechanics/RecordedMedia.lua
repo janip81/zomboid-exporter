@@ -231,23 +231,30 @@ local function onMediaPlayed(module, command, player, args)
     end
 end
 
+-- FIX 2026-08-13: check TWR.Runtime exists first instead of calling
+-- into it and relying on pcall() to catch the resulting Java
+-- exception -- see server/TWR/Debug.lua's identical fix for the full
+-- reasoning (this file has the exact same alphabetical-load-order gap:
+-- Mechanics/ sorts before Runtime.lua within server/TWR/).
 local function init()
+    if not (TWR.Runtime and TWR.Runtime.registerEventOnce) then
+        return false
+    end
     TWR.Runtime.registerEventOnce(RecordedMedia, "mediaPlayed", Events.OnClientCommand, onMediaPlayed)
     print("TWR.Mechanics.RecordedMedia: OnClientCommand handler registered")
+    return true
 end
 
 -- Self-limiting EveryOneMinute retry -- same pattern as
 -- server/TWR/Debug.lua's own retryInit (confirmed reliable there).
 -- Removes itself the moment init() succeeds.
 local function retryInit()
-    local ok = pcall(init)
-    if ok then
+    if init() then
         Events.EveryOneMinute.Remove(retryInit)
     end
 end
 
-local ok, err = pcall(init)
-if not ok then
-    print("TWR.Mechanics.RecordedMedia: init deferred, retrying every minute (dependency not loaded yet): " .. tostring(err))
+if not init() then
+    print("TWR.Mechanics.RecordedMedia: init deferred, retrying every minute (TWR.Runtime not loaded yet)")
     Events.EveryOneMinute.Add(retryInit)
 end

@@ -541,9 +541,23 @@ local function onClientCommand(module, command, player, args)
     fn(player)
 end
 
+-- Returns true/false instead of throwing. FIX 2026-08-13: previously
+-- called TWR.Runtime.registerEventOnce directly and relied on pcall()
+-- to catch the resulting "attempted index ... of non-table: null" --
+-- correct, but noisy: every single boot logged a full ERROR-level Java
+-- exception + stack trace dump (KahluaThread.flushErrorMessage) for
+-- something entirely expected and self-healing (see the load-order
+-- note below). Checking TWR.Runtime exists FIRST means the guaranteed-
+-- to-fail-once-then-self-heal case never calls a method on nil, so it
+-- no longer throws. A real error inside registerEventOnce itself would
+-- still propagate normally (not silently swallowed like before).
 local function init()
+    if not (TWR.Runtime and TWR.Runtime.registerEventOnce) then
+        return false
+    end
     TWR.Runtime.registerEventOnce(TWR.Debug, "clientCommand", Events.OnClientCommand, onClientCommand)
     print("TWR.Debug: OnClientCommand handler registered")
+    return true
 end
 
 -- Self-initialize: immediate attempt handles F11 reload. CONFIRMED live
@@ -567,14 +581,12 @@ end
 -- reliable server-side all night (TEST F/H/M all depended on it).
 -- Removes itself the moment init() succeeds.
 local function retryInit()
-    local ok = pcall(init)
-    if ok then
+    if init() then
         Events.EveryOneMinute.Remove(retryInit)
     end
 end
 
-local ok, err = pcall(init)
-if not ok then
-    print("TWR.Debug: init deferred, retrying every minute (dependency not loaded yet): " .. tostring(err))
+if not init() then
+    print("TWR.Debug: init deferred, retrying every minute (TWR.Runtime not loaded yet)")
     Events.EveryOneMinute.Add(retryInit)
 end

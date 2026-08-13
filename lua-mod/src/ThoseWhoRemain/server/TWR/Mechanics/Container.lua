@@ -422,14 +422,28 @@ function Container.spawnBox(x, y, z)
     end
 
     local sprite = "carpentry_01_19"
-    -- Same field set ISWoodenContainer:new() sets on itself (grepped
-    -- from ISWoodenContainer.lua) -- everything setInfo() reads that
-    -- we don't explicitly set (canPassThrough, canBarricade,
-    -- thumpDmg, isDoor, isDoorFrame, crossSpeed, canBePlastered,
-    -- hoppable, isThumpable, isFloor) is nil on the real
-    -- ISWoodenContainer's table too in normal vanilla usage, and
-    -- setInfo() already runs successfully against that every time a
-    -- player builds a real crate -- nil is proven safe there.
+    -- FIX 2026-08-13, found live via a fixture-test crate that visibly
+    -- never appeared despite spawnBox() logging success: the previous
+    -- comment here ("nil is proven safe there") was WRONG. Real
+    -- ISWoodenContainer:new() calls `o:init()` FIRST (inherited from
+    -- ISBuildingObject:derive) -- that base init() is what actually
+    -- populates canPassThrough/canBarricade/thumpDmg/isDoor/
+    -- isDoorFrame/crossSpeed/canBePlastered/hoppable/isThumpable/
+    -- isFloor with real primitive defaults, BEFORE ISWoodenContainer:new()
+    -- overrides only the handful of fields it cares about. Our
+    -- hand-rolled table skipped that base init() entirely, so those
+    -- fields were genuinely nil -- and buildUtil.setInfo()
+    -- (server/BuildingObjects/ISBuildUtil.lua:362) unconditionally
+    -- calls javaObject:setThumpDmg/setIsDoor/setCrossSpeed/etc. on all
+    -- of them, which throws a NullPointerException converting Lua nil
+    -- to a Java primitive (int/boolean/float) -- silently, from Lua's
+    -- perspective: Kahlua logs each exception but does not raise a
+    -- catchable Lua error, so setInfo() "succeeds", AddSpecialObject()
+    -- "succeeds", spawnBox() returns a non-nil javaObject, and the
+    -- crate is nonetheless never actually placed
+    -- ("ERROR: IsoThumpable not found on square" fires later). Values
+    -- below are copied exactly from ISBuildingObject:init()
+    -- (media/lua/server/BuildingObjects/ISBuildingObject.lua:458-473).
     local companion = {
         isContainer = true,
         blockAllTheSquare = true,
@@ -439,6 +453,16 @@ function Container.spawnBox(x, y, z)
         canBeLockedByPadlock = true,
         buildLow = true,
         modData = {},
+        canPassThrough = false,
+        canBarricade = false,
+        thumpDmg = 8,
+        isDoor = false,
+        isDoorFrame = false,
+        crossSpeed = 1.0,
+        canBePlastered = false,
+        hoppable = false,
+        isThumpable = true,
+        isFloor = false,
     }
 
     local okJo, javaObject = pcall(function() return IsoThumpable.new(cell, square, sprite, false, companion) end)
@@ -463,6 +487,20 @@ function Container.spawnBox(x, y, z)
     local okAdd, addErr = pcall(function() square:AddSpecialObject(javaObject) end)
     if not okAdd then
         print("TWR.Mechanics.Container: spawnBox -- square:AddSpecialObject() failed: " .. tostring(addErr))
+        return nil
+    end
+
+    -- Defense in depth against the exact failure mode found live
+    -- 2026-08-13: Java-level exceptions inside buildUtil.setInfo() are
+    -- logged but NOT raised as catchable Lua errors (Kahlua swallows
+    -- them per-call), so a partially-broken javaObject can sail through
+    -- every pcall above as "success" while never actually being
+    -- registered on the square (engine logs "IsoThumpable not found on
+    -- square" separately, invisible to this function unless checked
+    -- explicitly). Confirm the object genuinely landed before trusting it.
+    local okVerify, isPresent = pcall(function() return square:getSpecialObjects():contains(javaObject) end)
+    if not okVerify or not isPresent then
+        print("TWR.Mechanics.Container: spawnBox -- object not actually present on square after AddSpecialObject (silent setInfo/engine failure) -- treating as failed")
         return nil
     end
 
