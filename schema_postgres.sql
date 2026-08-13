@@ -118,6 +118,16 @@ CREATE TABLE IF NOT EXISTS twr_job_attempts (
 CREATE INDEX IF NOT EXISTS idx_twr_job_attempts_job_id ON twr_job_attempts (job_id, attempt_no);
 CREATE INDEX IF NOT EXISTS idx_twr_job_attempts_time ON twr_job_attempts (occurred_at DESC);
 
+-- Idempotency (spawn-result-tracking.md review Q5): a crash window
+-- exists where a commit succeeds but the exporter dies before
+-- persisting the new processed_files offset, causing the same log
+-- line to be replayed after restart. A UNIQUE INDEX (not a table
+-- CONSTRAINT -- Postgres has no ADD CONSTRAINT IF NOT EXISTS, but
+-- CREATE UNIQUE INDEX IF NOT EXISTS works and ON CONFLICT can target
+-- it identically) lets handleTWRJobResult's INSERT ... ON CONFLICT DO
+-- NOTHING absorb that replay instead of creating a duplicate row.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_twr_job_attempts_unique ON twr_job_attempts (server, job_id, attempt_no);
+
 -- Confirmed successful world results ONLY -- a failed/errored attempt
 -- above must never create a row here (see handleTWRJobResult). This is
 -- the durable answer to "was artifact X actually placed, and where" --
@@ -125,6 +135,11 @@ CREATE INDEX IF NOT EXISTS idx_twr_job_attempts_time ON twr_job_attempts (occurr
 -- moment, it does NOT promise the object is still there now (a player
 -- may pick up/move/destroy it afterward -- that's normal gameplay, not
 -- tracked here).
+-- artifact_type describes the placed THING itself (e.g. an item
+-- module string like "Base.Twigs") -- NOT what it was placed into.
+-- target_summary describes the container/object it landed in. These
+-- were conflated in the first pass (review Q3): artifact_type held
+-- "container", which is target information, not artifact information.
 CREATE TABLE IF NOT EXISTS twr_world_artifacts (
     id               BIGSERIAL PRIMARY KEY,
     artifact_key     TEXT NOT NULL,

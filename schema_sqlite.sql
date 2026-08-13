@@ -98,6 +98,9 @@ CREATE TABLE IF NOT EXISTS twr_job_attempts (
 CREATE INDEX IF NOT EXISTS idx_twr_job_attempts_job_id ON twr_job_attempts (job_id, attempt_no);
 CREATE INDEX IF NOT EXISTS idx_twr_job_attempts_time ON twr_job_attempts (occurred_at DESC);
 
+-- Idempotency -- see schema_postgres.sql's comment on the same index.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_twr_job_attempts_unique ON twr_job_attempts (server, job_id, attempt_no);
+
 CREATE TABLE IF NOT EXISTS twr_world_artifacts (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     artifact_key     TEXT NOT NULL,

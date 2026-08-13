@@ -438,12 +438,19 @@ func (s *pgStore) handleSessionEvent(ctx context.Context, ev *sessionEvent) {
 // keeps this idempotent-safe if the same line is ever reprocessed
 // (checkpoint edge case), rather than erroring on the UNIQUE
 // (artifact_key, server) constraint.
-func (s *pgStore) handleTWRJobResult(ctx context.Context, ev *twrEvent) {
+// handleTWRJobResult -- see eventstore.go's interface comment for the
+// durability contract (review Q4) this implements: any returned error
+// means the caller must NOT advance past this line, so retry it later
+// instead of losing the audit record. A malformed event (no jobId) is
+// NOT a transient failure -- it can never succeed on retry -- so that
+// case is logged and skipped (nil error), same treatment as
+// twrlog.go's own malformed-line handling.
+func (s *pgStore) handleTWRJobResult(ctx context.Context, ev *twrEvent) error {
 	f := ev.Fields
 	jobID := twrStringField(f, "jobId")
 	if jobID == "" {
 		slog.Warn("dropping twr_job_result with no jobId")
-		return
+		return nil
 	}
 	attemptNo, _ := twrIntField(f, "attemptNo")
 	if attemptNo == 0 {
@@ -461,32 +468,54 @@ func (s *pgStore) handleTWRJobResult(ctx context.Context, ev *twrEvent) {
 		requestedPtr = &requested
 	}
 
-	if _, err := s.pool.Exec(ctx, `
+	// Review Q6: attempt + artifact are one logical result, both or
+	// neither commits -- a partial write (attempt row present, artifact
+	// row missing because the second INSERT failed) would be worse than
+	// either the checkpoint retry or a clean drop.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck -- no-op after a successful Commit
+
+	// Review Q5: ON CONFLICT DO NOTHING against idx_twr_job_attempts_unique
+	// absorbs the crash-replay window (commit succeeds, offset persist
+	// doesn't, same line reprocessed after restart) without erroring.
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO twr_job_attempts (job_id, attempt_no, idempotency_key, action_type, mechanic, result, error_code, error_detail, placed_count, requested_count, occurred_at, server)
 		VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), $9, $10, $11, $12)
+		ON CONFLICT (server, job_id, attempt_no) DO NOTHING
 	`, jobID, attemptNo, twrStringField(f, "idempotencyKey"), twrStringField(f, "actionType"), twrStringField(f, "mechanic"), result,
 		twrStringField(f, "errorCode"), twrStringField(f, "errorDetail"), placedPtr, requestedPtr, ev.Timestamp, s.serverName); err != nil {
-		slog.Warn("insert twr_job_attempts failed", "jobId", jobID, "err", err)
-		return
+		return err
 	}
 
-	if result != "applied" {
-		return
+	if result == "applied" {
+		artifactKey := twrStringField(f, "artifactKey")
+		x, hasX := twrIntField(f, "x")
+		y, hasY := twrIntField(f, "y")
+		z, hasZ := twrIntField(f, "z")
+		if artifactKey != "" && hasX && hasY && hasZ {
+			// Review Q3: artifactType (the placed thing, e.g.
+			// "Base.Twigs") -> artifact_type; targetSummary (what it
+			// was placed into) -> target_summary. Falls back to
+			// targetType if the caller hasn't been updated to the
+			// split fields yet, rather than silently storing nothing.
+			artifactType := twrStringField(f, "artifactType")
+			if artifactType == "" {
+				artifactType = twrStringField(f, "targetType")
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO twr_world_artifacts (artifact_key, job_id, artifact_type, x, y, z, target_summary, applied_at, server)
+				VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9)
+				ON CONFLICT (artifact_key, server) DO NOTHING
+			`, artifactKey, jobID, artifactType, x, y, z, twrStringField(f, "targetSummary"), ev.Timestamp, s.serverName); err != nil {
+				return err
+			}
+		}
 	}
-	artifactKey := twrStringField(f, "artifactKey")
-	x, hasX := twrIntField(f, "x")
-	y, hasY := twrIntField(f, "y")
-	z, hasZ := twrIntField(f, "z")
-	if artifactKey == "" || !hasX || !hasY || !hasZ {
-		return
-	}
-	if _, err := s.pool.Exec(ctx, `
-		INSERT INTO twr_world_artifacts (artifact_key, job_id, artifact_type, x, y, z, target_summary, applied_at, server)
-		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9)
-		ON CONFLICT (artifact_key, server) DO NOTHING
-	`, artifactKey, jobID, twrStringField(f, "targetType"), x, y, z, twrStringField(f, "mechanic"), ev.Timestamp, s.serverName); err != nil {
-		slog.Warn("insert twr_world_artifacts failed", "artifactKey", artifactKey, "err", err)
-	}
+
+	return tx.Commit(ctx)
 }
 
 func (s *pgStore) getFileOffset(ctx context.Context, path string) (int64, error) {

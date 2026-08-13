@@ -33,10 +33,18 @@ type eventStore interface {
 	// "twr_job_result" line -- a ThoseWhoRemain mod world-mutation
 	// job's outcome (applied/retryable_error/final_error/
 	// deferred_world) -- into twr_job_attempts, and for a successful
-	// "applied" result, also into twr_world_artifacts. See twrlog.go
-	// for parsing and schema_postgres.sql's twr_job_attempts comment
-	// for the design rationale (spawn-result-tracking.md).
-	handleTWRJobResult(ctx context.Context, ev *twrEvent)
+	// "applied" result, also into twr_world_artifacts (one
+	// transaction -- see spawn-result-tracking.md review Q6). See
+	// twrlog.go for parsing and schema_postgres.sql's twr_job_attempts
+	// comment for the design rationale.
+	//
+	// Returns an error on any durable-write failure (review Q4) -- the
+	// caller (pollTWROnce) must NOT advance the file offset past an
+	// event that failed to commit, or a transient DB outage would
+	// silently and permanently lose a control-plane audit record. A
+	// malformed/duplicate event that's expected and fine to skip
+	// (idempotent replay, ON CONFLICT DO NOTHING) still returns nil.
+	handleTWRJobResult(ctx context.Context, ev *twrEvent) error
 
 	// getFileOffset/setFileOffset track how far into each PerkLog.txt file
 	// has been read, keyed by absolute path. This is what makes history

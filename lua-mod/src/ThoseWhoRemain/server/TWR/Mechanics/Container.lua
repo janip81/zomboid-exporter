@@ -105,6 +105,7 @@ function Container.scatterIntoExisting(cell, centerX, centerY, z, radius, seed, 
     end
 
     local placed = 0
+    local placements = {}
     local attempts = 0
     local usedIndices = {}
     while placed < count and attempts < #candidates * 4 do
@@ -141,12 +142,18 @@ function Container.scatterIntoExisting(cell, centerX, centerY, z, radius, seed, 
                 if addedItem then
                     pcall(function() sendAddItemToContainer(candidates[idx].container, addedItem) end)
                 end
+                -- FIX 2026-08-13 (spawn-result-tracking.md review Q1):
+                -- record the ACTUAL resolved container square, not just
+                -- the search center -- a caller building an audit
+                -- record (Container.scatterAcrossMap) needs the real
+                -- placement location, not the authoring anchor.
+                table.insert(placements, { x = candidates[idx].x, y = candidates[idx].y, z = z, targetType = "container" })
                 print("TWR.Mechanics.Container: scatterIntoExisting -- placed " .. itemType .. " at (" .. candidates[idx].x .. "," .. candidates[idx].y .. "," .. z .. ")")
             end
         end
     end
 
-    return placed
+    return placed, placements
 end
 
 -- Scatters itemType across many widely-separated points on the map (a
@@ -195,55 +202,82 @@ function Container.scatterAcrossMap(points, radius, seed, itemType)
             -- a widening radius instead of just giving up -- the square
             -- is already loaded from waitForSquare above, so no need to
             -- defer again, this is an immediate in-place retry.
+            --
+            -- FIX 2026-08-13 (spawn-result-tracking.md review Q2): these
+            -- radius passes are internal probes within ONE application
+            -- attempt, not separate durable attempts -- attemptNo stays
+            -- 1 in the emitted job result regardless of how many radii
+            -- were tried (real attempt numbering belongs to the future
+            -- DB job dispatcher, which doesn't exist yet). usedRadius
+            -- is recorded in targetSummary instead, for debugging.
             local placed = 0
+            local placements = nil
             local usedRadius = radius
-            local attempt = 0
+            local radiusAttempts = 0
             for a = 1, 3 do
-                attempt = a
+                radiusAttempts = a
                 usedRadius = radius * a
-                placed = Container.scatterIntoExisting(cell, point.x, point.y, point.z, usedRadius, seed + i, 1, itemType)
+                placed, placements = Container.scatterIntoExisting(cell, point.x, point.y, point.z, usedRadius, seed + i, 1, itemType)
                 if placed > 0 then break end
             end
-            print("TWR.Mechanics.Container: scatterAcrossMap -- point " .. i .. " (" .. point.x .. "," .. point.y .. "," .. point.z .. ") placed=" .. placed .. " (radius used=" .. usedRadius .. ")")
+            print("TWR.Mechanics.Container: scatterAcrossMap -- point " .. i .. " (" .. point.x .. "," .. point.y .. "," .. point.z .. ") placed=" .. placed .. " (radius used=" .. usedRadius .. ", radius passes=" .. radiusAttempts .. ")")
 
             -- Success-first logging (spawn-result-tracking.md): ONE
             -- durable outcome per point here, not one per internal
             -- radius-retry probe above (those stay in the print() above
             -- only, for live debugging).
+            local emitOk, emitErr
             if placed > 0 then
-                pcall(function()
-                    TWR.Emit.jobResult({
-                        jobId = jobId,
-                        attemptNo = attempt,
-                        actionType = "scatter_items",
-                        mechanic = "Container.scatterAcrossMap",
-                        result = "applied",
-                        placed = placed,
-                        requested = 1,
-                        artifactKey = jobId .. "-artifact",
-                        x = point.x,
-                        y = point.y,
-                        z = point.z,
-                        targetType = "container",
-                    })
-                end)
+                -- FIX 2026-08-13 (review Q1): record the ACTUAL resolved
+                -- container square (placements[1]), not the authoring
+                -- anchor (point.x/y/z) -- scatterIntoExisting now
+                -- returns this.
+                local resolved = placements[1]
+                emitOk, emitErr = TWR.Emit.jobResult({
+                    jobId = jobId,
+                    attemptNo = 1,
+                    actionType = "scatter_items",
+                    mechanic = "Container.scatterAcrossMap",
+                    result = "applied",
+                    placed = placed,
+                    requested = 1,
+                    artifactKey = jobId .. "-artifact",
+                    -- FIX 2026-08-13 (review Q3): artifactType describes
+                    -- the placed THING (the item), targetType/
+                    -- targetSummary describe what it was placed INTO --
+                    -- these were previously conflated (targetType alone
+                    -- was written into the artifact_type DB column).
+                    artifactType = itemType,
+                    x = resolved.x,
+                    y = resolved.y,
+                    z = resolved.z,
+                    targetType = resolved.targetType,
+                    targetSummary = "existing world container (anchor " .. point.x .. "," .. point.y .. "," .. point.z .. ", resolved radius " .. usedRadius .. ")",
+                })
             else
-                pcall(function()
-                    TWR.Emit.jobResult({
-                        jobId = jobId,
-                        attemptNo = attempt,
-                        actionType = "scatter_items",
-                        mechanic = "Container.scatterAcrossMap",
-                        result = "final_error",
-                        errorCode = "NO_ELIGIBLE_TARGET",
-                        errorDetail = "no existing container found within radius " .. usedRadius .. " after " .. attempt .. " attempt(s)",
-                        placed = 0,
-                        requested = 1,
-                        x = point.x,
-                        y = point.y,
-                        z = point.z,
-                    })
-                end)
+                emitOk, emitErr = TWR.Emit.jobResult({
+                    jobId = jobId,
+                    attemptNo = 1,
+                    actionType = "scatter_items",
+                    mechanic = "Container.scatterAcrossMap",
+                    result = "final_error",
+                    errorCode = "NO_ELIGIBLE_TARGET",
+                    errorDetail = "no existing container found within radius " .. usedRadius .. " after " .. radiusAttempts .. " radius pass(es)",
+                    placed = 0,
+                    requested = 1,
+                    x = point.x,
+                    y = point.y,
+                    z = point.z,
+                })
+            end
+
+            -- FIX 2026-08-13 (review Q7): a world mutation can succeed
+            -- while the audit-log write itself fails -- that must never
+            -- be silent. This is the one place allowed to fall back to
+            -- a bare print(), since the durable channel is what just
+            -- failed.
+            if not emitOk then
+                print("TWR.Mechanics.Container: scatterAcrossMap -- ERROR: TWR.Emit.jobResult FAILED for jobId=" .. jobId .. " placed=" .. placed .. " at (" .. point.x .. "," .. point.y .. "," .. point.z .. "): " .. tostring(emitErr))
             end
         end)
     end

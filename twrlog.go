@@ -76,37 +76,61 @@ func listTWRLogs(dataPath string) []string {
 	return matches
 }
 
+// twrLine pairs a parsed event (nil if the line was malformed -- see
+// spawn-result-tracking.md review Q8) with the file offset immediately
+// after it, so pollTWROnce can commit the checkpoint per-line instead
+// of only at the end of a whole poll batch.
+type twrLine struct {
+	ev          *twrEvent
+	offsetAfter int64
+}
+
 // readNewTWRLines mirrors readNewExporterLines, parsing with
-// parseTWRLogLine instead.
-func readNewTWRLines(path string, fromOffset int64) (events []*twrEvent, newOffset int64, err error) {
+// parseTWRLogLine instead. Unlike ExporterLog's version, a malformed
+// line does NOT get silently dropped -- these are control-plane audit
+// records (spawn-result-tracking.md's whole point), so corruption must
+// be visible. The line is still skipped (ev == nil) rather than
+// retried forever -- a permanently malformed line would otherwise
+// block every event after it indefinitely.
+func readNewTWRLines(path string, fromOffset int64) (lines []twrLine, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fromOffset, err
+		return nil, err
 	}
 	defer f.Close()
 
 	if _, err := f.Seek(fromOffset, io.SeekStart); err != nil {
-		return nil, fromOffset, err
+		return nil, err
 	}
 
 	reader := bufio.NewReader(f)
-	newOffset = fromOffset
+	offset := fromOffset
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			break
 		}
-		newOffset += int64(len(line))
-		if ev := parseTWRLogLine(strings.TrimRight(line, "\r\n")); ev != nil {
-			events = append(events, ev)
+		offset += int64(len(line))
+		trimmed := strings.TrimRight(line, "\r\n")
+		ev := parseTWRLogLine(trimmed)
+		if ev == nil {
+			slog.Warn("malformed ThoseWhoRemainLog line, skipping", "path", path, "offsetAfterLine", offset)
 		}
+		lines = append(lines, twrLine{ev: ev, offsetAfter: offset})
 	}
-	return events, newOffset, nil
+	return lines, nil
 }
 
 // pollTWROnce mirrors pollExporterOnce, sharing the same processed_files
-// checkpoint table (paths never collide across the three log kinds).
-func pollTWROnce(ctx context.Context, dataPath string, db eventStore, done map[string]bool, onEvent func(*twrEvent)) {
+// checkpoint table (paths never collide across the three log kinds),
+// with one deliberate difference (spawn-result-tracking.md review Q4):
+// onEvent returns whether the event was durably committed. On the
+// first failure, the checkpoint is only advanced up to the last
+// successfully committed line -- NOT past the failed one -- and this
+// file is left off `done` so the same line is retried on the next
+// poll tick rather than being silently skipped on a transient DB
+// outage.
+func pollTWROnce(ctx context.Context, dataPath string, db eventStore, done map[string]bool, onEvent func(*twrEvent) bool) {
 	files := listTWRLogs(dataPath)
 	if len(files) == 0 {
 		return
@@ -137,23 +161,44 @@ func pollTWROnce(ctx context.Context, dataPath string, db eventStore, done map[s
 			continue
 		}
 
-		events, newOffset, err := readNewTWRLines(path, offset)
+		lines, err := readNewTWRLines(path, offset)
 		if err != nil {
 			slog.Warn("readNewTWRLines failed", "path", path, "err", err)
 			continue
 		}
-		for _, ev := range events {
+
+		committed := offset
+		allCommitted := true
+		for _, ln := range lines {
+			if ln.ev == nil {
+				// Malformed -- already warned in readNewTWRLines. Safe
+				// to skip past (nothing to durably commit).
+				committed = ln.offsetAfter
+				continue
+			}
 			select {
 			case <-ctx.Done():
 				return
 			default:
 			}
-			onEvent(ev)
+			if !onEvent(ln.ev) {
+				allCommitted = false
+				break
+			}
+			committed = ln.offsetAfter
 		}
-		if err := db.setFileOffset(ctx, key, newOffset); err != nil {
-			slog.Warn("setFileOffset failed", "path", path, "err", err)
+
+		if committed != offset {
+			if err := db.setFileOffset(ctx, key, committed); err != nil {
+				slog.Warn("setFileOffset failed", "path", path, "err", err)
+			}
 		}
-		if path != newest && newOffset >= info.Size() {
+		if !allCommitted {
+			// Leave `done` unset -- retry this file (from the new,
+			// still-behind checkpoint) on the next tick.
+			continue
+		}
+		if path != newest && committed >= info.Size() {
 			done[key] = true
 		}
 	}
@@ -161,7 +206,7 @@ func pollTWROnce(ctx context.Context, dataPath string, db eventStore, done map[s
 
 // pollTWRLogsWithHistory is the ThoseWhoRemainLog.txt equivalent of
 // pollExporterLogsWithHistory.
-func pollTWRLogsWithHistory(ctx context.Context, dataPath string, db eventStore, onEvent func(*twrEvent)) {
+func pollTWRLogsWithHistory(ctx context.Context, dataPath string, db eventStore, onEvent func(*twrEvent) bool) {
 	done := make(map[string]bool)
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
@@ -201,10 +246,17 @@ func runTWRLogPipeline(ctx context.Context, dataPath string, db eventStore) {
 	if db == nil {
 		return
 	}
-	pollTWRLogsWithHistory(ctx, dataPath, db, func(ev *twrEvent) {
+	pollTWRLogsWithHistory(ctx, dataPath, db, func(ev *twrEvent) bool {
 		if ev.Type != "twr_job_result" {
-			return
+			// Not a durability concern -- an unrecognized (e.g. future)
+			// event type is fine to skip past, same as an ExporterLog
+			// event type this build doesn't know about.
+			return true
 		}
-		db.handleTWRJobResult(ctx, ev)
+		if err := db.handleTWRJobResult(ctx, ev); err != nil {
+			slog.Warn("handleTWRJobResult failed, will retry", "jobId", twrStringField(ev.Fields, "jobId"), "err", err)
+			return false
+		}
+		return true
 	})
 }

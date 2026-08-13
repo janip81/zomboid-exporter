@@ -551,12 +551,15 @@ func nullIfEmpty(s string) any {
 
 // handleTWRJobResult mirrors pgStore.handleTWRJobResult -- see its
 // comment for the full design rationale.
-func (s *sqliteStore) handleTWRJobResult(ctx context.Context, ev *twrEvent) {
+// handleTWRJobResult mirrors pgStore.handleTWRJobResult -- see its
+// comment for the full design rationale (durability contract, review
+// Q3/Q4/Q5/Q6).
+func (s *sqliteStore) handleTWRJobResult(ctx context.Context, ev *twrEvent) error {
 	f := ev.Fields
 	jobID := twrStringField(f, "jobId")
 	if jobID == "" {
 		slog.Warn("dropping twr_job_result with no jobId")
-		return
+		return nil
 	}
 	attemptNo, _ := twrIntField(f, "attemptNo")
 	if attemptNo == 0 {
@@ -574,32 +577,42 @@ func (s *sqliteStore) handleTWRJobResult(ctx context.Context, ev *twrEvent) {
 		requestedVal = requested
 	}
 
-	if _, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck -- no-op after a successful Commit
+
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO twr_job_attempts (job_id, attempt_no, idempotency_key, action_type, mechanic, result, error_code, error_detail, placed_count, requested_count, occurred_at, server)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (server, job_id, attempt_no) DO NOTHING
 	`, jobID, attemptNo, nullIfEmpty(twrStringField(f, "idempotencyKey")), twrStringField(f, "actionType"), twrStringField(f, "mechanic"), result,
 		nullIfEmpty(twrStringField(f, "errorCode")), nullIfEmpty(twrStringField(f, "errorDetail")), placedVal, requestedVal, iso(ev.Timestamp), s.serverName); err != nil {
-		slog.Warn("insert twr_job_attempts failed", "jobId", jobID, "err", err)
-		return
+		return err
 	}
 
-	if result != "applied" {
-		return
+	if result == "applied" {
+		artifactKey := twrStringField(f, "artifactKey")
+		x, hasX := twrIntField(f, "x")
+		y, hasY := twrIntField(f, "y")
+		z, hasZ := twrIntField(f, "z")
+		if artifactKey != "" && hasX && hasY && hasZ {
+			artifactType := twrStringField(f, "artifactType")
+			if artifactType == "" {
+				artifactType = twrStringField(f, "targetType")
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO twr_world_artifacts (artifact_key, job_id, artifact_type, x, y, z, target_summary, applied_at, server)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT (artifact_key, server) DO NOTHING
+			`, artifactKey, jobID, artifactType, x, y, z, nullIfEmpty(twrStringField(f, "targetSummary")), iso(ev.Timestamp), s.serverName); err != nil {
+				return err
+			}
+		}
 	}
-	artifactKey := twrStringField(f, "artifactKey")
-	x, hasX := twrIntField(f, "x")
-	y, hasY := twrIntField(f, "y")
-	z, hasZ := twrIntField(f, "z")
-	if artifactKey == "" || !hasX || !hasY || !hasZ {
-		return
-	}
-	if _, err := s.db.ExecContext(ctx, `
-		INSERT INTO twr_world_artifacts (artifact_key, job_id, artifact_type, x, y, z, target_summary, applied_at, server)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (artifact_key, server) DO NOTHING
-	`, artifactKey, jobID, twrStringField(f, "targetType"), x, y, z, nullIfEmpty(twrStringField(f, "mechanic")), iso(ev.Timestamp), s.serverName); err != nil {
-		slog.Warn("insert twr_world_artifacts failed", "artifactKey", artifactKey, "err", err)
-	}
+
+	return tx.Commit()
 }
 
 func (s *sqliteStore) getFileOffset(ctx context.Context, path string) (int64, error) {

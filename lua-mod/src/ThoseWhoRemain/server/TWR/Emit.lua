@@ -63,13 +63,21 @@ end
 -- fields must include at minimum: jobId, actionType, mechanic, result
 -- ("applied" | "retryable_error" | "final_error" | "deferred_world").
 -- Optional per result type: attemptNo, idempotencyKey, errorCode,
--- errorDetail, placed, requested, artifactKey, x, y, z, targetType --
--- see spawn-result-tracking.md for the full field list per outcome.
--- Kept flat (no nested "artifacts" array) since every current TWR
--- mechanic places at most one artifact per job -- add nesting only if
--- a real multi-artifact-per-job use case shows up.
+-- errorDetail, placed, requested, artifactKey, x, y, z, targetType,
+-- targetSummary -- see spawn-result-tracking.md for the full field
+-- list per outcome. Kept flat (no nested "artifacts" array) since
+-- every current TWR mechanic places at most one artifact per job --
+-- add nesting only if a real multi-artifact-per-job use case shows up.
+--
+-- Returns ok, err (mirrors pcall) -- per spawn-result-tracking.md
+-- review Q7: a world mutation can succeed while THIS call fails
+-- (writeLog throws / mod misconfigured), which would otherwise leave
+-- an artifact with zero durable audit record and no visible symptom.
+-- Callers MUST check this and fall back to a loud print() with
+-- jobId/artifactKey/coordinates -- never let this fail silently.
 function Emit.jobResult(fields)
     fields = fields or {}
     fields.type = "twr_job_result"
-    writeLog("ThoseWhoRemainLog", jsonEncodeFlat(fields))
+    local ok, err = pcall(function() writeLog("ThoseWhoRemainLog", jsonEncodeFlat(fields)) end)
+    return ok, err
 end

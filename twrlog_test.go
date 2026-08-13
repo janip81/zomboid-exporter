@@ -119,7 +119,7 @@ func TestPollTWROnce_CatchesUpFreshAndSkipsWhenNoNewContent(t *testing.T) {
 
 	ctx := context.Background()
 	store := newFakeStore()
-	onEvent := func(ev *twrEvent) { store.handleTWRJobResult(ctx, ev) }
+	onEvent := func(ev *twrEvent) bool { return store.handleTWRJobResult(ctx, ev) == nil }
 
 	done := make(map[string]bool)
 	pollTWROnce(ctx, dir, store, done, onEvent)
@@ -154,7 +154,7 @@ func TestPollTWROnce_RestartResumesFromPersistedOffset(t *testing.T) {
 	store := newFakeStore()
 	store.offsets[filepath.Base(logPath)] = int64(len(twrAppliedLine))
 
-	onEvent := func(ev *twrEvent) { store.handleTWRJobResult(ctx, ev) }
+	onEvent := func(ev *twrEvent) bool { return store.handleTWRJobResult(ctx, ev) == nil }
 	pollTWROnce(ctx, dir, store, make(map[string]bool), onEvent)
 
 	if store.twrJobResults != 1 {
@@ -176,15 +176,100 @@ func TestRunTWRLogPipeline_IgnoresUnknownEventTypes(t *testing.T) {
 
 	ctx := context.Background()
 	store := newFakeStore()
-	onEvent := func(ev *twrEvent) {
+	onEvent := func(ev *twrEvent) bool {
 		if ev.Type != "twr_job_result" {
-			return
+			return true
 		}
-		store.handleTWRJobResult(ctx, ev)
+		return store.handleTWRJobResult(ctx, ev) == nil
 	}
 	pollTWROnce(ctx, dir, store, make(map[string]bool), onEvent)
 
 	if store.twrJobResults != 1 {
 		t.Fatalf("expected only the twr_job_result line to be dispatched, got twrJobResults=%d", store.twrJobResults)
+	}
+}
+
+// TestPollTWROnce_HandlerFailureDoesNotAdvancePastFailedLine covers
+// spawn-result-tracking.md review Q4: a transient DB failure must not
+// let the checkpoint skip past the event that failed to commit, or a
+// DB outage would silently and permanently lose an audit record.
+func TestPollTWROnce_HandlerFailureDoesNotAdvancePastFailedLine(t *testing.T) {
+	dir := t.TempDir()
+	logDir := filepath.Join(dir, "Logs", "logs_2026-08-13")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(logDir, "2026-08-13_14-00_ThoseWhoRemainLog.txt")
+	if err := os.WriteFile(logPath, []byte(twrAppliedLine+twrErrorLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	store := newFakeStore()
+	committed := 0
+	// Simulates the second line's DB write failing (e.g. Postgres
+	// temporarily unavailable).
+	onEvent := func(ev *twrEvent) bool {
+		committed++
+		if committed == 2 {
+			return false
+		}
+		return store.handleTWRJobResult(ctx, ev) == nil
+	}
+
+	done := make(map[string]bool)
+	pollTWROnce(ctx, dir, store, done, onEvent)
+
+	if store.twrJobResults != 1 {
+		t.Fatalf("expected only the first (successful) line to be committed, got twrJobResults=%d", store.twrJobResults)
+	}
+	if done[filepath.Base(logPath)] {
+		t.Fatal("file must not be marked done after a handler failure -- it needs to be retried")
+	}
+	gotOffset := store.offsets[filepath.Base(logPath)]
+	wantOffset := int64(len(twrAppliedLine))
+	if gotOffset != wantOffset {
+		t.Fatalf("offset must stop right after the last successfully committed line: got %d want %d", gotOffset, wantOffset)
+	}
+
+	// Retry (as if the DB recovered) -- must pick up exactly the failed
+	// line, not skip it or reprocess the first one.
+	committed = 0
+	onEvent2 := func(ev *twrEvent) bool { return store.handleTWRJobResult(ctx, ev) == nil }
+	pollTWROnce(ctx, dir, store, done, onEvent2)
+	if store.twrJobResults != 2 {
+		t.Fatalf("expected the retried line to be committed, got twrJobResults=%d", store.twrJobResults)
+	}
+}
+
+// TestPollTWROnce_MalformedLineSkippedButOffsetAdvances covers review
+// Q8: a malformed line must not block every valid line after it
+// forever, but also must not be silently invisible (see the
+// slog.Warn in readNewTWRLines -- not directly asserted here, just
+// that processing continues correctly around it).
+func TestPollTWROnce_MalformedLineSkippedButOffsetAdvances(t *testing.T) {
+	dir := t.TempDir()
+	logDir := filepath.Join(dir, "Logs", "logs_2026-08-13")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(logDir, "2026-08-13_14-00_ThoseWhoRemainLog.txt")
+	malformed := `[13-08-26 14:02:15.000] not valid json at all.` + "\n"
+	content := twrAppliedLine + malformed + twrErrorLine
+	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	store := newFakeStore()
+	onEvent := func(ev *twrEvent) bool { return store.handleTWRJobResult(ctx, ev) == nil }
+	pollTWROnce(ctx, dir, store, make(map[string]bool), onEvent)
+
+	if store.twrJobResults != 2 {
+		t.Fatalf("expected both valid lines (before and after the malformed one) to be processed, got twrJobResults=%d", store.twrJobResults)
+	}
+	info, _ := os.Stat(logPath)
+	if store.offsets[filepath.Base(logPath)] != info.Size() {
+		t.Fatalf("offset should still reach end of file, skipping past the malformed line: got %d want %d", store.offsets[filepath.Base(logPath)], info.Size())
 	}
 }
