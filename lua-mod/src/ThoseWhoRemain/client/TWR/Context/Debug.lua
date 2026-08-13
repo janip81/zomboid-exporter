@@ -57,6 +57,16 @@ local MECHANIC_LABELS = {
 -- sendClientCommand, no server round-trip.
 local RECIPE_NAME = "AntagonistProbeTestRecipe"
 
+-- describe() avoids the classic Lua `ok and v or "?"` ternary bug --
+-- collapses a legitimate `false` return into the same "?" as a failed
+-- pcall, making earlier diagnostic output ambiguous whenever the real
+-- answer was `false` (which happened at least once, wasting a test
+-- cycle). Moved above both diagnostic functions so they share it.
+local function describe(ok, v)
+    if not ok then return "CALL FAILED" end
+    return tostring(v)
+end
+
 local function runClientRecipeDiagnostic()
     print("TWR: Context.Debug -- CLIENT recipe diagnostic for '" .. RECIPE_NAME .. "'")
 
@@ -75,7 +85,7 @@ local function runClientRecipeDiagnostic()
     local okName, name = pcall(function() return craftRecipe:getName() end)
     local okCat, category = pcall(function() return craftRecipe:getCategory() end)
     local okNTBL, needToBeLearn = pcall(function() return craftRecipe:getNeedToBeLearn() end)
-    print("TWR: Context.Debug -- CLIENT recipe exists: name=" .. tostring(okName and name or "?") .. " category=" .. tostring(okCat and category or "?") .. " needToBeLearn=" .. tostring(okNTBL and needToBeLearn or "?"))
+    print("TWR: Context.Debug -- CLIENT recipe exists: name=" .. describe(okName, name) .. " category=" .. describe(okCat, category) .. " needToBeLearn=" .. describe(okNTBL, needToBeLearn))
 
     local okPlayer, player = pcall(function() return getPlayer() end)
     if not okPlayer or not player then
@@ -89,22 +99,13 @@ local function runClientRecipeDiagnostic()
         okContains, contains = pcall(function() return knownRecipes:contains(RECIPE_NAME) end)
     end
     local okIsKnown, isKnown = pcall(function() return player:isRecipeKnown(craftRecipe, true) end)
-    print("TWR: Context.Debug -- CLIENT getKnownRecipes():contains=" .. tostring(okContains and contains or "?") .. " CLIENT isRecipeKnown(recipe,true)=" .. tostring(okIsKnown and isKnown or "?"))
+    print("TWR: Context.Debug -- CLIENT getKnownRecipes():contains=" .. describe(okContains, contains) .. " CLIENT isRecipeKnown(recipe,true)=" .. describe(okIsKnown, isKnown))
 
     if okIsKnown and isKnown then
         print("TWR: Context.Debug -- CLIENT isRecipeKnown==true -- if crafting menu still doesn't show it after a full close+reopen, this is classification C (client list-filter problem), otherwise D (stale window cache)")
     else
         print("TWR: Context.Debug -- CLIENT isRecipeKnown==false -- classification B (server->client recipe-knowledge sync problem)")
     end
-end
-
--- describe() avoids the classic Lua `ok and v or "?"` ternary bug --
--- collapses a legitimate `false` return into the same "?" as a failed
--- pcall. Bit us once already on the server-side equivalent
--- (server/TWR/Mechanics/Recipe.lua's forget()).
-local function describe(ok, v)
-    if not ok then return "CALL FAILED" end
-    return tostring(v)
 end
 
 -- CLIENT-LOCAL-ONLY reset per ChatGPT's 2026-08-13 correction: server
