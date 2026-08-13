@@ -99,6 +99,11 @@ end
 -- normal gameplay). Debug-only convenience: removes directly from the
 -- known-recipes list and reuses the same PF_Recipes sync call teach()
 -- uses, so debug-testing runs don't leave permanent state behind.
+local function describe(ok, v)
+    if not ok then return "CALL FAILED" end
+    return tostring(v)
+end
+
 function Recipe.forget(player, recipeName)
     local okKR, knownRecipes = safeCall(player, "getKnownRecipes")
     if not okKR or not knownRecipes then return false end
@@ -106,7 +111,11 @@ function Recipe.forget(player, recipeName)
     local okBefore, containsBefore = safeCall(knownRecipes, "contains", recipeName)
     local ok, removed = safeCall(knownRecipes, "remove", recipeName)
     local okAfter, containsAfter = safeCall(knownRecipes, "contains", recipeName)
-    print("TWR.Mechanics.Recipe: forget -- contains before=" .. tostring(okBefore and containsBefore or "?") .. " remove() returned=" .. tostring(ok and removed or "call failed") .. " contains after=" .. tostring(okAfter and containsAfter or "?"))
+    -- FIX 2026-08-13: previous version used `ok and v or "?"`, the
+    -- classic Lua ternary gotcha -- collapses a legitimate `false`
+    -- return value into the same "?" as a genuinely failed call,
+    -- making the log ambiguous. describe() distinguishes them properly.
+    print("TWR.Mechanics.Recipe: forget -- contains before=" .. describe(okBefore, containsBefore) .. " remove() returned=" .. describe(ok, removed) .. " contains after=" .. describe(okAfter, containsAfter))
 
     pcall(function() sendSyncPlayerFields(player, 0x00000001) end)
     return ok
