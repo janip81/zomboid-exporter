@@ -104,6 +104,21 @@ function RecordedMedia.buildItem(payload)
         safeCall(item, "setCustomName", true)
     end
 
+    -- FIX 2026-08-13, required for real TV/VCR insertion: CONFIRMED
+    -- live that a plain Base.VHS_Home item is NOT accepted by the
+    -- vanilla TV's insert UI on its own -- it must be bound to a real
+    -- registered RecordedMediaData via setRecordedMediaData(), or
+    -- RWMMedia.lua's own verifyItem() gate (isRecordedMedia() check)
+    -- rejects it. See shared/TWR/RecordedMediaRegistry.lua for the
+    -- carrier this binds to -- every TWR tape shares the SAME carrier
+    -- MediaData identity; each tape's real identity/content still
+    -- lives in ITS OWN modData below, not in the carrier.
+    if TWR.RecordedMediaRegistry and TWR.RecordedMediaRegistry.carrierMediaData then
+        safeCall(item, "setRecordedMediaData", TWR.RecordedMediaRegistry.carrierMediaData)
+    else
+        print("TWR.Mechanics.RecordedMedia: buildItem -- WARNING: carrier MediaData not registered yet, item will likely be rejected by a real TV's insert UI")
+    end
+
     local text = table.concat(payload.lines or { "dummy test content" }, "\n")
 
     local okData, modData = safeCall(item, "getModData")

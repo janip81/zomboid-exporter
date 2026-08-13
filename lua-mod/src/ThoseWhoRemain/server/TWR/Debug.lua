@@ -56,6 +56,15 @@ local function safeCall(obj, methodName, ...)
     return false, nil
 end
 
+-- Avoids the classic Lua `ok and v or "?"` ternary bug -- collapses a
+-- legitimate `false` result into the same fallback as a failed call,
+-- same bug class already found and fixed once in
+-- client/TWR/Context/Debug.lua's own describe() helper.
+local function describe(ok, v)
+    if not ok then return "CALL FAILED" end
+    return tostring(v)
+end
+
 local function runContainer(p)
     local okX, x = safeCall(p, "getX")
     local okY, y = safeCall(p, "getY")
@@ -529,10 +538,10 @@ local function runFindNearbyTV(p)
                     end
 
                     print("TWR.Debug: runFindNearbyTV -- [" .. found .. "] square=(" .. (math.floor(x) + dx) .. "," .. (math.floor(y) + dy) .. "," .. math.floor(z) .. ")"
-                        .. " mediaType=" .. tostring(okType and mediaType or "?") .. " (0=CD/audio,1=VHS)"
-                        .. " isTurnedOn=" .. tostring(okOn and isOn or "?")
-                        .. " hasMedia=" .. tostring(okHas and hasMedia or "?")
-                        .. " isPlayingMedia=" .. tostring(okPlaying and isPlaying or "?")
+                        .. " mediaType=" .. describe(okType, mediaType) .. " (0=CD/audio,1=VHS)"
+                        .. " isTurnedOn=" .. describe(okOn, isOn)
+                        .. " hasMedia=" .. describe(okHas, hasMedia)
+                        .. " isPlayingMedia=" .. describe(okPlaying, isPlaying)
                         .. " objects=[" .. table.concat(objNames, ",") .. "]")
                 end
             end
