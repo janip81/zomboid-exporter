@@ -75,6 +75,17 @@ local DUMMY_CONTENT = {
         title = "TWR Native Lines Test",
         lines = { "TWR NATIVE LINE ONE", "TWR NATIVE LINE TWO" },
     },
+    -- VHS-LINES-2 (antagonist/tests/vhs-live-handoff-chatgpt-response.md):
+    -- a second, DISTINCT recording -- deliberately different line count
+    -- and wording from twr.native.lines.test.001 above, so cross-content
+    -- (tape B showing tape A's lines, or vice versa) is unmistakable if
+    -- it happens. Play test.001 through a real TV first, eject, then
+    -- insert+play this one through the SAME TV -- content must not
+    -- carry over.
+    ["twr.native.lines.test.002"] = {
+        title = "TWR Native Lines Test B",
+        lines = { "TWR SECOND TAPE LINE A", "TWR SECOND TAPE LINE B", "TWR SECOND TAPE LINE C" },
+    },
 }
 
 TWR.RecordedMediaRegistry.registry = TWR.RecordedMediaRegistry.registry or {}

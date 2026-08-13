@@ -426,6 +426,35 @@ local function runVHSLinesTest(p)
     print("TWR.Debug: runVHSLinesTest -- gave VHS-LINES-1 test tape " .. (okAdd and "SUCCEEDED -- insert into a REAL TV via the normal vanilla UI, turn it on, press Play. Watch for native scrolling captions." or "FAILED"))
 end
 
+-- VHS-LINES-2 probe: gives the SECOND, distinct test recording
+-- (twr.native.lines.test.002 -- see shared/TWR/RecordedMediaRegistry.lua).
+-- Play VHS-LINES-1's tape through a real TV first, eject it, then
+-- insert+play THIS tape through the SAME TV. PASS = only "TWR SECOND
+-- TAPE LINE A/B/C" appear, never test.001's lines -- proves distinct
+-- MediaData registrations don't cross content on the same device.
+local function runVHSLinesTest2(p)
+    local okInv, inventory = safeCall(p, "getInventory")
+    if not okInv or not inventory then return end
+
+    local item, err = TWR.Mechanics.RecordedMedia.buildItem({
+        contentId = "twr.native.lines.test.002",
+        mediaId = "TWR_NATIVE_LINES_TEST_002",
+        displayName = "TWR Native Lines Test B",
+        lines = { "TWR SECOND TAPE LINE A", "TWR SECOND TAPE LINE B", "TWR SECOND TAPE LINE C" },
+        discoveryKey = "twr_native_lines_test_002",
+    })
+    if not item then
+        print("TWR.Debug: runVHSLinesTest2 -- buildItem FAILED: " .. tostring(err))
+        return
+    end
+
+    local okAdd = safeCall(inventory, "AddItem", item)
+    if okAdd then
+        pcall(function() sendAddItemToContainer(inventory, item) end)
+    end
+    print("TWR.Debug: runVHSLinesTest2 -- gave VHS-LINES-2 test tape " .. (okAdd and "SUCCEEDED -- eject the VHS-LINES-1 tape from the TV first, then insert+play this one. Content must NOT match test.001's lines." or "FAILED"))
+end
+
 -- P3 (controlled key) debug test -- gives a key with a fixed,
 -- hardcoded-for-the-test keyId directly to the triggering admin.
 -- Running this twice in a row should give two keys that are
@@ -752,6 +781,7 @@ local MECHANICS = {
     find_nearby_tv = runFindNearbyTV,
     check_tv_content = runCheckTVContent,
     vhs_lines_test = runVHSLinesTest,
+    vhs_lines_test_2 = runVHSLinesTest2,
     check_media_identity = runCheckMediaIdentity,
     -- map_reveal DISABLED SERVER-SIDE 2026-08-12 -- removing only the
     -- client-side button (client/TWR/Context/Debug.lua) was NOT enough:
