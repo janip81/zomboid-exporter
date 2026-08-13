@@ -198,43 +198,15 @@ local function runMapScatter(p)
     TWR.Mechanics.Container.scatterAcrossMap(points, 5, 42, "Base.Twigs")
 end
 
--- LIVE PROBE for zomboid-exporter-ideas/antagonist/
--- sglobalobjectsystem-persistence-validation.md -- see
--- Mechanics/PendingSpawnTest.lua's header for the full rationale.
--- Not production code, disposable, delete once the validation result
--- is written up.
---
--- Target offset: +200 tiles east of the clicking admin -- far enough
--- that the square is very likely not currently loaded/resident (the
--- whole point of this probe is to test OnChunkLoaded firing on a
--- genuinely cold chunk), but not so far it risks landing in open
--- ocean the way DeferredArea's original +/-300 diagonal offset did
--- (see DeferredArea test history) -- a single-axis, moderate offset
--- matches that same later fix's reasoning.
-local function runPendingSpawnCreate(p)
-    local okX, x = safeCall(p, "getX")
-    local okY, y = safeCall(p, "getY")
-    local okZ, z = safeCall(p, "getZ")
-    if not (okX and okY and okZ) then return end
-
-    local tx, ty, tz = math.floor(x) + 200, math.floor(y), math.floor(z)
-    local jobId = "sgos-test-" .. ZombRand(1000000000)
-    local artifactKey = jobId .. "-artifact"
-    print("TWR.Debug: runPendingSpawnCreate -- target (" .. tx .. "," .. ty .. "," .. tz .. ") jobId=" .. jobId)
-
-    if not TWRPendingSpawnTest.instance then
-        print("TWR.Debug: runPendingSpawnCreate -- TWRPendingSpawnTest.instance is nil, system not initialized yet")
-        return
-    end
-    TWRPendingSpawnTest.instance:addPending(jobId, artifactKey, tx, ty, tz, "Base.Twigs")
-end
-
-local function runPendingSpawnStatus(p)
-    if not TWRPendingSpawnTest.instance then
-        print("TWR.Debug: runPendingSpawnStatus -- TWRPendingSpawnTest.instance is nil, system not initialized yet")
-        return
-    end
-    TWRPendingSpawnTest.instance:reportStatus()
+-- Reports current TWR.PendingActions state -- the production,
+-- action-type-generic successor to the disposable PendingSpawnTest.lua
+-- probe (now removed; its validation result is written up in
+-- zomboid-exporter-ideas/antagonist/sglobalobjectsystem-persistence-validation.md).
+-- No create-trigger here anymore -- pending actions are now requested
+-- by mechanics themselves (e.g. Container.scatterAcrossMap), not
+-- directly from the debug menu.
+local function runPendingActionsStatus(p)
+    TWR.PendingActions.reportStatus()
 end
 
 local function runDeferredArea(p)
@@ -381,8 +353,7 @@ local MECHANICS = {
     container = runContainer,
     scatter = runScatter,
     map_scatter = runMapScatter,
-    pending_spawn_create = runPendingSpawnCreate,
-    pending_spawn_status = runPendingSpawnStatus,
+    pending_actions_status = runPendingActionsStatus,
     deferred_area = runDeferredArea,
     corpse = runCorpse,
     door = runDoor,

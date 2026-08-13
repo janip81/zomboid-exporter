@@ -166,20 +166,30 @@ end
 -- sets so this is not the "same subset every time" concern
 -- scatterIntoExisting's own header warns about for a single center).
 --
--- Does NOT scan the whole map up front -- most of those points are far
--- from any player and their squares are not resident server-side yet
--- (CONFIRMED live, see DeferredArea.lua's header). Each point is queued
--- independently via DeferredArea.waitForSquare and only actually placed
--- once a player's proximity causes that square to load -- matches TEST
--- M's proven production pattern (verified anchor -> wait for real chunk
--- load -> scan -> place), just fanned out to many anchors at once
--- instead of one.
+-- FIX 2026-08-13: promoted off DeferredArea.waitForSquare onto
+-- TWR.PendingActions -- DeferredArea's watchers are RAM-only and lose
+-- every pending point on any server restart with zero trace anywhere
+-- (see zomboid-exporter-ideas/antagonist/pending-job-durability.md's
+-- "Open problem"). TWR.PendingActions persists each point via a
+-- mod-owned SGlobalObjectSystem instead, LIVE-CONFIRMED to survive a
+-- real dedicated-server restart and reactivate via the same real,
+-- targeted OnChunkLoaded callback DeferredArea was working around not
+-- having (see sglobalobjectsystem-persistence-validation.md).
 --
--- Returns the list of DeferredArea watcher handles (one per point, in
--- the same order as `points`), so a caller can DeferredArea.cancel()
--- any still-pending ones early if needed.
+-- Does NOT scan the whole map up front -- most of those points are far
+-- from any player and their squares are not resident server-side yet.
+-- Each point is queued independently and only actually placed once a
+-- player's proximity causes that square to load.
+--
+-- Success-first logging (spawn-result-tracking.md) now happens
+-- centrally in PendingActions.lua's OnChunkLoaded, which calls
+-- resolvePendingAction() below and emits exactly one durable outcome
+-- per point -- not here, and not once per internal radius-retry probe.
+--
+-- Returns the list of pending-action records (one per point, in the
+-- same order as `points`).
 function Container.scatterAcrossMap(points, radius, seed, itemType)
-    local handles = {}
+    local pending = {}
     for i, point in ipairs(points) do
         -- Ad-hoc per-point job id -- no real DB-driven job dispatcher
         -- exists yet (see Emit.lua's header / spawn-result-tracking.md),
@@ -189,99 +199,83 @@ function Container.scatterAcrossMap(points, radius, seed, itemType)
         -- codebase uses os.* (Kahlua support unconfirmed), ZombRand is
         -- already proven throughout (keyId generation etc).
         local jobId = "debug-mapscatter-" .. ZombRand(1000000000) .. "-" .. i
-
-        handles[i] = TWR.Mechanics.DeferredArea.waitForSquare(point.x, point.y, point.z, function(square)
-            local okCell, cell = pcall(function() return getCell() end)
-            if not okCell or not cell then return end
-
-            -- FIX 2026-08-13: CONFIRMED live a real POI anchor can miss
-            -- at the base radius (4/5 real building anchors hit on the
-            -- first try at radius 5, 1 came back placed=0 -- the anchor
-            -- coordinate itself was probably on the street rather than
-            -- deep enough into the building). Retry the SAME anchor with
-            -- a widening radius instead of just giving up -- the square
-            -- is already loaded from waitForSquare above, so no need to
-            -- defer again, this is an immediate in-place retry.
-            --
-            -- FIX 2026-08-13 (spawn-result-tracking.md review Q2): these
-            -- radius passes are internal probes within ONE application
-            -- attempt, not separate durable attempts -- attemptNo stays
-            -- 1 in the emitted job result regardless of how many radii
-            -- were tried (real attempt numbering belongs to the future
-            -- DB job dispatcher, which doesn't exist yet). usedRadius
-            -- is recorded in targetSummary instead, for debugging.
-            local placed = 0
-            local placements = nil
-            local usedRadius = radius
-            local radiusAttempts = 0
-            for a = 1, 3 do
-                radiusAttempts = a
-                usedRadius = radius * a
-                placed, placements = Container.scatterIntoExisting(cell, point.x, point.y, point.z, usedRadius, seed + i, 1, itemType)
-                if placed > 0 then break end
-            end
-            print("TWR.Mechanics.Container: scatterAcrossMap -- point " .. i .. " (" .. point.x .. "," .. point.y .. "," .. point.z .. ") placed=" .. placed .. " (radius used=" .. usedRadius .. ", radius passes=" .. radiusAttempts .. ")")
-
-            -- Success-first logging (spawn-result-tracking.md): ONE
-            -- durable outcome per point here, not one per internal
-            -- radius-retry probe above (those stay in the print() above
-            -- only, for live debugging).
-            local emitOk, emitErr
-            if placed > 0 then
-                -- FIX 2026-08-13 (review Q1): record the ACTUAL resolved
-                -- container square (placements[1]), not the authoring
-                -- anchor (point.x/y/z) -- scatterIntoExisting now
-                -- returns this.
-                local resolved = placements[1]
-                emitOk, emitErr = TWR.Emit.jobResult({
-                    jobId = jobId,
-                    attemptNo = 1,
-                    actionType = "scatter_items",
-                    mechanic = "Container.scatterAcrossMap",
-                    result = "applied",
-                    placed = placed,
-                    requested = 1,
-                    artifactKey = jobId .. "-artifact",
-                    -- FIX 2026-08-13 (review Q3): artifactType describes
-                    -- the placed THING (the item), targetType/
-                    -- targetSummary describe what it was placed INTO --
-                    -- these were previously conflated (targetType alone
-                    -- was written into the artifact_type DB column).
-                    artifactType = itemType,
-                    x = resolved.x,
-                    y = resolved.y,
-                    z = resolved.z,
-                    targetType = resolved.targetType,
-                    targetSummary = "existing world container (anchor " .. point.x .. "," .. point.y .. "," .. point.z .. ", resolved radius " .. usedRadius .. ")",
-                })
-            else
-                emitOk, emitErr = TWR.Emit.jobResult({
-                    jobId = jobId,
-                    attemptNo = 1,
-                    actionType = "scatter_items",
-                    mechanic = "Container.scatterAcrossMap",
-                    result = "final_error",
-                    errorCode = "NO_ELIGIBLE_TARGET",
-                    errorDetail = "no existing container found within radius " .. usedRadius .. " after " .. radiusAttempts .. " radius pass(es)",
-                    placed = 0,
-                    requested = 1,
-                    x = point.x,
-                    y = point.y,
-                    z = point.z,
-                })
-            end
-
-            -- FIX 2026-08-13 (review Q7): a world mutation can succeed
-            -- while the audit-log write itself fails -- that must never
-            -- be silent. This is the one place allowed to fall back to
-            -- a bare print(), since the durable channel is what just
-            -- failed.
-            if not emitOk then
-                print("TWR.Mechanics.Container: scatterAcrossMap -- ERROR: TWR.Emit.jobResult FAILED for jobId=" .. jobId .. " placed=" .. placed .. " at (" .. point.x .. "," .. point.y .. "," .. point.z .. "): " .. tostring(emitErr))
-            end
-        end)
+        pending[i] = TWR.PendingActions.request(jobId, jobId .. "-artifact", "scatter_items", "Container", point.x, point.y, point.z, {
+            itemType = itemType,
+            radius = radius,
+            seed = seed + i,
+        })
     end
-    return handles
+    return pending
+end
+
+-- Resolver TWR.PendingActions.OnChunkLoaded calls once `pending`'s
+-- target chunk loads. Contract (see PendingActions.lua's header):
+-- return true, resolved (resolved = {mechanic, placed, requested,
+-- artifactType, x, y, z, targetType, targetSummary}) on success, or
+-- false, errorCode, errorDetail on failure. Must NOT call
+-- TWR.Emit.jobResult itself -- PendingActions.lua is the single place
+-- that does, so every migrated mechanic's audit behavior stays
+-- centralized and consistent.
+function Container.resolvePendingAction(pending)
+    local okCell, cell = pcall(function() return getCell() end)
+    if not okCell or not cell then
+        return false, "WORLD_UNAVAILABLE", "getCell() failed"
+    end
+
+    local params = pending.params or {}
+    local itemType = params.itemType or "Base.Twigs"
+    local baseRadius = params.radius or 5
+    local seed = params.seed or 1
+
+    -- FIX 2026-08-13: CONFIRMED live a real POI anchor can miss at the
+    -- base radius (4/5 real building anchors hit on the first try at
+    -- radius 5, 1 came back placed=0 -- the anchor coordinate itself
+    -- was probably on the street rather than deep enough into the
+    -- building). Retry the SAME anchor with a widening radius instead
+    -- of just giving up -- the square is already loaded (this resolver
+    -- only runs from OnChunkLoaded), so no need to defer again, this is
+    -- an immediate in-place retry.
+    --
+    -- These radius passes are internal probes within ONE application
+    -- attempt, not separate durable attempts -- attemptNo stays 1 in
+    -- the emitted job result regardless of how many radii were tried
+    -- (real attempt numbering belongs to the future DB job dispatcher,
+    -- which doesn't exist yet). usedRadius is recorded in
+    -- targetSummary instead, for debugging.
+    local placed = 0
+    local placements = nil
+    local usedRadius = baseRadius
+    local radiusAttempts = 0
+    for a = 1, 3 do
+        radiusAttempts = a
+        usedRadius = baseRadius * a
+        placed, placements = Container.scatterIntoExisting(cell, pending.targetX, pending.targetY, pending.targetZ, usedRadius, seed, 1, itemType)
+        if placed > 0 then break end
+    end
+    print("TWR.Mechanics.Container: resolvePendingAction -- jobId=" .. tostring(pending.jobId) .. " (" .. pending.targetX .. "," .. pending.targetY .. "," .. pending.targetZ .. ") placed=" .. placed .. " (radius used=" .. usedRadius .. ", radius passes=" .. radiusAttempts .. ")")
+
+    if placed > 0 then
+        -- Record the ACTUAL resolved container square (placements[1]),
+        -- not the authoring anchor (pending.targetX/Y/Z) --
+        -- scatterIntoExisting returns this.
+        local resolved = placements[1]
+        return true, {
+            mechanic = "Container.scatterAcrossMap",
+            placed = placed,
+            requested = 1,
+            -- artifactType describes the placed THING (the item),
+            -- targetType/targetSummary describe what it was placed
+            -- INTO -- keep these distinct, do not conflate.
+            artifactType = itemType,
+            x = resolved.x,
+            y = resolved.y,
+            z = resolved.z,
+            targetType = resolved.targetType,
+            targetSummary = "existing world container (anchor " .. pending.targetX .. "," .. pending.targetY .. "," .. pending.targetZ .. ", resolved radius " .. usedRadius .. ")",
+        }
+    end
+
+    return false, "NO_ELIGIBLE_TARGET", "no existing container found within radius " .. usedRadius .. " after " .. radiusAttempts .. " radius pass(es)"
 end
 
 -- Spawns a brand-new lootable box (real IsoThumpable + ItemContainer)
