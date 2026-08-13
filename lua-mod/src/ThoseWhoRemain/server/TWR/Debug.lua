@@ -485,6 +485,63 @@ local function runFixtureKVLS(p)
         .. " -- unlock with the key, take the tape (no direct watch path -- needs a real TV, see vhs-device-research.md). KVLS-3 onward (quest-step advance / sleep / final reward) intentionally not wired, needs the real quest dispatcher.")
 end
 
+-- VHS-A live probe (no mutation) -- scans nearby squares for any
+-- object carrying DeviceData (radios AND TVs both use this same class
+-- -- confirmed real: ISDeviceBatteryAction.lua's own
+-- getDeviceDataFromParameter calls square:getDeviceData() directly,
+-- not tied to iterating a specific object class) and reports what it
+-- finds. Read-only -- does not create, insert, lock, or otherwise
+-- touch anything. See antagonist/tests/vhs-device-research.md.
+local FIND_TV_RADIUS = 8
+
+local function runFindNearbyTV(p)
+    local okX, x = safeCall(p, "getX")
+    local okY, y = safeCall(p, "getY")
+    local okZ, z = safeCall(p, "getZ")
+    if not (okX and okY and okZ) then return end
+
+    local okCell, cell = pcall(function() return getCell() end)
+    if not okCell or not cell then
+        print("TWR.Debug: runFindNearbyTV -- getCell() failed")
+        return
+    end
+
+    local found = 0
+    for dx = -FIND_TV_RADIUS, FIND_TV_RADIUS do
+        for dy = -FIND_TV_RADIUS, FIND_TV_RADIUS do
+            local okSq, square = pcall(function() return cell:getGridSquare(math.floor(x) + dx, math.floor(y) + dy, math.floor(z)) end)
+            if okSq and square then
+                local okDD, deviceData = safeCall(square, "getDeviceData")
+                if okDD and deviceData then
+                    found = found + 1
+                    local okType, mediaType = safeCall(deviceData, "getMediaType")
+                    local okOn, isOn = safeCall(deviceData, "getIsTurnedOn")
+                    local okHas, hasMedia = safeCall(deviceData, "hasMedia")
+                    local okPlaying, isPlaying = safeCall(deviceData, "isPlayingMedia")
+
+                    local objNames = {}
+                    local okObjs, objects = safeCall(square, "getObjects")
+                    if okObjs and objects then
+                        for i = 0, objects:size() - 1 do
+                            local okName, name = safeCall(objects:get(i), "getObjectName")
+                            if okName and name then table.insert(objNames, name) end
+                        end
+                    end
+
+                    print("TWR.Debug: runFindNearbyTV -- [" .. found .. "] square=(" .. (math.floor(x) + dx) .. "," .. (math.floor(y) + dy) .. "," .. math.floor(z) .. ")"
+                        .. " mediaType=" .. tostring(okType and mediaType or "?") .. " (0=CD/audio,1=VHS)"
+                        .. " isTurnedOn=" .. tostring(okOn and isOn or "?")
+                        .. " hasMedia=" .. tostring(okHas and hasMedia or "?")
+                        .. " isPlayingMedia=" .. tostring(okPlaying and isPlaying or "?")
+                        .. " objects=[" .. table.concat(objNames, ",") .. "]")
+                end
+            end
+        end
+    end
+
+    print("TWR.Debug: runFindNearbyTV -- scan complete, radius=" .. FIND_TV_RADIUS .. ", found " .. found .. " device(s)")
+end
+
 local function runCoords(p)
     local okX, x = safeCall(p, "getX")
     local okY, y = safeCall(p, "getY")
@@ -512,6 +569,7 @@ local MECHANICS = {
     recorded_media = runRecordedMedia,
     controlled_key = runControlledKey,
     fixture_kvls = runFixtureKVLS,
+    find_nearby_tv = runFindNearbyTV,
     -- map_reveal DISABLED SERVER-SIDE 2026-08-12 -- removing only the
     -- client-side button (client/TWR/Context/Debug.lua) was NOT enough:
     -- a client on a stale/not-yet-updated Workshop version still had
