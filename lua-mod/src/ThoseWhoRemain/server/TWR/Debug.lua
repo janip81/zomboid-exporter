@@ -551,6 +551,73 @@ local function runFindNearbyTV(p)
     print("TWR.Debug: runFindNearbyTV -- scan complete, radius=" .. FIND_TV_RADIUS .. ", found " .. found .. " device(s)")
 end
 
+-- VHS-E-equivalent probe (read-only): for any nearby TELEVISION
+-- currently playing media, tries to identify the ACTUAL physical
+-- inserted item (not just its shared carrier MediaData identity,
+-- which is the same for every TWR tape) via
+-- deviceData:getParent() -> the owning IsoTelevision world object ->
+-- getContainer() -> scan items for modData.TWR_isVHS, same
+-- container-scan pattern already proven in Container.findExistingContainer.
+-- UNCONFIRMED whether TVs actually store the inserted tape in a
+-- regular ItemContainer this way -- that is exactly what this probe
+-- exists to find out.
+local function runCheckTVContent(p)
+    local okX, x = safeCall(p, "getX")
+    local okY, y = safeCall(p, "getY")
+    local okZ, z = safeCall(p, "getZ")
+    if not (okX and okY and okZ) then return end
+
+    local okCell, cell = pcall(function() return getCell() end)
+    if not okCell or not cell then return end
+
+    local checked = 0
+    for dx = -FIND_TV_RADIUS, FIND_TV_RADIUS do
+        for dy = -FIND_TV_RADIUS, FIND_TV_RADIUS do
+            local okSq, square = pcall(function() return cell:getGridSquare(math.floor(x) + dx, math.floor(y) + dy, math.floor(z)) end)
+            if okSq and square then
+                local okDD, deviceData = safeCall(square, "getDeviceData")
+                if okDD and deviceData then
+                    local okIsTV, isTV = safeCall(deviceData, "getIsTelevision")
+                    local okPlaying, isPlaying = safeCall(deviceData, "isPlayingMedia")
+                    if okIsTV and isTV then
+                        checked = checked + 1
+                        print("TWR.Debug: runCheckTVContent -- [" .. checked .. "] TV at (" .. (math.floor(x) + dx) .. "," .. (math.floor(y) + dy) .. "," .. math.floor(z) .. ")"
+                            .. " isPlayingMedia=" .. describe(okPlaying, isPlaying))
+
+                        local okParent, parent = safeCall(deviceData, "getParent")
+                        if okParent and parent then
+                            local okC, container = safeCall(parent, "getContainer")
+                            if okC and container then
+                                local okItems, items = safeCall(container, "getItems")
+                                if okItems and items then
+                                    print("TWR.Debug: runCheckTVContent --   parent container has " .. items:size() .. " item(s)")
+                                    for i = 0, items:size() - 1 do
+                                        local item = items:get(i)
+                                        local okName, name = safeCall(item, "getName")
+                                        local okData, modData = safeCall(item, "getModData")
+                                        local isTWR = okData and modData and modData.TWR_isVHS
+                                        print("TWR.Debug: runCheckTVContent --   item[" .. i .. "]=" .. describe(okName, name)
+                                            .. " TWR_isVHS=" .. tostring(isTWR)
+                                            .. (isTWR and (" TWR_vhsText=" .. tostring(modData.TWR_vhsText)) or ""))
+                                    end
+                                else
+                                    print("TWR.Debug: runCheckTVContent --   parent:getContainer():getItems() FAILED")
+                                end
+                            else
+                                print("TWR.Debug: runCheckTVContent --   parent:getContainer() FAILED/nil -- TV object has no item container")
+                            end
+                        else
+                            print("TWR.Debug: runCheckTVContent --   deviceData:getParent() FAILED/nil")
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    print("TWR.Debug: runCheckTVContent -- scan complete, checked " .. checked .. " television(s)")
+end
+
 local function runCoords(p)
     local okX, x = safeCall(p, "getX")
     local okY, y = safeCall(p, "getY")
@@ -579,6 +646,7 @@ local MECHANICS = {
     controlled_key = runControlledKey,
     fixture_kvls = runFixtureKVLS,
     find_nearby_tv = runFindNearbyTV,
+    check_tv_content = runCheckTVContent,
     -- map_reveal DISABLED SERVER-SIDE 2026-08-12 -- removing only the
     -- client-side button (client/TWR/Context/Debug.lua) was NOT enough:
     -- a client on a stale/not-yet-updated Workshop version still had
