@@ -98,6 +98,54 @@ local function runClientRecipeDiagnostic()
     end
 end
 
+-- describe() avoids the classic Lua `ok and v or "?"` ternary bug --
+-- collapses a legitimate `false` return into the same "?" as a failed
+-- pcall. Bit us once already on the server-side equivalent
+-- (server/TWR/Mechanics/Recipe.lua's forget()).
+local function describe(ok, v)
+    if not ok then return "CALL FAILED" end
+    return tostring(v)
+end
+
+-- CLIENT-LOCAL-ONLY reset per ChatGPT's 2026-08-13 correction: server
+-- getKnownRecipes():contains() already confirmed false, yet the client
+-- still shows the recipe known even after a relog. Real B42 API has a
+-- dedicated ClientPlayerDB for network-player persistence, and
+-- knownRecipes is a serialized IsoGameCharacter field -- meaning the
+-- CLIENT's own local player object may hold independent state that
+-- server-side mutation + sendSyncPlayerFields never actually reaches.
+-- This runs ENTIRELY on the client's own getPlayer() -- no
+-- sendClientCommand, no server involvement at all -- to test that
+-- directly.
+local function runClientRecipeForget()
+    local okPlayer, player = pcall(function() return getPlayer() end)
+    if not okPlayer or not player then
+        print("TWR: Context.Debug -- CLIENT forget -- getPlayer() failed")
+        return
+    end
+
+    local okKR, knownRecipes = pcall(function() return player:getKnownRecipes() end)
+    if not okKR or not knownRecipes then
+        print("TWR: Context.Debug -- CLIENT forget -- getKnownRecipes() failed")
+        return
+    end
+
+    local okBefore, containsBefore = pcall(function() return knownRecipes:contains(RECIPE_NAME) end)
+    local okRemove, removed = pcall(function() return knownRecipes:remove(RECIPE_NAME) end)
+    local okAfter, containsAfter = pcall(function() return knownRecipes:contains(RECIPE_NAME) end)
+    print("TWR: Context.Debug -- CLIENT forget -- contains before=" .. describe(okBefore, containsBefore) .. " remove() returned=" .. describe(okRemove, removed) .. " contains after=" .. describe(okAfter, containsAfter))
+
+    local okSM, scriptManager = pcall(function() return ScriptManager.instance end)
+    local okRecipe, craftRecipe = false, nil
+    if okSM and scriptManager then
+        okRecipe, craftRecipe = pcall(function() return scriptManager:getCraftRecipe(RECIPE_NAME) end)
+    end
+    if okRecipe and craftRecipe then
+        local okIsKnown, isKnown = pcall(function() return player:isRecipeKnown(craftRecipe, true) end)
+        print("TWR: Context.Debug -- CLIENT forget -- isRecipeKnown(recipe,true) after=" .. describe(okIsKnown, isKnown))
+    end
+end
+
 local function onFillWorldObjectContextMenu(player, context, worldobjects, test)
     if test then return end
 
@@ -128,6 +176,12 @@ local function onFillWorldObjectContextMenu(player, context, worldobjects, test)
     -- runClientRecipeDiagnostic() header comment above.
     debugMenu:addOption("Client recipe diagnostic (local only)", nil, function()
         runClientRecipeDiagnostic()
+    end)
+
+    -- Local-only reset (no server round-trip) -- see
+    -- runClientRecipeForget() header comment above.
+    debugMenu:addOption("Forget test recipe locally (local only)", nil, function()
+        runClientRecipeForget()
     end)
 end
 
