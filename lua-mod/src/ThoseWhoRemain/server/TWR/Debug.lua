@@ -606,6 +606,23 @@ local function runCheckTVContent(p)
                             else
                                 print("TWR.Debug: runCheckTVContent --   parent:getContainer() FAILED/nil -- TV object has no item container")
                             end
+
+                            -- getContainer() failed -- try plausible
+                            -- direct getters on both deviceData and
+                            -- parent as a fast trial-and-error pass
+                            -- (grep-based discovery only finds methods
+                            -- vanilla Lua actually calls somewhere;
+                            -- this covers the blind spot).
+                            for _, candidate in ipairs({ "getMediaItem", "getInsertedItem", "getItem", "getCurrentItem", "getTape" }) do
+                                local okC1, v1 = safeCall(deviceData, candidate)
+                                if okC1 then
+                                    print("TWR.Debug: runCheckTVContent --   deviceData:" .. candidate .. "() SUCCEEDED -- " .. describe(okC1, v1))
+                                end
+                                local okC2, v2 = safeCall(parent, candidate)
+                                if okC2 then
+                                    print("TWR.Debug: runCheckTVContent --   parent:" .. candidate .. "() SUCCEEDED -- " .. describe(okC2, v2))
+                                end
+                            end
                         else
                             print("TWR.Debug: runCheckTVContent --   deviceData:getParent() FAILED/nil")
                         end
