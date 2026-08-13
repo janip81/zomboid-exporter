@@ -90,6 +90,114 @@ local function runScatter(p)
     print("TWR.Debug: runScatter -- placed " .. placed .. " twigs into existing containers within 15 tiles")
 end
 
+-- TEST: scatterAcrossMap against RANDOMLY SELECTED real houses/offices
+-- -- a small-scale stand-in for a "flyer scattered all over town"
+-- narrative device. FIX 2026-08-13 (round 2): the first version picked
+-- purely random (x,y) across the whole map's bounding box -- CONFIRMED
+-- live this mostly lands in fields/woods with nothing nearby at all
+-- (most of the map isn't a building), which is honest but useless for
+-- testing "does it land in containers" like actually wanted. This pool
+-- is every House/Office-tagged POI pulled from
+-- exporter-ideas/tools/pzmap/data/live_poi.json's real "Categories"
+-- field (62 entries, spans Louisville/Muldraugh/Riverside/Rosewood/West
+-- Point/etc) -- the RANDOM part is which N of these real building
+-- anchors get picked each run (ZombRand, no replacement), not the
+-- underlying coordinate itself. z=0 for all (ground floor) --
+-- untested against upper floors.
+local MAP_SCATTER_POINT_COUNT = 5
+local MAP_SCATTER_POOL = {
+    { x = 1264, y = 7381, z = 0, label = "House, Brandenburg" },
+    { x = 11493, y = 8914, z = 0, label = "House, Dixie" },
+    { x = 7090, y = 8373, z = 0, label = "House, Doe Valley" },
+    { x = 4243, y = 7226, z = 0, label = "House, Doe Valley" },
+    { x = 4127, y = 9418, z = 0, label = "House, Doe Valley" },
+    { x = 12037, y = 2593, z = 0, label = "House, Louisville" },
+    { x = 14150, y = 2628, z = 0, label = "House, Louisville" },
+    { x = 12477, y = 1770, z = 0, label = "Communications, Louisville" },
+    { x = 12316, y = 3535, z = 0, label = "Office, Louisville" },
+    { x = 12414, y = 2837, z = 0, label = "Office, Louisville" },
+    { x = 12320, y = 3412, z = 0, label = "House, Louisville" },
+    { x = 12628, y = 3668, z = 0, label = "Office, Louisville" },
+    { x = 12662, y = 1400, z = 0, label = "Office, Louisville" },
+    { x = 13534, y = 2852, z = 0, label = "House, Louisville" },
+    { x = 13423, y = 1732, z = 0, label = "House, Louisville" },
+    { x = 13580, y = 1701, z = 0, label = "Medical, Louisville" },
+    { x = 12084, y = 1616, z = 0, label = "Factory, Louisville" },
+    { x = 12207, y = 1799, z = 0, label = "House, Louisville" },
+    { x = 12667, y = 2191, z = 0, label = "Office, Louisville" },
+    { x = 12618, y = 3555, z = 0, label = "Office, Louisville" },
+    { x = 13561, y = 1581, z = 0, label = "Communications, Louisville" },
+    { x = 14099, y = 2810, z = 0, label = "House, Louisville" },
+    { x = 12340, y = 2057, z = 0, label = "Office, Louisville" },
+    { x = 12245, y = 3542, z = 0, label = "Office, Louisville" },
+    { x = 12551, y = 3779, z = 0, label = "Office, Louisville" },
+    { x = 12733, y = 3969, z = 0, label = "House, Louisville" },
+    { x = 12645, y = 1918, z = 0, label = "Office, Louisville" },
+    { x = 13423, y = 3738, z = 0, label = "House, Louisville" },
+    { x = 14824, y = 3716, z = 0, label = "House, Louisville" },
+    { x = 12421, y = 1423, z = 0, label = "Office, Louisville" },
+    { x = 13597, y = 1699, z = 0, label = "Office, Louisville" },
+    { x = 12714, y = 1621, z = 0, label = "Spiffo, Louisville" },
+    { x = 12670, y = 2137, z = 0, label = "Office, Louisville" },
+    { x = 12561, y = 3617, z = 0, label = "Office, Louisville" },
+    { x = 12552, y = 3703, z = 0, label = "Office, Louisville" },
+    { x = 10072, y = 12783, z = 0, label = "Office, March Ridge" },
+    { x = 10078, y = 12625, z = 0, label = "House, March Ridge" },
+    { x = 10182, y = 12791, z = 0, label = "Office, March Ridge" },
+    { x = 10278, y = 8749, z = 0, label = "Communications, March Ridge" },
+    { x = 10747, y = 9412, z = 0, label = "House, Muldraugh" },
+    { x = 11063, y = 10638, z = 0, label = "Remote, Muldraugh" },
+    { x = 10687, y = 9563, z = 0, label = "House, Muldraugh" },
+    { x = 10856, y = 10138, z = 0, label = "House, Muldraugh" },
+    { x = 10090, y = 8260, z = 0, label = "House, Muldraugh" },
+    { x = 9344, y = 10295, z = 0, label = "Remote, Muldraugh" },
+    { x = 9641, y = 10152, z = 0, label = "Office, Muldraugh" },
+    { x = 4832, y = 6280, z = 0, label = "Communications, Riverside" },
+    { x = 6782, y = 5446, z = 0, label = "House, Riverside" },
+    { x = 8001, y = 11440, z = 0, label = "Office, Rosewood" },
+    { x = 7920, y = 11512, z = 0, label = "House, Rosewood" },
+    { x = 8341, y = 11750, z = 0, label = "House, Rosewood" },
+    { x = 8833, y = 11609, z = 0, label = "House, Rosewood" },
+    { x = 13887, y = 4040, z = 0, label = "House, Valley Station" },
+    { x = 14070, y = 5203, z = 0, label = "House, Valley Station" },
+    { x = 13101, y = 5303, z = 0, label = "Remote, Valley Station" },
+    { x = 14396, y = 4568, z = 0, label = "House, West Point" },
+    { x = 10095, y = 6654, z = 0, label = "House, West Point" },
+    { x = 11985, y = 6943, z = 0, label = "Office, West Point" },
+    { x = 6470, y = 5311, z = 0, label = "Office, Riverside" },
+    { x = 6538, y = 5187, z = 0, label = "Office, Riverside" },
+    { x = 6289, y = 5331, z = 0, label = "Office, Riverside" },
+    { x = 6484, y = 6170, z = 0, label = "Remote, Doe Valley Lake" },
+}
+
+-- Fisher-Yates partial shuffle (ZombRand, no math.random -- see
+-- scatterIntoExisting's own header for why) -- picks `count` distinct
+-- entries from `pool` without replacement, without mutating pool
+-- itself.
+local function pickRandomDistinct(pool, count)
+    local working = {}
+    for i, v in ipairs(pool) do working[i] = v end
+
+    local picked = {}
+    local n = #working
+    for i = 1, math.min(count, n) do
+        local idx = ZombRand(n - i + 1) + 1
+        picked[i] = working[idx]
+        working[idx] = working[n - i + 1]
+    end
+    return picked
+end
+
+local function runMapScatter(p)
+    local points = pickRandomDistinct(MAP_SCATTER_POOL, MAP_SCATTER_POINT_COUNT)
+
+    print("TWR.Debug: runMapScatter -- queuing " .. #points .. " RANDOMLY-CHOSEN real houses/offices, radius 5, will place as each area loads:")
+    for i, point in ipairs(points) do
+        print("TWR.Debug: runMapScatter -- point " .. i .. ": (" .. point.x .. "," .. point.y .. "," .. point.z .. ") " .. tostring(point.label))
+    end
+    TWR.Mechanics.Container.scatterAcrossMap(points, 5, 42, "Base.Twigs")
+end
+
 local function runDeferredArea(p)
     local okX, x = safeCall(p, "getX")
     local okY, y = safeCall(p, "getY")
@@ -233,6 +341,7 @@ end
 local MECHANICS = {
     container = runContainer,
     scatter = runScatter,
+    map_scatter = runMapScatter,
     deferred_area = runDeferredArea,
     corpse = runCorpse,
     door = runDoor,

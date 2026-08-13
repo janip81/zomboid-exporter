@@ -29,6 +29,15 @@ type eventStore interface {
 	// receive-disconnect records) -- see connections.go.
 	handleSessionEvent(ctx context.Context, ev *sessionEvent)
 
+	// handleTWRJobResult persists a parsed ThoseWhoRemainLog.txt
+	// "twr_job_result" line -- a ThoseWhoRemain mod world-mutation
+	// job's outcome (applied/retryable_error/final_error/
+	// deferred_world) -- into twr_job_attempts, and for a successful
+	// "applied" result, also into twr_world_artifacts. See twrlog.go
+	// for parsing and schema_postgres.sql's twr_job_attempts comment
+	// for the design rationale (spawn-result-tracking.md).
+	handleTWRJobResult(ctx context.Context, ev *twrEvent)
+
 	// getFileOffset/setFileOffset track how far into each PerkLog.txt file
 	// has been read, keyed by absolute path. This is what makes history
 	// gap-free across exporter restarts (including the very first run,

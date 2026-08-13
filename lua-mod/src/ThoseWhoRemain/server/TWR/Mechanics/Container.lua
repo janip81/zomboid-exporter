@@ -112,38 +112,142 @@ function Container.scatterIntoExisting(cell, centerX, centerY, z, radius, seed, 
         local idx = seededRandomIndex(#candidates)
         if not usedIndices[idx] then
             usedIndices[idx] = true
-            local okAdd = safeCall(candidates[idx].container, "AddItem", itemType)
+            -- FIX 2026-08-13: transmitCompleteItemToClients() (see the
+            -- REVERTED history this comment replaces, still true of why
+            -- that approach was wrong) was a full-object replace and is
+            -- NOT the targeted mechanism this needed. sendAddItemToContainer
+            -- (container, item) is that targeted mechanism -- CONFIRMED
+            -- real and already load-bearing elsewhere in this exact file:
+            -- lockByKey/lockByPadlock above call
+            -- `inv:AddItem(item)` followed by
+            -- `sendAddItemToContainer(inv, item)` to sync a single
+            -- server-added item into an already-existing, already-
+            -- client-loaded container (a player's inventory) without
+            -- recreating/replacing the container itself. A world
+            -- container is the same ItemContainer type under the hood --
+            -- applying the identical pattern here targets the single
+            -- added item instead of the whole object, so it should not
+            -- reproduce the ghost-duplicate bug transmitCompleteItemToClients
+            -- caused. AddItem(itemType) (a module string, not an item
+            -- instance) returns the newly-created item -- captured here
+            -- so sendAddItemToContainer has the exact instance to sync.
+            -- CONFIRMED live on dedicated MP 2026-08-13: item appeared in
+            -- the existing container with no relog required, and no
+            -- ghost/duplicate object -- the failure mode
+            -- transmitCompleteItemToClients caused.
+            local okAdd, addedItem = safeCall(candidates[idx].container, "AddItem", itemType)
             if okAdd then
                 placed = placed + 1
-                -- REVERTED 2026-08-12: transmitCompleteItemToClients()
-                -- was added here believing it fixed a sync gap (item
-                -- added server-side but invisible client-side), citing
-                -- MOFeedingTrough.lua as vanilla precedent. That
-                -- precedent was misread -- MOFeedingTrough only ever
-                -- calls it on a BRAND-NEW object it just constructed
-                -- (ReplaceExistingObject destroys the old one via
-                -- square:transmitRemoveItemFromSquare THEN builds a
-                -- fresh IsoFeedingTrough before transmitting) -- there
-                -- is no real vanilla precedent for calling it on an
-                -- already-existing, already-client-loaded worldgen
-                -- object. LIVE CONFIRMED this causes real harm: the
-                -- user reported the item appearing in the
-                -- inventory-adjacent loot panel while the visually
-                -- clicked wall shelf stayed empty -- a duplicate ghost
-                -- copy of the object was created client-side rather
-                -- than the original being updated in place. Reverted
-                -- rather than risk further ghost/duplicate objects in a
-                -- real save. scatterIntoExisting's original sync gap
-                -- (item added server-side, not reliably visible without
-                -- a relog) is UNRESOLVED -- do not call this on existing
-                -- containers again without a genuinely different,
-                -- targeted sync mechanism (not full-object transmit).
+                if addedItem then
+                    pcall(function() sendAddItemToContainer(candidates[idx].container, addedItem) end)
+                end
                 print("TWR.Mechanics.Container: scatterIntoExisting -- placed " .. itemType .. " at (" .. candidates[idx].x .. "," .. candidates[idx].y .. "," .. z .. ")")
             end
         end
     end
 
     return placed
+end
+
+-- Scatters itemType across many widely-separated points on the map (a
+-- flyer pinned up in houses/offices all over town, not one small
+-- radius) -- e.g. { {x=10182,y=12791,z=0}, {x=8341,y=11750,z=0}, ... }.
+-- Each point gets exactly ONE item placed into whatever existing
+-- container scatterIntoExisting finds within radius tiles of it (seed
+-- reused per-point so repeat runs against the same point are
+-- reproducible; different points naturally scan different candidate
+-- sets so this is not the "same subset every time" concern
+-- scatterIntoExisting's own header warns about for a single center).
+--
+-- Does NOT scan the whole map up front -- most of those points are far
+-- from any player and their squares are not resident server-side yet
+-- (CONFIRMED live, see DeferredArea.lua's header). Each point is queued
+-- independently via DeferredArea.waitForSquare and only actually placed
+-- once a player's proximity causes that square to load -- matches TEST
+-- M's proven production pattern (verified anchor -> wait for real chunk
+-- load -> scan -> place), just fanned out to many anchors at once
+-- instead of one.
+--
+-- Returns the list of DeferredArea watcher handles (one per point, in
+-- the same order as `points`), so a caller can DeferredArea.cancel()
+-- any still-pending ones early if needed.
+function Container.scatterAcrossMap(points, radius, seed, itemType)
+    local handles = {}
+    for i, point in ipairs(points) do
+        -- Ad-hoc per-point job id -- no real DB-driven job dispatcher
+        -- exists yet (see Emit.lua's header / spawn-result-tracking.md),
+        -- so this just needs to be locally unique enough to tell two
+        -- attempts apart in twr_job_attempts, not a real durable job
+        -- identity. ZombRand, not os.time -- CONFIRMED nowhere in this
+        -- codebase uses os.* (Kahlua support unconfirmed), ZombRand is
+        -- already proven throughout (keyId generation etc).
+        local jobId = "debug-mapscatter-" .. ZombRand(1000000000) .. "-" .. i
+
+        handles[i] = TWR.Mechanics.DeferredArea.waitForSquare(point.x, point.y, point.z, function(square)
+            local okCell, cell = pcall(function() return getCell() end)
+            if not okCell or not cell then return end
+
+            -- FIX 2026-08-13: CONFIRMED live a real POI anchor can miss
+            -- at the base radius (4/5 real building anchors hit on the
+            -- first try at radius 5, 1 came back placed=0 -- the anchor
+            -- coordinate itself was probably on the street rather than
+            -- deep enough into the building). Retry the SAME anchor with
+            -- a widening radius instead of just giving up -- the square
+            -- is already loaded from waitForSquare above, so no need to
+            -- defer again, this is an immediate in-place retry.
+            local placed = 0
+            local usedRadius = radius
+            local attempt = 0
+            for a = 1, 3 do
+                attempt = a
+                usedRadius = radius * a
+                placed = Container.scatterIntoExisting(cell, point.x, point.y, point.z, usedRadius, seed + i, 1, itemType)
+                if placed > 0 then break end
+            end
+            print("TWR.Mechanics.Container: scatterAcrossMap -- point " .. i .. " (" .. point.x .. "," .. point.y .. "," .. point.z .. ") placed=" .. placed .. " (radius used=" .. usedRadius .. ")")
+
+            -- Success-first logging (spawn-result-tracking.md): ONE
+            -- durable outcome per point here, not one per internal
+            -- radius-retry probe above (those stay in the print() above
+            -- only, for live debugging).
+            if placed > 0 then
+                pcall(function()
+                    TWR.Emit.jobResult({
+                        jobId = jobId,
+                        attemptNo = attempt,
+                        actionType = "scatter_items",
+                        mechanic = "Container.scatterAcrossMap",
+                        result = "applied",
+                        placed = placed,
+                        requested = 1,
+                        artifactKey = jobId .. "-artifact",
+                        x = point.x,
+                        y = point.y,
+                        z = point.z,
+                        targetType = "container",
+                    })
+                end)
+            else
+                pcall(function()
+                    TWR.Emit.jobResult({
+                        jobId = jobId,
+                        attemptNo = attempt,
+                        actionType = "scatter_items",
+                        mechanic = "Container.scatterAcrossMap",
+                        result = "final_error",
+                        errorCode = "NO_ELIGIBLE_TARGET",
+                        errorDetail = "no existing container found within radius " .. usedRadius .. " after " .. attempt .. " attempt(s)",
+                        placed = 0,
+                        requested = 1,
+                        x = point.x,
+                        y = point.y,
+                        z = point.z,
+                    })
+                end)
+            end
+        end)
+    end
+    return handles
 end
 
 -- Spawns a brand-new lootable box (real IsoThumpable + ItemContainer)

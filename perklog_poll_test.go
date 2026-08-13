@@ -15,6 +15,7 @@ type fakeStore struct {
 	logins         int
 	skills         int
 	exporterEvents int
+	twrJobResults  int
 }
 
 func newFakeStore() *fakeStore {
@@ -28,6 +29,7 @@ func (f *fakeStore) handleLevelChanged(ctx context.Context, ev *perkEvent)      
 func (f *fakeStore) handleSkills(ctx context.Context, ev *perkEvent)            { f.skills++ }
 func (f *fakeStore) handleExporterEvent(ctx context.Context, ev *exporterEvent) { f.exporterEvents++ }
 func (f *fakeStore) handleSessionEvent(ctx context.Context, ev *sessionEvent)   { f.sessionEvents++ }
+func (f *fakeStore) handleTWRJobResult(ctx context.Context, ev *twrEvent)       { f.twrJobResults++ }
 func (f *fakeStore) Close()                                                     {}
 
 func (f *fakeStore) getFileOffset(ctx context.Context, path string) (int64, error) {

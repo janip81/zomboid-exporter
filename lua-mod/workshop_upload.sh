@@ -109,10 +109,18 @@ cat > "$VDF_FILE" <<EOF
     "publishedfileid" "$WORKSHOP_ID"
     "contentfolder"  "$CONTENT_FOLDER"
     "previewfile"    "$PREVIEW_FILE"
-    "visibility"     "2"
+    "visibility"     "3"
     "changenote"     "$SAFE_CHANGENOTE"
 }
 EOF
+# FIX 2026-08-13: visibility was "2" here, which is Steam's
+# ERemoteStoragePublishedFileVisibility Private (0=Public, 1=FriendsOnly,
+# 2=Private, 3=Unlisted) -- NOT Unlisted as workshop.txt/WORKSHOP_UPLOAD.md
+# claim. CONFIRMED live: this broke both a connecting client
+# (ConnectToServerState: CheckItemState -> Fail) and even an anonymous
+# `steamcmd +workshop_download_item` (Access Denied) once an upload had
+# run with the old value -- a private item is not fetchable by anyone but
+# the owning account. Corrected to 3.
 
 echo "==> Uploading $MOD (Workshop id $WORKSHOP_ID) via steamcmd..."
 echo "==> Release note: $SAFE_CHANGENOTE"

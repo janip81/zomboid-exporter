@@ -430,6 +430,65 @@ func (s *pgStore) handleSessionEvent(ctx context.Context, ev *sessionEvent) {
 	}
 }
 
+// handleTWRJobResult persists one twr_job_result line into
+// twr_job_attempts (always) and, only for a genuinely successful
+// "applied" result, twr_world_artifacts too -- see
+// spawn-result-tracking.md's "a failed spawn must never create a fake
+// artifact row" rule. ON CONFLICT DO NOTHING on the artifact insert
+// keeps this idempotent-safe if the same line is ever reprocessed
+// (checkpoint edge case), rather than erroring on the UNIQUE
+// (artifact_key, server) constraint.
+func (s *pgStore) handleTWRJobResult(ctx context.Context, ev *twrEvent) {
+	f := ev.Fields
+	jobID := twrStringField(f, "jobId")
+	if jobID == "" {
+		slog.Warn("dropping twr_job_result with no jobId")
+		return
+	}
+	attemptNo, _ := twrIntField(f, "attemptNo")
+	if attemptNo == 0 {
+		attemptNo = 1
+	}
+	result := twrStringField(f, "result")
+	placed, hasPlaced := twrIntField(f, "placed")
+	requested, hasRequested := twrIntField(f, "requested")
+
+	var placedPtr, requestedPtr *int
+	if hasPlaced {
+		placedPtr = &placed
+	}
+	if hasRequested {
+		requestedPtr = &requested
+	}
+
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO twr_job_attempts (job_id, attempt_no, idempotency_key, action_type, mechanic, result, error_code, error_detail, placed_count, requested_count, occurred_at, server)
+		VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), $9, $10, $11, $12)
+	`, jobID, attemptNo, twrStringField(f, "idempotencyKey"), twrStringField(f, "actionType"), twrStringField(f, "mechanic"), result,
+		twrStringField(f, "errorCode"), twrStringField(f, "errorDetail"), placedPtr, requestedPtr, ev.Timestamp, s.serverName); err != nil {
+		slog.Warn("insert twr_job_attempts failed", "jobId", jobID, "err", err)
+		return
+	}
+
+	if result != "applied" {
+		return
+	}
+	artifactKey := twrStringField(f, "artifactKey")
+	x, hasX := twrIntField(f, "x")
+	y, hasY := twrIntField(f, "y")
+	z, hasZ := twrIntField(f, "z")
+	if artifactKey == "" || !hasX || !hasY || !hasZ {
+		return
+	}
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO twr_world_artifacts (artifact_key, job_id, artifact_type, x, y, z, target_summary, applied_at, server)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9)
+		ON CONFLICT (artifact_key, server) DO NOTHING
+	`, artifactKey, jobID, twrStringField(f, "targetType"), x, y, z, twrStringField(f, "mechanic"), ev.Timestamp, s.serverName); err != nil {
+		slog.Warn("insert twr_world_artifacts failed", "artifactKey", artifactKey, "err", err)
+	}
+}
+
 func (s *pgStore) getFileOffset(ctx context.Context, path string) (int64, error) {
 	var offset int64
 	err := s.pool.QueryRow(ctx, `SELECT byte_offset FROM processed_files WHERE file_path = $1`, path).Scan(&offset)

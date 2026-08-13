@@ -76,6 +76,44 @@ CREATE TABLE IF NOT EXISTS processed_files (
     byte_offset INTEGER NOT NULL
 );
 
+-- ThoseWhoRemain (TWR) mod result tracking -- SQLite mirror of
+-- schema_postgres.sql's twr_job_attempts/twr_world_artifacts, see that
+-- file's comments for the full rationale.
+CREATE TABLE IF NOT EXISTS twr_job_attempts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id           TEXT NOT NULL,
+    attempt_no       INTEGER NOT NULL DEFAULT 1,
+    idempotency_key  TEXT,
+    action_type      TEXT NOT NULL,
+    mechanic         TEXT NOT NULL,
+    result           TEXT NOT NULL,
+    error_code       TEXT,
+    error_detail     TEXT,
+    placed_count     INTEGER,
+    requested_count  INTEGER,
+    occurred_at      TEXT NOT NULL,
+    server           TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_twr_job_attempts_job_id ON twr_job_attempts (job_id, attempt_no);
+CREATE INDEX IF NOT EXISTS idx_twr_job_attempts_time ON twr_job_attempts (occurred_at DESC);
+
+CREATE TABLE IF NOT EXISTS twr_world_artifacts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_key     TEXT NOT NULL,
+    job_id           TEXT NOT NULL,
+    artifact_type    TEXT NOT NULL,
+    x                INTEGER NOT NULL,
+    y                INTEGER NOT NULL,
+    z                INTEGER NOT NULL,
+    target_summary   TEXT,
+    applied_at       TEXT NOT NULL,
+    server           TEXT NOT NULL DEFAULT '',
+    UNIQUE (artifact_key, server)
+);
+
+CREATE INDEX IF NOT EXISTS idx_twr_world_artifacts_job_id ON twr_world_artifacts (job_id);
+
 -- discord-bot owns and applies its own tables via its own schema file --
 -- not here. See discord-bot/schema_postgres.sql's comment for why (also
 -- moot in practice since discord-bot currently only supports a Postgres

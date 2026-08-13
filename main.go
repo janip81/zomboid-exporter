@@ -317,6 +317,7 @@ func main() {
 
 	go runPerkLogPipeline(ctx, *dataPath, *serverName, perkMetrics, db)
 	go runExporterLogPipeline(ctx, *dataPath, db, mqttPub)
+	go runTWRLogPipeline(ctx, *dataPath, db)
 	go runConnectionsPipeline(ctx, *dataPath, db)
 
 	mux := http.NewServeMux()
