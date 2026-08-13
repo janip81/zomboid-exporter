@@ -48,6 +48,7 @@ local MECHANIC_LABELS = {
     { key = "fixture_kvls", label = "Spawn key+VHS fixture (P4 KVLS-1/2 test)" },
     { key = "find_nearby_tv", label = "Find nearby TV/radio (VHS-A probe, read-only)" },
     { key = "check_tv_content", label = "Check what TV is playing (VHS-E probe, read-only)" },
+    { key = "vhs_lines_test", label = "VHS-LINES-1: native caption test (insert into real TV, vanilla UI only)" },
     -- map_reveal DISABLED 2026-08-12 -- suspected of wiping previously-
     -- explored map data on a real dedicated MP client (confirmed prior
     -- exploration disappeared after a legitimate, small-radius reveal

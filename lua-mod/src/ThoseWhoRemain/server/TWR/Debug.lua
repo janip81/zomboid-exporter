@@ -394,6 +394,38 @@ local function runRecordedMedia(p)
     print("TWR.Debug: runRecordedMedia -- gave dummy VHS tape " .. (okAdd and "SUCCEEDED (no watch path wired yet -- needs a real TV)" or "FAILED"))
 end
 
+-- VHS-LINES-1 decisive probe (antagonist/tests/
+-- vhs-live-handoff-chatgpt-response.md). Gives a tape bound to
+-- twr.native.lines.test.001 (see shared/TWR/RecordedMediaRegistry.lua
+-- -- registered with real addLine() content). Insert+play through the
+-- REAL vanilla TV UI ONLY -- no ISMediaInfo, no TWR.Context.watchTape,
+-- no TWR overlay of any kind (there isn't one to use anyway, already
+-- removed). PASS = "TWR NATIVE LINE ONE"/"TWR NATIVE LINE TWO" appear
+-- as native in-world scrolling captions, same presentation as a real
+-- vanilla tape.
+local function runVHSLinesTest(p)
+    local okInv, inventory = safeCall(p, "getInventory")
+    if not okInv or not inventory then return end
+
+    local item, err = TWR.Mechanics.RecordedMedia.buildItem({
+        contentId = "twr.native.lines.test.001",
+        mediaId = "TWR_NATIVE_LINES_TEST_001",
+        displayName = "TWR Native Lines Test",
+        lines = { "TWR NATIVE LINE ONE", "TWR NATIVE LINE TWO" },
+        discoveryKey = "twr_native_lines_test_001",
+    })
+    if not item then
+        print("TWR.Debug: runVHSLinesTest -- buildItem FAILED: " .. tostring(err))
+        return
+    end
+
+    local okAdd = safeCall(inventory, "AddItem", item)
+    if okAdd then
+        pcall(function() sendAddItemToContainer(inventory, item) end)
+    end
+    print("TWR.Debug: runVHSLinesTest -- gave VHS-LINES-1 test tape " .. (okAdd and "SUCCEEDED -- insert into a REAL TV via the normal vanilla UI, turn it on, press Play. Watch for native scrolling captions." or "FAILED"))
+end
+
 -- P3 (controlled key) debug test -- gives a key with a fixed,
 -- hardcoded-for-the-test keyId directly to the triggering admin.
 -- Running this twice in a row should give two keys that are
@@ -664,6 +696,7 @@ local MECHANICS = {
     fixture_kvls = runFixtureKVLS,
     find_nearby_tv = runFindNearbyTV,
     check_tv_content = runCheckTVContent,
+    vhs_lines_test = runVHSLinesTest,
     -- map_reveal DISABLED SERVER-SIDE 2026-08-12 -- removing only the
     -- client-side button (client/TWR/Context/Debug.lua) was NOT enough:
     -- a client on a stale/not-yet-updated Workshop version still had

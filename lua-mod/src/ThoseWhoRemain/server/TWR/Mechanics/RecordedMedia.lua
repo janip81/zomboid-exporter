@@ -109,14 +109,26 @@ function RecordedMedia.buildItem(payload)
     -- vanilla TV's insert UI on its own -- it must be bound to a real
     -- registered RecordedMediaData via setRecordedMediaData(), or
     -- RWMMedia.lua's own verifyItem() gate (isRecordedMedia() check)
-    -- rejects it. See shared/TWR/RecordedMediaRegistry.lua for the
-    -- carrier this binds to -- every TWR tape shares the SAME carrier
-    -- MediaData identity; each tape's real identity/content still
-    -- lives in ITS OWN modData below, not in the carrier.
-    if TWR.RecordedMediaRegistry and TWR.RecordedMediaRegistry.carrierMediaData then
-        safeCall(item, "setRecordedMediaData", TWR.RecordedMediaRegistry.carrierMediaData)
+    -- rejects it.
+    --
+    -- REVISED 2026-08-13 per CGPT-020: no longer one shared carrier
+    -- for every tape (that design cannot represent different native
+    -- caption content per recording -- rejected). One MediaData PER
+    -- DISTINCT payload.contentId instead (shared/TWR/
+    -- RecordedMediaRegistry.lua), so vanilla's own native line/caption
+    -- playback can show the real DB-fed text with zero TWR-owned UI.
+    -- Multiple physical copies of the same contentId simply bind to
+    -- the same registry entry.
+    local okReg, registryData = false, nil
+    if payload.contentId and TWR.RecordedMediaRegistry and TWR.RecordedMediaRegistry.registry then
+        registryData = TWR.RecordedMediaRegistry.registry[payload.contentId]
+        okReg = registryData ~= nil
+    end
+    if okReg then
+        safeCall(item, "setRecordedMediaData", registryData)
     else
-        print("TWR.Mechanics.RecordedMedia: buildItem -- WARNING: carrier MediaData not registered yet, item will likely be rejected by a real TV's insert UI")
+        print("TWR.Mechanics.RecordedMedia: buildItem -- WARNING: no registered MediaData for contentId="
+            .. tostring(payload.contentId) .. " (add it to shared/TWR/RecordedMediaRegistry.lua's DUMMY_CONTENT table) -- item will likely be rejected by a real TV's insert UI")
     end
 
     local text = table.concat(payload.lines or { "dummy test content" }, "\n")
