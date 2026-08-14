@@ -779,6 +779,123 @@ local function runCheckMediaIdentity(p)
     print("TWR.Debug: runCheckMediaIdentity -- scan complete, checked " .. checked .. " device(s) with hasMedia=true")
 end
 
+-- VHS-EJECT-IDENTITY probe (antagonist/tests/
+-- vhs-live-handoff-chatgpt-response.md): gives a tape with a known
+-- itemID (printed here), custom display name, TWR_contentId/
+-- TWR_discoveryKey, and one extra harmless marker
+-- (TWR_ejectTestMarker). Insert it into a real TV, optionally play,
+-- then EJECT it through the normal vanilla UI. Run
+-- check_vhs_eject_item afterward to see what survived.
+local function runVHSEjectTest(p)
+    local okInv, inventory = safeCall(p, "getInventory")
+    if not okInv or not inventory then return end
+
+    local item, err = TWR.Mechanics.RecordedMedia.buildItem({
+        contentId = "twr.native.lines.test.001",
+        mediaId = "TWR_EJECT_TEST_001",
+        displayName = "TWR Eject Test Tape",
+        lines = { "TWR NATIVE LINE ONE", "TWR NATIVE LINE TWO" },
+        discoveryKey = "twr_eject_test_001",
+    })
+    if not item then
+        print("TWR.Debug: runVHSEjectTest -- buildItem FAILED: " .. tostring(err))
+        return
+    end
+
+    local okData, modData = safeCall(item, "getModData")
+    if okData and modData then
+        modData.TWR_ejectTestMarker = "EJECT_MARKER_12345"
+    end
+
+    local okId, itemId = safeCall(item, "getID")
+    local okAdd = safeCall(inventory, "AddItem", item)
+    if okAdd then
+        pcall(function() sendAddItemToContainer(inventory, item) end)
+    end
+    print("TWR.Debug: runVHSEjectTest -- gave VHS-EJECT-IDENTITY test tape " .. (okAdd and "SUCCEEDED" or "FAILED")
+        .. " -- itemID=" .. describe(okId, itemId) .. " displayName='TWR Eject Test Tape' marker=EJECT_MARKER_12345."
+        .. " Insert into a real TV, optionally play, then EJECT through the normal vanilla UI, then run check_vhs_eject_item.")
+end
+
+-- Companion probe for VHS-EJECT-IDENTITY: scans the player's inventory
+-- AND nearby containers/ground (same radius-2 pattern as
+-- RecordedMedia.lua's findNearbyItemById) for any item carrying
+-- TWR_isVHS, and reports itemID/name/modData/resolved MediaData
+-- identity so it can be compared against runVHSEjectTest's printed
+-- itemID from before insertion.
+local EJECT_CHECK_RADIUS = 2
+
+local function runCheckVHSEjectItem(p)
+    local okX, x = safeCall(p, "getX")
+    local okY, y = safeCall(p, "getY")
+    local okZ, z = safeCall(p, "getZ")
+    if not (okX and okY and okZ) then return end
+
+    local okCell, cell = pcall(function() return getCell() end)
+    if not okCell or not cell then return end
+
+    local function reportItem(item, source)
+        local okId, itemId = safeCall(item, "getID")
+        local okName, name = safeCall(item, "getName")
+        local okData, modData = safeCall(item, "getModData")
+        local isTWR = okData and modData and modData.TWR_isVHS
+        local okMD, mediaData = safeCall(item, "getRecordedMediaData")
+        local resolvedContentId = okMD and mediaData and findContentIdForMediaData(mediaData)
+        print("TWR.Debug: runCheckVHSEjectItem -- [" .. source .. "] itemID=" .. describe(okId, itemId)
+            .. " name=" .. describe(okName, name)
+            .. " TWR_isVHS=" .. tostring(isTWR)
+            .. " TWR_contentId=" .. tostring(isTWR and modData.TWR_contentId or nil)
+            .. " TWR_discoveryKey=" .. tostring(isTWR and modData.TWR_discoveryKey or nil)
+            .. " TWR_ejectTestMarker=" .. tostring(isTWR and modData.TWR_ejectTestMarker or nil)
+            .. " resolvedMediaDataContentId=" .. tostring(resolvedContentId))
+    end
+
+    local found = 0
+    local okInv, inv = safeCall(p, "getInventory")
+    if okInv and inv then
+        local okItems, items = safeCall(inv, "getItems")
+        if okItems and items then
+            for i = 0, items:size() - 1 do
+                local item = items:get(i)
+                local okData, modData = safeCall(item, "getModData")
+                if okData and modData and modData.TWR_isVHS then
+                    found = found + 1
+                    reportItem(item, "inventory")
+                end
+            end
+        end
+    end
+
+    for dx = -EJECT_CHECK_RADIUS, EJECT_CHECK_RADIUS do
+        for dy = -EJECT_CHECK_RADIUS, EJECT_CHECK_RADIUS do
+            local okSq, square = pcall(function() return cell:getGridSquare(math.floor(x) + dx, math.floor(y) + dy, math.floor(z)) end)
+            if okSq and square then
+                local okObjs, objects = safeCall(square, "getObjects")
+                if okObjs and objects then
+                    for i = 0, objects:size() - 1 do
+                        local okC, container = safeCall(objects:get(i), "getContainer")
+                        if okC and container then
+                            local okItems, items = safeCall(container, "getItems")
+                            if okItems and items then
+                                for j = 0, items:size() - 1 do
+                                    local item = items:get(j)
+                                    local okData, modData = safeCall(item, "getModData")
+                                    if okData and modData and modData.TWR_isVHS then
+                                        found = found + 1
+                                        reportItem(item, "square(" .. (math.floor(x) + dx) .. "," .. (math.floor(y) + dy) .. ")")
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    print("TWR.Debug: runCheckVHSEjectItem -- scan complete, found " .. found .. " TWR VHS item(s)")
+end
+
 local function runCoords(p)
     local okX, x = safeCall(p, "getX")
     local okY, y = safeCall(p, "getY")
@@ -812,6 +929,8 @@ local MECHANICS = {
     vhs_lines_test = runVHSLinesTest,
     vhs_lines_test_2 = runVHSLinesTest2,
     check_media_identity = runCheckMediaIdentity,
+    vhs_eject_test = runVHSEjectTest,
+    check_vhs_eject_item = runCheckVHSEjectItem,
     -- map_reveal DISABLED SERVER-SIDE 2026-08-12 -- removing only the
     -- client-side button (client/TWR/Context/Debug.lua) was NOT enough:
     -- a client on a stale/not-yet-updated Workshop version still had

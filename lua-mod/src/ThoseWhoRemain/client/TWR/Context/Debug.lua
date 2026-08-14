@@ -52,6 +52,8 @@ local MECHANIC_LABELS = {
     { key = "vhs_lines_test", label = "VHS-LINES-1: native caption test (insert into real TV, vanilla UI only)" },
     { key = "vhs_lines_test_2", label = "VHS-LINES-2: second distinct tape (eject test.001 first, must not cross content)" },
     { key = "check_media_identity", label = "Check TV media identity (getMediaData->contentId probe, read-only)" },
+    { key = "vhs_eject_test", label = "VHS-EJECT-IDENTITY: give marked tape (insert, eject, then run the check probe)" },
+    { key = "check_vhs_eject_item", label = "VHS-EJECT-IDENTITY: check ejected tape identity (run after ejecting)" },
     -- map_reveal DISABLED 2026-08-12 -- suspected of wiping previously-
     -- explored map data on a real dedicated MP client (confirmed prior
     -- exploration disappeared after a legitimate, small-radius reveal
