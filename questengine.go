@@ -194,10 +194,23 @@ func qePollSleepSignals(ctx context.Context, pg *pgStore) error {
 // qePollMediaPlaybackSignals translates new twr_job_attempts rows with
 // action_type='recorded_media_viewed' (written by TWR.Mechanics.
 // RecordedMedia.pollDeviceMedia -- confirmed live 2026-08-13/14, see
-// server/TWR/Mechanics/RecordedMedia.lua) into media_playback_completed
-// twr_signals rows. artifact_key on twr_job_attempts holds the
-// contentId (added 2026-08-14 alongside steam_id specifically to
-// support this -- see schema_postgres.sql's comment on that column).
+// server/TWR/Mechanics/RecordedMedia.lua) into recorded_media_viewed
+// twr_signals rows -- same name as the source action_type, deliberately.
+//
+// FIX (ChatGPT review CGPT-G1-01, 2026-08-14): this signal was
+// originally named media_playback_completed, which overclaims what
+// pollDeviceMedia() actually proves. That function detects a nearby TWR
+// recording ACTIVELY PLAYING (isPlayingMedia()==true) at poll time --
+// it does not prove the tape reached its final line/end, and no
+// end-of-media signal has been source/live-proven yet. Naming the
+// signal "completed" would silently reintroduce the exact semantic
+// overclaim already deliberately removed from the old Tier-1 VHS path
+// this session. "recorded_media_viewed" honestly describes what's
+// proven: the player was observed viewing/listening to this content.
+//
+// artifact_key on twr_job_attempts holds the contentId (added
+// 2026-08-14 alongside steam_id specifically to support this -- see
+// schema_postgres.sql's comment on that column).
 func qePollMediaPlaybackSignals(ctx context.Context, pg *pgStore) error {
 	lastID, err := qeGetCursor(ctx, pg, "media_playback_attempts")
 	if err != nil {
@@ -243,7 +256,7 @@ func qePollMediaPlaybackSignals(ctx context.Context, pg *pgStore) error {
 			dedupeKey := fmt.Sprintf("media-attempt-%d", r.id)
 			if _, err := pg.pool.Exec(ctx, `
 				INSERT INTO twr_signals (signal_type, occurred_at, steam_id, source_type, source_ref, dedupe_key, payload)
-				VALUES ('media_playback_completed', $1, $2, 'twr_event', $3, $4, $5)
+				VALUES ('recorded_media_viewed', $1, $2, 'twr_event', $3, $4, $5)
 				ON CONFLICT (dedupe_key) DO NOTHING
 			`, r.occurredAt, r.steamID, fmt.Sprintf("%d", r.id), dedupeKey, payload); err != nil {
 				return err
@@ -266,21 +279,36 @@ func qePollMediaPlaybackSignals(ctx context.Context, pg *pgStore) error {
 // until the real DB dispatcher exists" case the KVLS fixture doc
 // describes for its own Step 00.
 func qeArmCampaignActivationSteps(ctx context.Context, pg *pgStore) error {
+	// FIX (ChatGPT review CGPT-G1-02, 2026-08-14): originally this only
+	// selected state='locked', so a crash/error between the arm UPDATE
+	// committing and qeTriggerStep() completing left the step stranded
+	// in 'armed' forever -- campaign_activation has no external
+	// twr_signals row to re-trigger it later (unlike every other
+	// trigger_type), and nothing else ever looks at an already-armed
+	// campaign_activation step. Now selects locked OR armed and always
+	// calls qeTriggerStep(), which is itself idempotent (its own
+	// `WHERE state = 'armed'` guard makes a repeat call on an
+	// already-triggered step a safe no-op) -- so a locked step gets
+	// armed-then-triggered, and a stranded armed step just gets
+	// retriggered on the next tick until it succeeds.
 	rows, err := pg.pool.Query(ctx, `
-		SELECT si.id, sd.id
+		SELECT si.id, sd.id, si.state
 		FROM twr_step_instances si
 		JOIN twr_step_definitions sd ON sd.id = si.step_definition_id
 		JOIN twr_quest_instances qi ON qi.id = si.quest_instance_id
-		WHERE si.state = 'locked' AND sd.trigger_type = 'campaign_activation' AND qi.state = 'active'
+		WHERE si.state IN ('locked', 'armed') AND sd.trigger_type = 'campaign_activation' AND qi.state = 'active'
 	`)
 	if err != nil {
 		return err
 	}
-	type row struct{ stepInstanceID, stepDefinitionID int64 }
+	type row struct {
+		stepInstanceID, stepDefinitionID int64
+		state                            string
+	}
 	var toArm []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.stepInstanceID, &r.stepDefinitionID); err != nil {
+		if err := rows.Scan(&r.stepInstanceID, &r.stepDefinitionID, &r.state); err != nil {
 			rows.Close()
 			return err
 		}
@@ -293,10 +321,12 @@ func qeArmCampaignActivationSteps(ctx context.Context, pg *pgStore) error {
 	rows.Close()
 
 	for _, r := range toArm {
-		if _, err := pg.pool.Exec(ctx, `UPDATE twr_step_instances SET state='armed', armed_at=now() WHERE id = $1 AND state = 'locked'`, r.stepInstanceID); err != nil {
-			return err
+		if r.state == "locked" {
+			if _, err := pg.pool.Exec(ctx, `UPDATE twr_step_instances SET state='armed', armed_at=now() WHERE id = $1 AND state = 'locked'`, r.stepInstanceID); err != nil {
+				return err
+			}
 		}
-		if err := qeTriggerStep(ctx, pg, r.stepInstanceID, r.stepDefinitionID, nil); err != nil {
+		if err := qeTriggerStep(ctx, pg, r.stepInstanceID, r.stepDefinitionID, nil, nil); err != nil {
 			return err
 		}
 	}
@@ -316,7 +346,7 @@ func qeEvaluateArmedSteps(ctx context.Context, pg *pgStore) error {
 	}
 
 	rows, err := pg.pool.Query(ctx, `
-		SELECT id, signal_type, payload
+		SELECT id, signal_type, steam_id, payload
 		FROM twr_signals
 		WHERE id > $1
 		ORDER BY id
@@ -327,12 +357,13 @@ func qeEvaluateArmedSteps(ctx context.Context, pg *pgStore) error {
 	type sigRow struct {
 		id         int64
 		signalType string
+		steamID    *string
 		payload    []byte
 	}
 	var signals []sigRow
 	for rows.Next() {
 		var r sigRow
-		if err := rows.Scan(&r.id, &r.signalType, &r.payload); err != nil {
+		if err := rows.Scan(&r.id, &r.signalType, &r.steamID, &r.payload); err != nil {
 			rows.Close()
 			return err
 		}
@@ -345,7 +376,7 @@ func qeEvaluateArmedSteps(ctx context.Context, pg *pgStore) error {
 	rows.Close()
 
 	for _, sig := range signals {
-		if err := qeEvaluateOneSignal(ctx, pg, sig.id, sig.signalType, sig.payload); err != nil {
+		if err := qeEvaluateOneSignal(ctx, pg, sig.id, sig.signalType, sig.steamID, sig.payload); err != nil {
 			return err
 		}
 		lastID = sig.id
@@ -357,26 +388,43 @@ func qeEvaluateArmedSteps(ctx context.Context, pg *pgStore) error {
 	return nil
 }
 
-func qeEvaluateOneSignal(ctx context.Context, pg *pgStore, signalID int64, signalType string, payloadRaw []byte) error {
+// qeEvaluateOneSignal finds ARMED steps whose trigger matches this
+// signal. FIX (ChatGPT review CGPT-G1-03/04, 2026-08-14): originally
+// matched candidates globally by trigger_type alone, ignoring
+// twr_quest_instances.scope_kind/scope_ref and the signal's own
+// steam_id entirely -- safe only by accident, since Gate 1's only real
+// quest (the KVLS fixture) happens to be world-scoped. If a
+// player-scoped instance existed, any player's matching signal could
+// have advanced another player's quest. Now implements "Option B" from
+// the review: scope_kind='world' matches any signal (unchanged
+// behavior); scope_kind='player' requires scope_ref to equal the
+// signal's steam_id (skipped entirely if the signal has no steam_id);
+// scope_kind='group' is not yet supported and fails closed (excluded).
+func qeEvaluateOneSignal(ctx context.Context, pg *pgStore, signalID int64, signalType string, signalSteamID *string, payloadRaw []byte) error {
 	var payload map[string]any
 	if err := json.Unmarshal(payloadRaw, &payload); err != nil {
 		payload = map[string]any{}
 	}
 
 	rows, err := pg.pool.Query(ctx, `
-		SELECT si.id, sd.id
+		SELECT si.id, sd.id, qi.scope_kind, qi.scope_ref
 		FROM twr_step_instances si
 		JOIN twr_step_definitions sd ON sd.id = si.step_definition_id
+		JOIN twr_quest_instances qi ON qi.id = si.quest_instance_id
 		WHERE si.state = 'armed' AND sd.trigger_type = $1
 	`, signalType)
 	if err != nil {
 		return err
 	}
-	type armedStep struct{ stepInstanceID, stepDefinitionID int64 }
+	type armedStep struct {
+		stepInstanceID, stepDefinitionID int64
+		scopeKind                        string
+		scopeRef                         *string
+	}
 	var candidates []armedStep
 	for rows.Next() {
 		var c armedStep
-		if err := rows.Scan(&c.stepInstanceID, &c.stepDefinitionID); err != nil {
+		if err := rows.Scan(&c.stepInstanceID, &c.stepDefinitionID, &c.scopeKind, &c.scopeRef); err != nil {
 			rows.Close()
 			return err
 		}
@@ -389,6 +437,19 @@ func qeEvaluateOneSignal(ctx context.Context, pg *pgStore, signalID int64, signa
 	rows.Close()
 
 	for _, c := range candidates {
+		switch c.scopeKind {
+		case "world":
+			// Matches any signal, regardless of who triggered it.
+		case "player":
+			if signalSteamID == nil || c.scopeRef == nil || *signalSteamID != *c.scopeRef {
+				continue
+			}
+		default:
+			// "group" and anything else: not implemented yet, fail
+			// closed rather than silently matching (CGPT-G1-03).
+			continue
+		}
+
 		ok, err := qeConditionsPass(ctx, pg, c.stepDefinitionID, payload)
 		if err != nil {
 			return err
@@ -397,7 +458,7 @@ func qeEvaluateOneSignal(ctx context.Context, pg *pgStore, signalID int64, signa
 			continue
 		}
 		sid := signalID
-		if err := qeTriggerStep(ctx, pg, c.stepInstanceID, c.stepDefinitionID, &sid); err != nil {
+		if err := qeTriggerStep(ctx, pg, c.stepInstanceID, c.stepDefinitionID, &sid, signalSteamID); err != nil {
 			return err
 		}
 	}
@@ -478,7 +539,11 @@ func qeEvaluateCondition(condType string, params, payload map[string]any) bool {
 // behavior). A step with no actions at all completes immediately
 // (there's nothing to wait on). signalID is nil for
 // campaign_activation-triggered steps, which have no real signal row.
-func qeTriggerStep(ctx context.Context, pg *pgStore, stepInstanceID, stepDefinitionID int64, signalID *int64) error {
+// steamID (added for CGPT-G1-04) is the triggering player's steam_id
+// when known -- persisted into triggered_by_steam_id as audit
+// information (who caused this progression), even for world-scope
+// quests where it isn't used for access control.
+func qeTriggerStep(ctx context.Context, pg *pgStore, stepInstanceID, stepDefinitionID int64, signalID *int64, steamID *string) error {
 	tx, err := pg.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -492,9 +557,9 @@ func qeTriggerStep(ctx context.Context, pg *pgStore, stepInstanceID, stepDefinit
 	// comment.
 	tag, err := tx.Exec(ctx, `
 		UPDATE twr_step_instances
-		SET state = 'triggered', triggered_at = now(), trigger_signal_id = $2
+		SET state = 'triggered', triggered_at = now(), trigger_signal_id = $2, triggered_by_steam_id = $3
 		WHERE id = $1 AND state = 'armed'
-	`, stepInstanceID, signalID)
+	`, stepInstanceID, signalID, steamID)
 	if err != nil {
 		return err
 	}
