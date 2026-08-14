@@ -135,6 +135,22 @@ func qdWriteFileAtomic(finalPath string, data []byte) error {
 		return err
 	}
 	tmpPath := tmp.Name()
+	// os.CreateTemp hardcodes mode 0600 (owner-only) regardless of
+	// umask. The pod's fsGroup makes the *group* owner "steam" (see
+	// helm-charts' statefulset.yaml), but that only affects group
+	// ownership, not these permission bits -- without this chmod the
+	// game server process (running as steam, not this container's
+	// nonroot UID) can never read the file it needs to poll. CONFIRMED
+	// live 2026-08-14: TRANSPORT-A sat DISPATCHED forever, repeatedly
+	// stale-lease redispatched, because getFileReader on the steam
+	// user was silently permission-denied on both manifest.txt and
+	// every job-<id>.txt. 0640 (owner rw, group r) is the minimum fix
+	// -- no world access, matching this mount's least-privilege intent.
+	if err := os.Chmod(tmpPath, 0o640); err != nil {
+		tmp.Close() //nolint:errcheck
+		os.Remove(tmpPath)
+		return err
+	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close() //nolint:errcheck
 		os.Remove(tmpPath)
