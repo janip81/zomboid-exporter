@@ -87,6 +87,34 @@ local function runContainer(p)
     print("TWR.Debug: runContainer -- box spawned one tile east, combination-locked to 123, contains a twig")
 end
 
+-- TEST K re-verify: padlock-lock path specifically (Container.lockByPadlock),
+-- not yet re-clicked through with the fixed spawnBox() this session --
+-- TEST J's key-lock path was already re-confirmed live via the P4 KVLS
+-- fixture (Container.lockByKey), and TEST L's combination-lock path via
+-- runContainer above, but nothing here has exercised lockByPadlock
+-- specifically since the spawnBox fix.
+local function runContainerPadlock(p)
+    local okX, x = safeCall(p, "getX")
+    local okY, y = safeCall(p, "getY")
+    local okZ, z = safeCall(p, "getZ")
+    if not (okX and okY and okZ) then return end
+
+    local bx, by, bz = math.floor(x) + 1, math.floor(y) + 1, math.floor(z)
+    print("TWR.Debug: runContainerPadlock -- player at (" .. tostring(x) .. "," .. tostring(y) .. "," .. tostring(z) .. "), target (" .. bx .. "," .. by .. "," .. bz .. ")")
+    local crate = TWR.Mechanics.Container.spawnBox(bx, by, bz)
+    if not crate then
+        print("TWR.Debug: runContainerPadlock -- spawnBox failed")
+        return
+    end
+    local okC, container = safeCall(crate, "getContainer")
+    if okC and container then
+        safeCall(container, "AddItem", "Base.Twigs")
+    end
+    local keyId = TWR.Mechanics.Container.lockByPadlock(crate, p, nil)
+    TWR.Mechanics.Container.finalizeSpawn(crate)
+    print("TWR.Debug: runContainerPadlock -- box spawned, padlock-locked (keyId=" .. tostring(keyId) .. "), matching padlock given to inventory, contains a twig")
+end
+
 local function runScatter(p)
     local okCell, cell = pcall(function() return getCell() end)
     local okX, x = safeCall(p, "getX")
@@ -764,6 +792,7 @@ end
 
 local MECHANICS = {
     container = runContainer,
+    container_padlock = runContainerPadlock,
     scatter = runScatter,
     map_scatter = runMapScatter,
     pending_actions_status = runPendingActionsStatus,
