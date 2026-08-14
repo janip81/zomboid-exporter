@@ -263,6 +263,32 @@ function TWR.PendingActions.request(jobId, artifactKey, actionType, handlerModul
     return luaObject
 end
 
+-- Linear scan for the pending object (if any) already carrying jobId --
+-- used by QuestEngine.lua (Gate 1 Phase 4) to make re-processing the
+-- same manifest/job file harmless (TRANSPORT-B): a DB-driven job that
+-- already has a live PendingAction must never get a second one just
+-- because the exporter's manifest listed it again (e.g. redelivered
+-- before Postgres saw the "accepted" receipt and dropped it from the
+-- manifest). Returns the modData table, or nil if no pending object
+-- currently carries this jobId -- note this does NOT distinguish
+-- "never requested" from "already resolved and removed" (see
+-- PendingActionsSystem:resolvePendingObject, which removes the object
+-- once a final outcome is emitted) -- an already-resolved jobId
+-- reappearing is a known, narrow, accepted Gate 1 gap (matches the
+-- fixture doc's own "final action near acknowledgement boundary"
+-- caveat), not something this helper tries to solve.
+function TWR.PendingActions.findByJobId(jobId)
+    if not TWRPendingActionsSystem.instance then return nil end
+    local system = TWRPendingActionsSystem.instance
+    for i = 1, system:getLuaObjectCount() do
+        local pending = system.system:getObjectByIndex(i - 1):getModData()
+        if pending.jobId == jobId then
+            return pending
+        end
+    end
+    return nil
+end
+
 function TWR.PendingActions.reportStatus()
     if not TWRPendingActionsSystem.instance then
         print("TWR.PendingActions: reportStatus -- TWRPendingActionsSystem.instance is nil")

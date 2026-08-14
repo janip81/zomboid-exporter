@@ -219,6 +219,10 @@ function Container.resolvePendingAction(pending)
         return Container.resolveScatterItems(pending)
     elseif pending.actionType == "spawn_container" then
         return Container.resolveSpawnContainer(pending)
+    elseif pending.actionType == "spawn_locked_container" then
+        return Container.resolveSpawnLockedContainer(pending)
+    elseif pending.actionType == "spawn_item" then
+        return Container.resolveSpawnItem(pending)
     end
     return false, "UNKNOWN_ACTION_TYPE", "Container.resolvePendingAction: no resolver for actionType=" .. tostring(pending.actionType)
 end
@@ -341,6 +345,127 @@ function Container.resolveSpawnContainer(pending)
         z = pending.targetZ,
         targetType = "world_object",
         targetSummary = "freshly spawned crate, " .. lockSummary,
+    }
+end
+
+-- Resolver for actionType="spawn_locked_container" -- Gate 1 Phase 4
+-- (quest-engine-driven dispatch). Generalizes resolveSpawnContainer
+-- above with a caller-supplied, retry-stable keyId (matching Key.lua's
+-- "backend snapshots the identity once" convention -- see its header)
+-- and a list of contents to pre-fill, rather than one hardcoded
+-- itemType/lockCode. Built for the KVLS fixture's Step 02 ("place
+-- matching locked test container") but intentionally generic -- no
+-- fixture-specific identity appears here, only the params contract.
+--
+-- params:
+--   keyId    (required) -- same identity Key.lua's give_key action
+--            hands to the player; setKeyId on the crate must match.
+--   contents (optional array). Each entry:
+--            {kind="item", itemType="Base.X", quantity=1 (optional)}
+--            {kind="recorded_media", payload={...}} -- see
+--            RecordedMedia.buildItem's own payload contract.
+--            Unknown/missing "kind" is skipped (logged), not fatal --
+--            one bad content entry must not abort the whole container.
+--
+-- Never gives the key to a player from here -- this resolver has no
+-- specific player to hand it to (it's a spatial job, not a player-
+-- targeted one). The matching key is a SEPARATE action
+-- (Key.give_key), authored as its own DB step action.
+--
+-- NOT YET PROVEN LIVE. Built directly on top of Container.spawnBox/
+-- lockByKey/finalizeSpawn (all CONFIRMED live) and
+-- RecordedMedia.buildItem (also CONFIRMED live), so the pieces are
+-- proven individually, but this exact composition (fill THEN lock THEN
+-- finalize, for a DB-driven job rather than a debug command) has not
+-- been exercised on the real dedicated server yet. Update
+-- antagonist/DONE.md / antagonist/tests/ once actually confirmed
+-- (TRANSPORT-A / KVLS-1..3), not before.
+function Container.resolveSpawnLockedContainer(pending)
+    local params = pending.params or {}
+    if params.keyId == nil then
+        return false, "KEYID_REQUIRED", "Container.resolveSpawnLockedContainer -- pending.params.keyId missing"
+    end
+
+    local crate = Container.spawnBox(pending.targetX, pending.targetY, pending.targetZ)
+    if not crate then
+        return false, "SPAWN_FAILED", "Container.spawnBox() failed"
+    end
+
+    local okC, container = safeCall(crate, "getContainer")
+    local placed = 0
+    local requested = 0
+    if okC and container then
+        for _, entry in ipairs(params.contents or {}) do
+            requested = requested + 1
+            if entry.kind == "item" then
+                local okAdd = safeCall(container, "AddItem", entry.itemType)
+                if okAdd then placed = placed + 1 end
+            elseif entry.kind == "recorded_media" then
+                if TWR.Mechanics.RecordedMedia and TWR.Mechanics.RecordedMedia.buildItem then
+                    local item, buildErr = TWR.Mechanics.RecordedMedia.buildItem(entry.payload)
+                    if item then
+                        local okAdd = safeCall(container, "AddItem", item)
+                        if okAdd then
+                            placed = placed + 1
+                            pcall(function() sendAddItemToContainer(container, item) end)
+                        end
+                    else
+                        print("TWR.Mechanics.Container: resolveSpawnLockedContainer -- recorded_media entry failed: " .. tostring(buildErr))
+                    end
+                else
+                    print("TWR.Mechanics.Container: resolveSpawnLockedContainer -- TWR.Mechanics.RecordedMedia not loaded, skipping recorded_media entry")
+                end
+            else
+                print("TWR.Mechanics.Container: resolveSpawnLockedContainer -- unknown contents entry kind=" .. tostring(entry.kind) .. ", skipping")
+            end
+        end
+    end
+
+    Container.lockByKey(crate, nil, params.keyId)
+    Container.finalizeSpawn(crate)
+    print("TWR.Mechanics.Container: resolveSpawnLockedContainer -- jobId=" .. tostring(pending.jobId) .. " (" .. pending.targetX .. "," .. pending.targetY .. "," .. pending.targetZ .. ") placed=" .. placed .. "/" .. requested .. " keyId=" .. tostring(params.keyId))
+
+    return true, {
+        mechanic = "Container.resolveSpawnLockedContainer",
+        placed = placed,
+        requested = requested,
+        artifactType = "locked_container",
+        x = pending.targetX,
+        y = pending.targetY,
+        z = pending.targetZ,
+        targetType = "world_object",
+        targetSummary = "freshly spawned crate, key-locked (keyId=" .. tostring(params.keyId) .. ")",
+    }
+end
+
+-- Resolver for actionType="spawn_item" -- simplest possible generic
+-- ground-spawn, no container/lock involved. Built for the KVLS
+-- fixture's Step 06 (final harmless reward), mirrors Key.lua's own
+-- ground-spawn resolver exactly (same AddWorldInventoryItem pattern).
+function Container.resolveSpawnItem(pending)
+    local params = pending.params or {}
+    local itemType = params.itemType or "Base.Twigs"
+
+    local okSq, square = pcall(function() return getCell():getGridSquare(pending.targetX, pending.targetY, pending.targetZ) end)
+    if not okSq or not square then
+        return false, "SQUARE_NOT_LOADED", "Container.resolveSpawnItem -- target square not loaded"
+    end
+
+    local okAdd, item = safeCall(square, "AddWorldInventoryItem", itemType, 0.5, 0.5, 0)
+    if not okAdd then
+        return false, "SPAWN_FAILED", "Container.resolveSpawnItem -- AddWorldInventoryItem failed"
+    end
+
+    return true, {
+        mechanic = "Container.resolveSpawnItem",
+        placed = 1,
+        requested = 1,
+        artifactType = itemType,
+        x = pending.targetX,
+        y = pending.targetY,
+        z = pending.targetZ,
+        targetType = "ground",
+        targetSummary = "ground-spawned item (" .. tostring(itemType) .. ")",
     }
 end
 
