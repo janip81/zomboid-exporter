@@ -262,10 +262,19 @@ func main() {
 	sqlitePath := flag.String("sqlite-path", "", "Optional path to a SQLite database file (created if missing) -- zero-external-dependency alternative to --db-dsn. Must point at a writable location (the default --data-path mount is typically read-only). If neither this nor --db-dsn is set, PerkLog events still drive Prometheus counters but are not persisted -- player/death/skill history and leaderboards need one of them.")
 	mqttBroker := flag.String("mqtt-broker", "", "Optional MQTT broker URL (e.g. tcp://mosquitto.mqtt.svc.cluster.local:1883) for live ExporterLog event publishing. Publishes each event to zomboid/<server-name>/<event-type>. If unset, MQTT publishing is disabled -- this is purely additive to Postgres/SQLite persistence.")
 	mqttUsername := flag.String("mqtt-username", "", "MQTT broker username, if auth is required (password read from MQTT_PASSWORD env var, never a flag)")
+	twrEnabled := flag.Bool("twr-enabled", false, "Enable the ThoseWhoRemain (TWR) quest engine -- an opt-in subsystem, off by default. Requires --db-dsn (Postgres); a plain stats-only deployment should never set this, and never gets the TWR schema/log ingestion/dispatch pipeline/dispatch mount if it's left false. See zomboid-exporter-ideas/antagonist/design/exporter-twr-feature-boundary.md.")
 	flag.Parse()
 
 	if *serverName == "" {
 		slog.Error("--server-name is required")
+		os.Exit(1)
+	}
+	if *twrEnabled && *dbDSN == "" {
+		// Fail fast rather than silently running a half-enabled quest
+		// backend -- per the feature-boundary doc's explicit
+		// requirement. SQLite is not an option here: the quest engine
+		// is Postgres-only (see questengine.go's header).
+		slog.Error("--twr-enabled requires --db-dsn (Postgres) -- the quest engine cannot run on SQLite or Prometheus-only mode")
 		os.Exit(1)
 	}
 
@@ -284,7 +293,7 @@ func main() {
 	var pgConcrete *pgStore
 	switch {
 	case *dbDSN != "":
-		pg, err := newPgStore(ctx, *dbDSN, *serverName)
+		pg, err := newPgStore(ctx, *dbDSN, *serverName, *twrEnabled)
 		if err != nil {
 			// Deliberately non-fatal: a DB outage shouldn't take down
 			// Prometheus scraping, which is the exporter's primary job.
@@ -323,10 +332,21 @@ func main() {
 
 	go runPerkLogPipeline(ctx, *dataPath, *serverName, perkMetrics, db)
 	go runExporterLogPipeline(ctx, *dataPath, db, mqttPub)
-	go runTWRLogPipeline(ctx, *dataPath, db)
 	go runConnectionsPipeline(ctx, *dataPath, db)
-	go runQuestEnginePipeline(ctx, pgConcrete)
-	go runQuestDispatchPipeline(ctx, pgConcrete)
+
+	// TWR is an opt-in subsystem -- stats-only deployments (e.g. the
+	// normal ExporterLog-only production server) must never open/read
+	// ThoseWhoRemainLog.txt, poll quest state, or publish a dispatch
+	// manifest. See the --twr-enabled flag's own help text and
+	// zomboid-exporter-ideas/antagonist/design/
+	// exporter-twr-feature-boundary.md.
+	if *twrEnabled {
+		go runTWRLogPipeline(ctx, *dataPath, db)
+		go runQuestEnginePipeline(ctx, pgConcrete)
+		go runQuestDispatchPipeline(ctx, pgConcrete)
+	}
+
+	slog.Info("features", "stats", true, "postgres", pgConcrete != nil, "sqlite", *sqlitePath != "" && pgConcrete == nil, "mqtt", mqttPub != nil, "twr", *twrEnabled)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))

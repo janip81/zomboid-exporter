@@ -12,8 +12,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-//go:embed schema_postgres.sql
-var schemaSQL string
+//go:embed schema_stats_postgres.sql
+var schemaStatsSQL string
+
+// schema_twr_postgres.sql is applied ONLY when twrEnabled is true (see
+// newPgStore) -- split from the stats schema 2026-08-14 per
+// zomboid-exporter-ideas/antagonist/design/exporter-twr-feature-
+// boundary.md: a plain stats-only deployment must never get
+// twr_campaigns/twr_quest_instances/twr_jobs/etc. just because Postgres
+// happens to be configured for player/death/skill history.
+//
+//go:embed schema_twr_postgres.sql
+var schemaTWRSQL string
 
 // pgStore owns the Postgres connection and a small in-memory cache of each
 // player's currently-alive character, so "skills"/"level_changed" lines
@@ -26,7 +36,7 @@ type pgStore struct {
 	steamIDByUsername   map[string]string
 }
 
-func newPgStore(ctx context.Context, dsn, serverName string) (*pgStore, error) {
+func newPgStore(ctx context.Context, dsn, serverName string, twrEnabled bool) (*pgStore, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, err
@@ -35,9 +45,15 @@ func newPgStore(ctx context.Context, dsn, serverName string) (*pgStore, error) {
 		pool.Close()
 		return nil, err
 	}
-	if _, err := pool.Exec(ctx, schemaSQL); err != nil {
+	if _, err := pool.Exec(ctx, schemaStatsSQL); err != nil {
 		pool.Close()
 		return nil, err
+	}
+	if twrEnabled {
+		if _, err := pool.Exec(ctx, schemaTWRSQL); err != nil {
+			pool.Close()
+			return nil, err
+		}
 	}
 	s := &pgStore{pool: pool, serverName: serverName, activeCharBySteamID: make(map[string]int64), steamIDByUsername: make(map[string]string)}
 	if err := s.migrateServerColumn(ctx); err != nil {
