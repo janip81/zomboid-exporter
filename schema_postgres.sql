@@ -106,7 +106,10 @@ CREATE TABLE IF NOT EXISTS twr_job_attempts (
     idempotency_key  TEXT,
     action_type      TEXT NOT NULL,
     mechanic         TEXT NOT NULL,
-    result           TEXT NOT NULL, -- applied | deferred_world | retryable_error | final_error | accepted
+    result           TEXT NOT NULL, -- applied | deferred_world | retryable_error | final_error
+    -- NOTE: "accepted" (quest-engine transport-acceptance receipts)
+    -- deliberately does NOT go through this table -- see twr_jobs.
+    -- accepted_at's comment (CGPT-G1-P3-01).
     error_code       TEXT,
     error_detail     TEXT,
     placed_count     INT,
@@ -390,6 +393,7 @@ CREATE TABLE IF NOT EXISTS twr_jobs (
     last_error_detail     JSONB,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     dispatched_at         TIMESTAMPTZ,
+    accepted_at           TIMESTAMPTZ,
     applied_at            TIMESTAMPTZ,
     cancelled_at          TIMESTAMPTZ
 );
@@ -397,6 +401,21 @@ CREATE TABLE IF NOT EXISTS twr_jobs (
 CREATE INDEX IF NOT EXISTS idx_twr_jobs_pending ON twr_jobs (status) WHERE status NOT IN ('APPLIED', 'FAILED_FINAL', 'CANCELLED');
 CREATE INDEX IF NOT EXISTS idx_twr_jobs_step_instance ON twr_jobs (step_instance_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_twr_jobs_idempotency ON twr_jobs (idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+-- accepted_at added 2026-08-14 (ChatGPT review CGPT-G1-P3-01, after
+-- twr_jobs already existed -- ALTER is needed alongside the CREATE
+-- TABLE above for databases where it's already been created). A
+-- transport-acceptance receipt ("Lua durably recorded this job") is
+-- NOT a final application outcome, and must never be written into
+-- twr_job_attempts: that table's existing UNIQUE index is
+-- (server, job_id, attempt_no), and TWR.Emit.jobResult's own contract
+-- is "one row per final outcome" -- an accepted receipt sharing the
+-- same (job_id, attempt_no=1) as the eventual applied/final_error
+-- outcome would collide on ON CONFLICT DO NOTHING and silently discard
+-- the real result, permanently stranding the job. See
+-- handleTWRJobAccepted (store_postgres.go) -- an accepted receipt
+-- updates twr_jobs directly instead.
+ALTER TABLE twr_jobs ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
 
 -- PART E -- discovery, deliberately separate from job application.
 -- twr_world_artifacts.applied_at means "the game confirmed creation

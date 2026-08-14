@@ -640,6 +640,14 @@ func (s *sqliteStore) handleTWRJobResult(ctx context.Context, ev *twrEvent) erro
 	return tx.Commit()
 }
 
+// handleTWRJobAccepted is a no-op -- see eventstore.go's interface
+// comment. The quest engine (questengine.go) is Postgres-only by
+// design; SQLite never has a twr_jobs row for this receipt to update
+// against, so there's nothing to do here.
+func (s *sqliteStore) handleTWRJobAccepted(ctx context.Context, ev *twrEvent) error {
+	return nil
+}
+
 func (s *sqliteStore) getFileOffset(ctx context.Context, path string) (int64, error) {
 	var offset int64
 	err := s.db.QueryRowContext(ctx, `SELECT byte_offset FROM processed_files WHERE file_path = ?`, path).Scan(&offset)

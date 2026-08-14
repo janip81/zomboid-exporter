@@ -74,32 +74,22 @@ func qeTick(ctx context.Context, pg *pgStore) {
 	if err := qeEvaluateArmedSteps(ctx, pg); err != nil {
 		slog.Warn("qeEvaluateArmedSteps failed", "err", err)
 	}
-	if err := qeReconcileAcceptedJobs(ctx, pg); err != nil {
-		slog.Warn("qeReconcileAcceptedJobs failed", "err", err)
-	}
+	// NOTE: there is no periodic "reconcile accepted jobs" pass here --
+	// FIX (ChatGPT review CGPT-G1-P3-01, 2026-08-14): acceptance used to
+	// be reconciled from a twr_job_attempts row on a polling cadence
+	// like every other step here, but an "accepted" receipt must never
+	// be written into twr_job_attempts at all (see
+	// store_postgres.go's handleTWRJobAccepted comment for why -- it
+	// would collide with the job's real final outcome on that table's
+	// unique index and silently discard it). Acceptance is now handled
+	// synchronously as part of the same log-tailing pipeline that
+	// already ingests every other TWR result (twrlog.go's
+	// runTWRLogPipeline routes result="accepted" straight to
+	// handleTWRJobAccepted, which updates twr_jobs.status/accepted_at
+	// directly) -- no separate poll needed here.
 	if err := qeReconcileAppliedJobs(ctx, pg); err != nil {
 		slog.Warn("qeReconcileAppliedJobs failed", "err", err)
 	}
-}
-
-// qeReconcileAcceptedJobs flips a DISPATCHED job to WAITING_WORLD once a
-// twr_job_attempts row proves Lua durably accepted it (result='accepted'
-// -- see questdispatch.go's header for the full delivery lifecycle this
-// implements, specifically step 6). This is what makes a job stop being
-// eligible for qdRedispatchStaleLeases's lease-timeout redispatch, and
-// removes it from the next published manifest (qdPublishManifest only
-// includes DISPATCHED jobs) -- once Lua has it in PendingActions/SGOS,
-// re-announcing it via the file queue is unnecessary.
-func qeReconcileAcceptedJobs(ctx context.Context, pg *pgStore) error {
-	_, err := pg.pool.Exec(ctx, `
-		UPDATE twr_jobs j
-		SET status = 'WAITING_WORLD'
-		FROM twr_job_attempts a
-		WHERE a.job_id = j.id::text
-		  AND a.result = 'accepted'
-		  AND j.status = 'DISPATCHED'
-	`)
-	return err
 }
 
 // qeGetCursor/qeSetCursor track "how far have I read" per named signal

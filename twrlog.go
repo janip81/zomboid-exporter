@@ -253,6 +253,19 @@ func runTWRLogPipeline(ctx context.Context, dataPath string, db eventStore) {
 			// event type this build doesn't know about.
 			return true
 		}
+		// "accepted" (a quest-engine transport-acceptance receipt) is
+		// routed to a separate handler -- see eventstore.go's
+		// handleTWRJobAccepted comment (CGPT-G1-P3-01) for why it must
+		// never reach handleTWRJobResult/twr_job_attempts: that table's
+		// unique index would silently collide with the job's eventual
+		// real outcome and discard it.
+		if twrStringField(ev.Fields, "result") == "accepted" {
+			if err := db.handleTWRJobAccepted(ctx, ev); err != nil {
+				slog.Warn("handleTWRJobAccepted failed, will retry", "jobId", twrStringField(ev.Fields, "jobId"), "err", err)
+				return false
+			}
+			return true
+		}
 		if err := db.handleTWRJobResult(ctx, ev); err != nil {
 			slog.Warn("handleTWRJobResult failed, will retry", "jobId", twrStringField(ev.Fields, "jobId"), "err", err)
 			return false

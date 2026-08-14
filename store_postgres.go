@@ -529,6 +529,29 @@ func (s *pgStore) handleTWRJobResult(ctx context.Context, ev *twrEvent) error {
 	return tx.Commit(ctx)
 }
 
+// handleTWRJobAccepted -- see eventstore.go's interface comment for why
+// this is deliberately separate from handleTWRJobResult/
+// twr_job_attempts (CGPT-G1-P3-01). jobId is the TEXT form of a real
+// twr_jobs.id (BIGSERIAL) -- a malformed or non-numeric jobId (e.g. an
+// old ad-hoc "debug-<timestamp>" identity from a mechanic not yet
+// driven by the quest engine) simply matches zero rows below and is a
+// silent no-op, not an error; nothing in this codebase requires every
+// TWR job to be quest-engine-issued.
+func (s *pgStore) handleTWRJobAccepted(ctx context.Context, ev *twrEvent) error {
+	f := ev.Fields
+	jobID := twrStringField(f, "jobId")
+	if jobID == "" {
+		slog.Warn("dropping twr_job_result accepted receipt with no jobId")
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE twr_jobs
+		SET status = 'WAITING_WORLD', accepted_at = COALESCE(accepted_at, $2)
+		WHERE id::text = $1 AND status = 'DISPATCHED'
+	`, jobID, ev.Timestamp)
+	return err
+}
+
 func (s *pgStore) getFileOffset(ctx context.Context, path string) (int64, error) {
 	var offset int64
 	err := s.pool.QueryRow(ctx, `SELECT byte_offset FROM processed_files WHERE file_path = $1`, path).Scan(&offset)

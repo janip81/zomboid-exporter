@@ -33,6 +33,10 @@ func (f *fakeStore) handleTWRJobResult(ctx context.Context, ev *twrEvent) error 
 	f.twrJobResults++
 	return nil
 }
+
+func (f *fakeStore) handleTWRJobAccepted(ctx context.Context, ev *twrEvent) error {
+	return nil
+}
 func (f *fakeStore) Close()                                                     {}
 
 func (f *fakeStore) getFileOffset(ctx context.Context, path string) (int64, error) {

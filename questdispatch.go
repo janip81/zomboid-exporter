@@ -99,20 +99,27 @@ func qdTick(ctx context.Context, pg *pgStore) error {
 }
 
 type dispatchableJob struct {
-	id           int64
-	actionType   string
-	actionParams []byte
+	id             int64
+	actionType     string
+	actionParams   []byte
+	idempotencyKey *string
 }
 
 // qdWriteJobFile atomically publishes one job's payload -- write to a
 // temp file in the same directory (so the rename is same-filesystem and
 // therefore atomic), fsync, close, rename into place. Lua must never be
 // able to observe a partially-written file.
+//
+// idempotencyKey is included (CGPT-G1-P3-02, 2026-08-14) so Phase 4's
+// Lua poller can copy the backend-owned identity straight into
+// PendingActions/SGOS and its own result logging, instead of having to
+// reconstruct or invent one -- twr_jobs already owns this value.
 func qdWriteJobFile(job dispatchableJob) error {
 	payload, err := json.Marshal(map[string]any{
-		"jobId":        strconv.FormatInt(job.id, 10),
-		"actionType":   job.actionType,
-		"actionParams": json.RawMessage(job.actionParams),
+		"jobId":          strconv.FormatInt(job.id, 10),
+		"idempotencyKey": job.idempotencyKey,
+		"actionType":     job.actionType,
+		"actionParams":   json.RawMessage(job.actionParams),
 	})
 	if err != nil {
 		return err
@@ -165,7 +172,7 @@ func qdDispatchQueuedJobs(ctx context.Context, pg *pgStore) error {
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	rows, err := tx.Query(ctx, `
-		SELECT id, action_type, action_params
+		SELECT id, action_type, action_params, idempotency_key
 		FROM twr_jobs
 		WHERE status = 'QUEUED'
 		ORDER BY id
@@ -177,7 +184,7 @@ func qdDispatchQueuedJobs(ctx context.Context, pg *pgStore) error {
 	var jobs []dispatchableJob
 	for rows.Next() {
 		var j dispatchableJob
-		if err := rows.Scan(&j.id, &j.actionType, &j.actionParams); err != nil {
+		if err := rows.Scan(&j.id, &j.actionType, &j.actionParams, &j.idempotencyKey); err != nil {
 			rows.Close()
 			return err
 		}
@@ -227,7 +234,7 @@ func qdDispatchQueuedJobs(ctx context.Context, pg *pgStore) error {
 // job -- same id, same idempotency identity throughout.
 func qdRedispatchStaleLeases(ctx context.Context, pg *pgStore) error {
 	rows, err := pg.pool.Query(ctx, `
-		SELECT id, action_type, action_params
+		SELECT id, action_type, action_params, idempotency_key
 		FROM twr_jobs
 		WHERE status = 'DISPATCHED' AND dispatched_at < now() - make_interval(secs => $1)
 		ORDER BY id
@@ -238,7 +245,7 @@ func qdRedispatchStaleLeases(ctx context.Context, pg *pgStore) error {
 	var jobs []dispatchableJob
 	for rows.Next() {
 		var j dispatchableJob
-		if err := rows.Scan(&j.id, &j.actionType, &j.actionParams); err != nil {
+		if err := rows.Scan(&j.id, &j.actionType, &j.actionParams, &j.idempotencyKey); err != nil {
 			rows.Close()
 			return err
 		}
@@ -273,6 +280,22 @@ func qdRedispatchStaleLeases(ctx context.Context, pg *pgStore) error {
 // PanelBridge's dual-counter protocol hit). revision is a monotonically
 // increasing integer purely so Lua can skip reparsing an unchanged
 // manifest -- it is NOT a job identity, job_id always is.
+// qdManifestRevision is an in-process counter, deliberately NOT
+// persisted to Postgres. FIX (ChatGPT review CGPT-G1-P3-03,
+// 2026-08-14): the original version called a DB-backed counter
+// (INSERT ... ON CONFLICT ... RETURNING) unconditionally every tick,
+// which both defeated the counter's own documented purpose (Lua
+// skipping an unchanged manifest never actually happened, since the
+// number always changed) and did a needless DB round-trip every 3s
+// even when nothing was dispatched. Per the review's own recommended
+// simplest fix: Lua (Phase 4) just re-parses the tiny manifest on
+// every poll rather than trying to skip based on revision -- so
+// revision only needs to be process-locally monotonic for humans
+// reading logs/files, never compared across an exporter restart. A
+// package-level var is safe here without a mutex: qdTick's single
+// ticker goroutine is the only caller.
+var qdManifestRevision int64
+
 func qdPublishManifest(ctx context.Context, pg *pgStore) error {
 	rows, err := pg.pool.Query(ctx, `
 		SELECT id FROM twr_jobs WHERE status = 'DISPATCHED' ORDER BY id
@@ -295,13 +318,10 @@ func qdPublishManifest(ctx context.Context, pg *pgStore) error {
 	}
 	rows.Close()
 
-	revision, err := qdNextManifestRevision(ctx, pg)
-	if err != nil {
-		return err
-	}
+	qdManifestRevision++
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "revision=%d\n", revision)
+	fmt.Fprintf(&b, "revision=%d\n", qdManifestRevision)
 	for _, id := range ids {
 		fmt.Fprintf(&b, "job=%d\n", id)
 	}
@@ -309,16 +329,3 @@ func qdPublishManifest(ctx context.Context, pg *pgStore) error {
 	return qdWriteFileAtomic(filepath.Join(twrDispatchDir, "manifest.txt"), []byte(b.String()))
 }
 
-// qdNextManifestRevision reuses the twr_signal_cursors table (same
-// get-or-create-and-increment purpose as qeGetCursor/qeSetCursor in
-// questengine.go, just needing a plain increment instead of a
-// watermark) rather than a dedicated new table for one integer counter.
-func qdNextManifestRevision(ctx context.Context, pg *pgStore) (int64, error) {
-	var revision int64
-	err := pg.pool.QueryRow(ctx, `
-		INSERT INTO twr_signal_cursors (source, last_id) VALUES ('dispatch_manifest_revision', 1)
-		ON CONFLICT (source) DO UPDATE SET last_id = twr_signal_cursors.last_id + 1
-		RETURNING last_id
-	`).Scan(&revision)
-	return revision, err
-}

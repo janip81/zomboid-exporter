@@ -46,6 +46,20 @@ type eventStore interface {
 	// (idempotent replay, ON CONFLICT DO NOTHING) still returns nil.
 	handleTWRJobResult(ctx context.Context, ev *twrEvent) error
 
+	// handleTWRJobAccepted persists a parsed ThoseWhoRemainLog.txt
+	// "twr_job_result" line whose result="accepted" -- a quest-engine
+	// transport-acceptance receipt (Lua durably recorded this dispatch
+	// into PendingActions/SGOS), NOT a final application outcome. Kept
+	// entirely separate from handleTWRJobResult/twr_job_attempts on
+	// purpose (CGPT-G1-P3-01, 2026-08-14): that table's unique index is
+	// (server, job_id, attempt_no), and an accepted receipt sharing the
+	// same identity as the eventual applied/final_error outcome would
+	// collide on ON CONFLICT DO NOTHING and silently discard the real
+	// result. pgStore updates twr_jobs.status/accepted_at directly;
+	// sqliteStore is a no-op (the quest engine is Postgres-only -- see
+	// questengine.go's header).
+	handleTWRJobAccepted(ctx context.Context, ev *twrEvent) error
+
 	// getFileOffset/setFileOffset track how far into each PerkLog.txt file
 	// has been read, keyed by absolute path. This is what makes history
 	// gap-free across exporter restarts (including the very first run,
