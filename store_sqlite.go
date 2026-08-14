@@ -58,6 +58,10 @@ func newSQLiteStore(ctx context.Context, path, serverName string) (*sqliteStore,
 		db.Close()
 		return nil, err
 	}
+	if err := s.migrateTWRJobAttemptsSteamID(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := s.loadActiveCharacters(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -150,6 +154,27 @@ func (s *sqliteStore) migrateFileOffsetKeys(ctx context.Context) error {
 			return err
 		}
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM processed_files WHERE file_path = ?`, k.oldKey); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateTWRJobAttemptsSteamID adds the steam_id and artifact_key
+// columns (2026-08-14, for the quest engine's signal producers -- see
+// pgStore.handleTWRJobResult's comment) to databases created before
+// they existed. SQLite has no ADD COLUMN IF NOT EXISTS, hence the
+// hasColumn() check first, same pattern as migrateServerColumn.
+func (s *sqliteStore) migrateTWRJobAttemptsSteamID(ctx context.Context) error {
+	for _, col := range []string{"steam_id", "artifact_key"} {
+		has, err := s.hasColumn(ctx, "twr_job_attempts", col)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE twr_job_attempts ADD COLUMN `+col+` TEXT`); err != nil {
 			return err
 		}
 	}
@@ -583,17 +608,17 @@ func (s *sqliteStore) handleTWRJobResult(ctx context.Context, ev *twrEvent) erro
 	}
 	defer tx.Rollback() //nolint:errcheck -- no-op after a successful Commit
 
+	artifactKey := twrStringField(f, "artifactKey")
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO twr_job_attempts (job_id, attempt_no, idempotency_key, action_type, mechanic, result, error_code, error_detail, placed_count, requested_count, occurred_at, server)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO twr_job_attempts (job_id, attempt_no, idempotency_key, action_type, mechanic, result, error_code, error_detail, placed_count, requested_count, occurred_at, server, steam_id, artifact_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (server, job_id, attempt_no) DO NOTHING
 	`, jobID, attemptNo, nullIfEmpty(twrStringField(f, "idempotencyKey")), twrStringField(f, "actionType"), twrStringField(f, "mechanic"), result,
-		nullIfEmpty(twrStringField(f, "errorCode")), nullIfEmpty(twrStringField(f, "errorDetail")), placedVal, requestedVal, iso(ev.Timestamp), s.serverName); err != nil {
+		nullIfEmpty(twrStringField(f, "errorCode")), nullIfEmpty(twrStringField(f, "errorDetail")), placedVal, requestedVal, iso(ev.Timestamp), s.serverName, nullIfEmpty(twrStringField(f, "steamId")), nullIfEmpty(artifactKey)); err != nil {
 		return err
 	}
 
 	if result == "applied" {
-		artifactKey := twrStringField(f, "artifactKey")
 		x, hasX := twrIntField(f, "x")
 		y, hasY := twrIntField(f, "y")
 		z, hasZ := twrIntField(f, "z")

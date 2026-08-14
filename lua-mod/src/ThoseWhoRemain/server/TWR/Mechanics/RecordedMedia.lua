@@ -383,7 +383,21 @@ local function findPlayingContentIdNear(player)
     return nil
 end
 
-local function emitDeviceViewed(username, contentId)
+-- steamId, added 2026-08-14 for the quest engine: signals need a
+-- structured player identity, not just free text buried in
+-- targetSummary. Same %.0f reconstruction ExporterLog.Utils.
+-- getPlayerSteamID already uses -- getSteamID() returns a Lua double,
+-- which can't exactly represent a real SteamID64 (~7.6e16, past 2^53),
+-- so a plain tostring() would silently produce unusable scientific
+-- notation. Kept as TWR's own copy rather than requiring ExporterLog's
+-- Utils -- these two mods must stay independently deployable.
+local function getPlayerSteamID(player)
+    local ok, id = safeCall(player, "getSteamID")
+    if not ok or not id then return nil end
+    return string.format("%.0f", id)
+end
+
+local function emitDeviceViewed(username, steamId, contentId)
     print("TWR.Mechanics.RecordedMedia: pollDeviceMedia -- player=" .. tostring(username)
         .. " contentId=" .. tostring(contentId) .. " (real TV/device playback)")
     if TWR.Emit and TWR.Emit.jobResult then
@@ -399,6 +413,7 @@ local function emitDeviceViewed(username, contentId)
             artifactType = "recorded_media_discovery",
             targetType = "player",
             targetSummary = "player=" .. tostring(username) .. " contentId=" .. tostring(contentId) .. " via real TV/device",
+            steamId = steamId,
         })
     end
 end
@@ -415,7 +430,7 @@ local function pollDeviceMedia()
             if contentId then
                 if prev ~= contentId then
                     activeView[username] = contentId
-                    emitDeviceViewed(username, contentId)
+                    emitDeviceViewed(username, getPlayerSteamID(player), contentId)
                 end
             elseif prev then
                 activeView[username] = nil

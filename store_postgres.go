@@ -481,17 +481,28 @@ func (s *pgStore) handleTWRJobResult(ctx context.Context, ev *twrEvent) error {
 	// Review Q5: ON CONFLICT DO NOTHING against idx_twr_job_attempts_unique
 	// absorbs the crash-replay window (commit succeeds, offset persist
 	// doesn't, same line reprocessed after restart) without erroring.
+	// steamId (added 2026-08-14 for the quest engine): optional, only
+	// set by callers that identify a specific player (e.g.
+	// RecordedMedia.pollDeviceMedia) -- most existing callers omit it,
+	// which is fine, NULLIF('') keeps the column NULL for those.
+	//
+	// artifactKey is now ALSO persisted here unconditionally (not just
+	// inside the "applied" branch below), added alongside steamId: a
+	// signal-only "applied" result with no x/y/z (e.g.
+	// recorded_media_viewed -- a discovery, not a spatial placement)
+	// previously had nowhere durable for its artifactKey to land, since
+	// twr_world_artifacts requires a full x/y/z placement.
+	artifactKey := twrStringField(f, "artifactKey")
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO twr_job_attempts (job_id, attempt_no, idempotency_key, action_type, mechanic, result, error_code, error_detail, placed_count, requested_count, occurred_at, server)
-		VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), $9, $10, $11, $12)
+		INSERT INTO twr_job_attempts (job_id, attempt_no, idempotency_key, action_type, mechanic, result, error_code, error_detail, placed_count, requested_count, occurred_at, server, steam_id, artifact_key)
+		VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), $9, $10, $11, $12, NULLIF($13, ''), NULLIF($14, ''))
 		ON CONFLICT (server, job_id, attempt_no) DO NOTHING
 	`, jobID, attemptNo, twrStringField(f, "idempotencyKey"), twrStringField(f, "actionType"), twrStringField(f, "mechanic"), result,
-		twrStringField(f, "errorCode"), twrStringField(f, "errorDetail"), placedPtr, requestedPtr, ev.Timestamp, s.serverName); err != nil {
+		twrStringField(f, "errorCode"), twrStringField(f, "errorDetail"), placedPtr, requestedPtr, ev.Timestamp, s.serverName, twrStringField(f, "steamId"), artifactKey); err != nil {
 		return err
 	}
 
 	if result == "applied" {
-		artifactKey := twrStringField(f, "artifactKey")
 		x, hasX := twrIntField(f, "x")
 		y, hasY := twrIntField(f, "y")
 		z, hasZ := twrIntField(f, "z")

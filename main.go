@@ -277,6 +277,11 @@ func main() {
 	perkMetrics := newPerkLogMetrics(reg)
 
 	var db eventStore
+	// pgConcrete, when set, is the same store as db but kept as its
+	// concrete type -- the quest engine (questengine.go) is
+	// Postgres-only (see its header comment for why) and needs direct
+	// pool access the eventStore interface deliberately doesn't expose.
+	var pgConcrete *pgStore
 	switch {
 	case *dbDSN != "":
 		pg, err := newPgStore(ctx, *dbDSN, *serverName)
@@ -287,6 +292,7 @@ func main() {
 		} else {
 			defer pg.Close()
 			db = pg
+			pgConcrete = pg
 			slog.Info("connected to Postgres, event history + leaderboards enabled")
 		}
 	case *sqlitePath != "":
@@ -319,6 +325,7 @@ func main() {
 	go runExporterLogPipeline(ctx, *dataPath, db, mqttPub)
 	go runTWRLogPipeline(ctx, *dataPath, db)
 	go runConnectionsPipeline(ctx, *dataPath, db)
+	go runQuestEnginePipeline(ctx, pgConcrete)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))

@@ -92,7 +92,9 @@ CREATE TABLE IF NOT EXISTS twr_job_attempts (
     placed_count     INTEGER,
     requested_count  INTEGER,
     occurred_at      TEXT NOT NULL,
-    server           TEXT NOT NULL DEFAULT ''
+    server           TEXT NOT NULL DEFAULT '',
+    steam_id         TEXT,
+    artifact_key     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_twr_job_attempts_job_id ON twr_job_attempts (job_id, attempt_no);
