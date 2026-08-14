@@ -295,6 +295,14 @@ func main() {
 	case *dbDSN != "":
 		pg, err := newPgStore(ctx, *dbDSN, *serverName, *twrEnabled)
 		if err != nil {
+			if *twrEnabled {
+				// Unlike stats-only mode, TWR has no degraded mode --
+				// Postgres IS the quest engine's state. Continuing here
+				// would leave a process that claims twr=true but can't
+				// evaluate quests, ingest results, or dispatch jobs.
+				slog.Error("TWR requires a working Postgres connection", "err", err)
+				os.Exit(1)
+			}
 			// Deliberately non-fatal: a DB outage shouldn't take down
 			// Prometheus scraping, which is the exporter's primary job.
 			slog.Error("failed to connect to Postgres -- continuing without persistence", "err", err)
