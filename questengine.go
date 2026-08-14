@@ -168,7 +168,7 @@ func qePollSleepSignals(ctx context.Context, pg *pgStore) error {
 		if _, err := pg.pool.Exec(ctx, `
 			INSERT INTO twr_signals (signal_type, occurred_at, steam_id, source_type, source_ref, dedupe_key, payload)
 			VALUES ('sleep', $1, $2, 'exporter_event', $3, $4, $5)
-			ON CONFLICT (dedupe_key) DO NOTHING
+			ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
 		`, r.occurredAt, r.steamID, fmt.Sprintf("%d", r.id), dedupeKey, r.details); err != nil {
 			return err
 		}
@@ -247,7 +247,7 @@ func qePollMediaPlaybackSignals(ctx context.Context, pg *pgStore) error {
 			if _, err := pg.pool.Exec(ctx, `
 				INSERT INTO twr_signals (signal_type, occurred_at, steam_id, source_type, source_ref, dedupe_key, payload)
 				VALUES ('recorded_media_viewed', $1, $2, 'twr_event', $3, $4, $5)
-				ON CONFLICT (dedupe_key) DO NOTHING
+				ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
 			`, r.occurredAt, r.steamID, fmt.Sprintf("%d", r.id), dedupeKey, payload); err != nil {
 				return err
 			}
