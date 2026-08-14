@@ -621,10 +621,19 @@ func qeTriggerStep(ctx context.Context, pg *pgStore, stepInstanceID, stepDefinit
 		// idempotency_key stays stable per (step_instance, action)
 		// pair, matching "once" semantics.
 		idempotencyKey := fmt.Sprintf("step-instance-%d-action-%d-1", stepInstanceID, a.id)
+		// idx_twr_jobs_idempotency is a PARTIAL unique index (WHERE
+		// idempotency_key IS NOT NULL) -- Postgres requires ON CONFLICT
+		// to restate that predicate exactly to match it, otherwise it
+		// can't infer any matching unique constraint at all (SQLSTATE
+		// 42P10, "no unique or exclusion constraint matching the ON
+		// CONFLICT specification"). CONFIRMED live 2026-08-14: this had
+		// never actually been exercised before (Phase 1+2 review was a
+		// schema dry-run only), first real qeTriggerStep call against
+		// live data hit it immediately.
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO twr_jobs (campaign_id, quest_instance_id, step_instance_id, action_definition_id, action_type, action_params, status, idempotency_key)
 			VALUES ($1, $2, $3, $4, $5, $6, 'QUEUED', $7)
-			ON CONFLICT (idempotency_key) DO NOTHING
+			ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
 		`, campaignID, questInstanceID, stepInstanceID, a.id, a.actionType, a.params, idempotencyKey); err != nil {
 			return err
 		}
