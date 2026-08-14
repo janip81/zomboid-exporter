@@ -74,9 +74,32 @@ func qeTick(ctx context.Context, pg *pgStore) {
 	if err := qeEvaluateArmedSteps(ctx, pg); err != nil {
 		slog.Warn("qeEvaluateArmedSteps failed", "err", err)
 	}
+	if err := qeReconcileAcceptedJobs(ctx, pg); err != nil {
+		slog.Warn("qeReconcileAcceptedJobs failed", "err", err)
+	}
 	if err := qeReconcileAppliedJobs(ctx, pg); err != nil {
 		slog.Warn("qeReconcileAppliedJobs failed", "err", err)
 	}
+}
+
+// qeReconcileAcceptedJobs flips a DISPATCHED job to WAITING_WORLD once a
+// twr_job_attempts row proves Lua durably accepted it (result='accepted'
+// -- see questdispatch.go's header for the full delivery lifecycle this
+// implements, specifically step 6). This is what makes a job stop being
+// eligible for qdRedispatchStaleLeases's lease-timeout redispatch, and
+// removes it from the next published manifest (qdPublishManifest only
+// includes DISPATCHED jobs) -- once Lua has it in PendingActions/SGOS,
+// re-announcing it via the file queue is unnecessary.
+func qeReconcileAcceptedJobs(ctx context.Context, pg *pgStore) error {
+	_, err := pg.pool.Exec(ctx, `
+		UPDATE twr_jobs j
+		SET status = 'WAITING_WORLD'
+		FROM twr_job_attempts a
+		WHERE a.job_id = j.id::text
+		  AND a.result = 'accepted'
+		  AND j.status = 'DISPATCHED'
+	`)
+	return err
 }
 
 // qeGetCursor/qeSetCursor track "how far have I read" per named signal

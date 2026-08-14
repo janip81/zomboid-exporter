@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS twr_job_attempts (
     idempotency_key  TEXT,
     action_type      TEXT NOT NULL,
     mechanic         TEXT NOT NULL,
-    result           TEXT NOT NULL, -- applied | deferred_world | retryable_error | final_error
+    result           TEXT NOT NULL, -- applied | deferred_world | retryable_error | final_error | accepted
     error_code       TEXT,
     error_detail     TEXT,
     placed_count     INT,

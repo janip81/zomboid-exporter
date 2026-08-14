@@ -326,6 +326,7 @@ func main() {
 	go runTWRLogPipeline(ctx, *dataPath, db)
 	go runConnectionsPipeline(ctx, *dataPath, db)
 	go runQuestEnginePipeline(ctx, pgConcrete)
+	go runQuestDispatchPipeline(ctx, pgConcrete)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
