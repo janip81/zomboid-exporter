@@ -246,6 +246,37 @@ local function runPendingActionsStatus(p)
     TWR.PendingActions.reportStatus()
 end
 
+-- Gate 1 Phase 6 -- minimal admin Inspect/Retry slice (per
+-- pending-job-durability.md/twr_admin_recovery.md's own "first
+-- implementation priority" scoping). Both are narrower than the
+-- original design docs describe: Lua has no read/write path into
+-- Postgres at all (getFileReader only reads local files -- confirmed
+-- throughout this project, see quest-job-dispatch-transport-
+-- chatgpt-response.md), so a real "look up job_id X's twr_jobs/
+-- twr_job_attempts/twr_world_artifacts row and requeue it" pair isn't
+-- buildable from the debug menu. What IS genuinely useful from here:
+--
+--   Inspect -- dump QuestEngine's own durable seen-jobs ledger (the
+--   one thing Lua knows for certain, added 2026-08-15 alongside the
+--   duplicate-spawn fix).
+--   Retry -- force an immediate QuestEngine.pollDispatch() instead of
+--   waiting for the next EveryOneMinute tick -- the exporter's own
+--   qdRedispatchStaleLeases already retries a stuck DISPATCHED job
+--   automatically every 60s, so this is a manual "don't make me wait"
+--   button, not a new retry mechanism.
+--
+-- Real per-job_id Postgres inspection/requeue is done directly via
+-- psql (see antagonist/quest-db/quest-fixtures/kvls-gate1-*.sql for
+-- the established pattern) -- not a Lua debug-menu concern.
+local function runQuestJobLedgerStatus(p)
+    TWR.QuestEngine.reportLedgerStatus()
+end
+
+local function runQuestForcePoll(p)
+    print("TWR.QuestEngine: runQuestForcePoll -- forcing an immediate pollDispatch()")
+    TWR.QuestEngine.pollDispatch()
+end
+
 local function runDeferredArea(p)
     local okX, x = safeCall(p, "getX")
     local okY, y = safeCall(p, "getY")
@@ -913,6 +944,8 @@ local MECHANICS = {
     scatter = runScatter,
     map_scatter = runMapScatter,
     pending_actions_status = runPendingActionsStatus,
+    quest_job_ledger_status = runQuestJobLedgerStatus,
+    quest_force_poll = runQuestForcePoll,
     deferred_area = runDeferredArea,
     corpse = runCorpse,
     door = runDoor,

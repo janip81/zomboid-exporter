@@ -36,6 +36,8 @@ local MECHANIC_LABELS = {
     { key = "scatter", label = "Scatter into existing containers" },
     { key = "map_scatter", label = "Scatter across map (5 real points, persistent pending)" },
     { key = "pending_actions_status", label = "Report TWR.PendingActions status" },
+    { key = "quest_job_ledger_status", label = "Report QuestEngine seen-jobs ledger (Gate 1 Inspect)" },
+    { key = "quest_force_poll", label = "Force quest dispatch poll now (Gate 1 Retry)" },
     { key = "deferred_area", label = "Deferred-area test (80 tiles east)" },
     { key = "corpse", label = "Spawn permanent corpse" },
     { key = "door", label = "Lock nearest door" },

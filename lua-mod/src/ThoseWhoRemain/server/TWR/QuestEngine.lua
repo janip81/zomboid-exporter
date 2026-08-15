@@ -154,6 +154,29 @@ local function markJobSeen(jobId)
     luaObject.jobId = jobId
 end
 
+-- Admin-facing Inspect equivalent (server/TWR/Debug.lua's
+-- quest_job_ledger_status mechanic) -- Lua has no read path into
+-- Postgres (getFileReader only reads local files -- see this file's
+-- own header), so a real "show me twr_jobs/twr_job_attempts state"
+-- Inspect command isn't buildable from here. What Lua DOES durably
+-- know: every jobId it has ever locally processed via the seen ledger
+-- above. Prints the full ledger, same reportStatus() style as
+-- TWR.PendingActions' own.
+function QuestEngine.reportLedgerStatus()
+    if not TWRQuestJobSeenSystem.instance then
+        print("TWR.QuestEngine: reportLedgerStatus -- TWRQuestJobSeenSystem.instance is nil")
+        return 0
+    end
+    local system = TWRQuestJobSeenSystem.instance
+    local count = system:getLuaObjectCount()
+    print("TWR.QuestEngine: reportLedgerStatus -- seenCount=" .. count)
+    for i = 1, count do
+        local seen = system.system:getObjectByIndex(i - 1):getModData()
+        print("TWR.QuestEngine: [" .. i .. "] jobId=" .. tostring(seen.jobId))
+    end
+    return count
+end
+
 -- Module.action -> allowed. Both halves matter: handlerModule must
 -- resolve to a real TWR.Mechanics.<Module>.resolvePendingAction, and
 -- actionType must be one that module's own resolvePendingAction
