@@ -53,10 +53,106 @@
 -- full live-reproduced bug. Guarding here too.
 if isClient() then return end
 
+require "Map/SGlobalObjectSystem"
+require "Map/SGlobalObject"
+
 TWR = TWR or {}
 TWR.QuestEngine = TWR.QuestEngine or {}
 
 local QuestEngine = TWR.QuestEngine
+
+-- CONFIRMED live 2026-08-15 (KVLS-5/6 real test, 38 duplicate spawns):
+-- TWR.PendingActions.findByJobId is NOT a sufficient dedup source for
+-- this file's purposes -- it only reflects the LIVE pending-object
+-- list, which PendingActions.lua's own resolvePendingObject erases the
+-- instant a job resolves (by design, per that file's own "only ever
+-- holds UNFULFILLED actions" ownership boundary). When the target
+-- square is already loaded, TWR.PendingActions.request() resolves
+-- SYNCHRONOUSLY inside the same call -- so the pending record can be
+-- created AND erased within a single poll, leaving nothing for the
+-- NEXT poll to find. Sleeping fast-forwards the game clock through
+-- many in-game minutes in a few seconds of real time, firing
+-- Events.EveryOneMinute (and therefore QuestEngine.pollDispatch) many
+-- times in rapid succession while the same job is still sitting
+-- DISPATCHED in Postgres/the manifest (Postgres hasn't ingested the
+-- "accepted"/"applied" receipt and republished a fresh manifest yet)
+-- -- each of those rapid polls independently found "no live pending
+-- record" and created a brand new one.
+--
+-- Fix: a SEPARATE, durable, append-only "have I ever requested a
+-- PendingAction for this jobId" ledger, backed by its own
+-- SGlobalObjectSystem (same proven mechanism PendingActions.lua uses)
+-- but records are NEVER removed -- unlike PendingActions' by-design
+-- resolve-and-erase semantics. PZ Lua callbacks run single-threaded/
+-- cooperatively (no real concurrency within one poll), so checking
+-- then marking this ledger is race-free across the whole rapid-fire
+-- sequence: the first poll marks jobId=4 seen, every subsequent poll
+-- (even microseconds later) sees it and skips.
+--
+-- Deliberately global/unbounded -- fine at Gate 1's scale (a handful
+-- of jobs per test run). Revisit (e.g. periodic pruning of old
+-- terminal jobIds) only if this ever needs to run at real content
+-- scale.
+TWRQuestJobSeenObject = SGlobalObject:derive("TWRQuestJobSeenObject")
+
+function TWRQuestJobSeenObject:new(luaSystem, globalObject)
+    return SGlobalObject.new(self, luaSystem, globalObject)
+end
+
+function TWRQuestJobSeenObject:initNew()
+    self.jobId = ""
+end
+
+function TWRQuestJobSeenObject:stateFromIsoObject(isoObject)
+end
+
+function TWRQuestJobSeenObject:stateToIsoObject(isoObject)
+end
+
+TWRQuestJobSeenSystem = SGlobalObjectSystem:derive("TWRQuestJobSeenSystem")
+
+function TWRQuestJobSeenSystem:new()
+    return SGlobalObjectSystem.new(self, "twr_quest_job_seen")
+end
+
+function TWRQuestJobSeenSystem:initSystem()
+    SGlobalObjectSystem.initSystem(self)
+    self.system:setModDataKeys({})
+    self.system:setObjectModDataKeys({ "jobId" })
+end
+
+function TWRQuestJobSeenSystem:newLuaObject(globalObject)
+    return TWRQuestJobSeenObject:new(self, globalObject)
+end
+
+-- Never tied to any real world object, and never scanned by chunk --
+-- always iterated in full via getLuaObjectCount()/getObjectByIndex(),
+-- same as TWR.PendingActions.findByJobId's own scan pattern. Placed at
+-- a fixed dummy coordinate (0,0,0); location is meaningless here.
+function TWRQuestJobSeenSystem:isValidIsoObject(isoObject)
+    return false
+end
+
+SGlobalObjectSystem.RegisterSystemClass(TWRQuestJobSeenSystem)
+
+local function jobAlreadySeen(jobId)
+    if not TWRQuestJobSeenSystem.instance then return false end
+    local system = TWRQuestJobSeenSystem.instance
+    for i = 1, system:getLuaObjectCount() do
+        local seen = system.system:getObjectByIndex(i - 1):getModData()
+        if seen.jobId == jobId then
+            return true
+        end
+    end
+    return false
+end
+
+local function markJobSeen(jobId)
+    if not TWRQuestJobSeenSystem.instance then return end
+    local luaObject = TWRQuestJobSeenSystem.instance:newLuaObjectAt(0, 0, 0)
+    luaObject:initNew()
+    luaObject.jobId = jobId
+end
 
 -- Module.action -> allowed. Both halves matter: handlerModule must
 -- resolve to a real TWR.Mechanics.<Module>.resolvePendingAction, and
@@ -200,11 +296,15 @@ local function processJobFile(jobIdFromManifest)
 
     -- TRANSPORT-B: the same job being delivered/read twice (e.g. the
     -- exporter republishes the manifest before it's seen our
-    -- "accepted" receipt) must produce exactly one logical
-    -- PendingAction, not two.
-    local existing = TWR.PendingActions.findByJobId(jobId)
-    if existing then
-        print("TWR.QuestEngine: pollDispatch -- jobId=" .. jobId .. " already has a live PendingAction, skipping duplicate request (re-emitting accepted in case the first receipt was lost)")
+    -- "accepted" receipt, or -- CONFIRMED live 2026-08-15 -- many
+    -- Events.EveryOneMinute polls firing within seconds of real time
+    -- during a sleep-induced game-clock fast-forward) must produce
+    -- exactly one logical PendingAction, not two (or 38). Checked
+    -- against the durable jobAlreadySeen ledger, NOT
+    -- TWR.PendingActions.findByJobId -- see this file's header for why
+    -- the live-pending-list check alone is insufficient.
+    if jobAlreadySeen(jobId) then
+        print("TWR.QuestEngine: pollDispatch -- jobId=" .. jobId .. " already processed, skipping duplicate request (re-emitting accepted in case the first receipt was lost)")
     else
         local artifactKey = params.artifactKey or (jobId .. "-artifact")
         local luaObject = TWR.PendingActions.request(jobId, artifactKey, actionType, handlerModule, x, y, z, params)
@@ -212,6 +312,10 @@ local function processJobFile(jobIdFromManifest)
             print("TWR.QuestEngine: pollDispatch -- jobId=" .. jobId .. ": TWR.PendingActions.request() returned nil (system not initialized yet?), will retry next poll")
             return
         end
+        -- Mark seen only AFTER a successful request() -- never before,
+        -- so a failed request (system not ready) can still be retried
+        -- on the next poll rather than being permanently skipped.
+        markJobSeen(jobId)
     end
 
     -- Only after the PendingAction is durably represented in SGOS
