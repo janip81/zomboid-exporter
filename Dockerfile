@@ -3,6 +3,7 @@ WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY *.go *.sql ./
+COPY webui_templates/ ./webui_templates/
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o zomboid-exporter .
 
 FROM gcr.io/distroless/static:nonroot
