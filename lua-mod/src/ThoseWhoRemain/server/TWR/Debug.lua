@@ -387,16 +387,6 @@ local function runRecipeNote(p)
     print("TWR.Debug: runRecipeNote -- gave ThoseWhoRemain.RecipeNote to inventory " .. (okAdd and "SUCCEEDED -- right-click it and choose Read" or "FAILED"))
 end
 
-local function runMapReveal(p)
-    local okX, x = safeCall(p, "getX")
-    local okY, y = safeCall(p, "getY")
-    if not (okX and okY) then return end
-
-    local radius = 60
-    local ok = TWR.Mechanics.MapReveal.revealAroundPoint(p, x, y, radius)
-    print("TWR.Debug: runMapReveal -- revealAroundPoint center (" .. math.floor(x) .. "," .. math.floor(y) .. "), radius " .. radius .. " " .. (ok and "SUCCEEDED -- open the map (M) and look there" or "FAILED"))
-end
-
 -- P1 (readable content) debug test -- gives a dummy DB-shaped readable
 -- item directly to inventory. Uses the just-confirmed
 -- sendAddItemToContainer() MP-sync fix (antagonist/DONE.md,
@@ -483,35 +473,6 @@ local function runVHSLinesTest(p)
         pcall(function() sendAddItemToContainer(inventory, item) end)
     end
     print("TWR.Debug: runVHSLinesTest -- gave VHS-LINES-1 test tape " .. (okAdd and "SUCCEEDED -- insert into a REAL TV via the normal vanilla UI, turn it on, press Play. Watch for native scrolling captions." or "FAILED"))
-end
-
--- VHS-LINES-2 probe: gives the SECOND, distinct test recording
--- (twr.native.lines.test.002 -- see shared/TWR/RecordedMediaRegistry.lua).
--- Play VHS-LINES-1's tape through a real TV first, eject it, then
--- insert+play THIS tape through the SAME TV. PASS = only "TWR SECOND
--- TAPE LINE A/B/C" appear, never test.001's lines -- proves distinct
--- MediaData registrations don't cross content on the same device.
-local function runVHSLinesTest2(p)
-    local okInv, inventory = safeCall(p, "getInventory")
-    if not okInv or not inventory then return end
-
-    local item, err = TWR.Mechanics.RecordedMedia.buildItem({
-        contentId = "twr.native.lines.test.002",
-        mediaId = "TWR_NATIVE_LINES_TEST_002",
-        displayName = "TWR Native Lines Test B",
-        lines = { "TWR SECOND TAPE LINE A", "TWR SECOND TAPE LINE B", "TWR SECOND TAPE LINE C" },
-        discoveryKey = "twr_native_lines_test_002",
-    })
-    if not item then
-        print("TWR.Debug: runVHSLinesTest2 -- buildItem FAILED: " .. tostring(err))
-        return
-    end
-
-    local okAdd = safeCall(inventory, "AddItem", item)
-    if okAdd then
-        pcall(function() sendAddItemToContainer(inventory, item) end)
-    end
-    print("TWR.Debug: runVHSLinesTest2 -- gave VHS-LINES-2 test tape " .. (okAdd and "SUCCEEDED -- eject the VHS-LINES-1 tape from the TV first, then insert+play this one. Content must NOT match test.001's lines." or "FAILED"))
 end
 
 -- P3 (controlled key) debug test -- gives a key with a fixed,
@@ -614,319 +575,6 @@ local function runFixtureKVLS(p)
         .. " -- unlock with the key, take the tape (no direct watch path -- needs a real TV, see vhs-device-research.md). KVLS-3 onward (quest-step advance / sleep / final reward) intentionally not wired, needs the real quest dispatcher.")
 end
 
--- VHS-A live probe (no mutation) -- scans nearby squares for any
--- object carrying DeviceData (radios AND TVs both use this same class
--- -- confirmed real: ISDeviceBatteryAction.lua's own
--- getDeviceDataFromParameter calls square:getDeviceData() directly,
--- not tied to iterating a specific object class) and reports what it
--- finds. Read-only -- does not create, insert, lock, or otherwise
--- touch anything. See antagonist/tests/vhs-device-research.md.
-local FIND_TV_RADIUS = 8
-
-local function runFindNearbyTV(p)
-    local okX, x = safeCall(p, "getX")
-    local okY, y = safeCall(p, "getY")
-    local okZ, z = safeCall(p, "getZ")
-    if not (okX and okY and okZ) then return end
-
-    local okCell, cell = pcall(function() return getCell() end)
-    if not okCell or not cell then
-        print("TWR.Debug: runFindNearbyTV -- getCell() failed")
-        return
-    end
-
-    local found = 0
-    for dx = -FIND_TV_RADIUS, FIND_TV_RADIUS do
-        for dy = -FIND_TV_RADIUS, FIND_TV_RADIUS do
-            local okSq, square = pcall(function() return cell:getGridSquare(math.floor(x) + dx, math.floor(y) + dy, math.floor(z)) end)
-            if okSq and square then
-                local okDD, deviceData = safeCall(square, "getDeviceData")
-                if okDD and deviceData then
-                    found = found + 1
-                    local okType, mediaType = safeCall(deviceData, "getMediaType")
-                    local okOn, isOn = safeCall(deviceData, "getIsTurnedOn")
-                    local okHas, hasMedia = safeCall(deviceData, "hasMedia")
-                    local okPlaying, isPlaying = safeCall(deviceData, "isPlayingMedia")
-
-                    local objNames = {}
-                    local okObjs, objects = safeCall(square, "getObjects")
-                    if okObjs and objects then
-                        for i = 0, objects:size() - 1 do
-                            local okName, name = safeCall(objects:get(i), "getObjectName")
-                            if okName and name then table.insert(objNames, name) end
-                        end
-                    end
-
-                    print("TWR.Debug: runFindNearbyTV -- [" .. found .. "] square=(" .. (math.floor(x) + dx) .. "," .. (math.floor(y) + dy) .. "," .. math.floor(z) .. ")"
-                        .. " mediaType=" .. describe(okType, mediaType) .. " (0=CD/audio,1=VHS)"
-                        .. " isTurnedOn=" .. describe(okOn, isOn)
-                        .. " hasMedia=" .. describe(okHas, hasMedia)
-                        .. " isPlayingMedia=" .. describe(okPlaying, isPlaying)
-                        .. " objects=[" .. table.concat(objNames, ",") .. "]")
-                end
-            end
-        end
-    end
-
-    print("TWR.Debug: runFindNearbyTV -- scan complete, radius=" .. FIND_TV_RADIUS .. ", found " .. found .. " device(s)")
-end
-
--- VHS-E-equivalent probe (read-only): for any nearby TELEVISION
--- currently playing media, tries to identify the ACTUAL physical
--- inserted item (not just its shared carrier MediaData identity,
--- which is the same for every TWR tape) via
--- deviceData:getParent() -> the owning IsoTelevision world object ->
--- getContainer() -> scan items for modData.TWR_isVHS, same
--- container-scan pattern already proven in Container.findExistingContainer.
--- UNCONFIRMED whether TVs actually store the inserted tape in a
--- regular ItemContainer this way -- that is exactly what this probe
--- exists to find out.
-local function runCheckTVContent(p)
-    local okX, x = safeCall(p, "getX")
-    local okY, y = safeCall(p, "getY")
-    local okZ, z = safeCall(p, "getZ")
-    if not (okX and okY and okZ) then return end
-
-    local okCell, cell = pcall(function() return getCell() end)
-    if not okCell or not cell then return end
-
-    local checked = 0
-    for dx = -FIND_TV_RADIUS, FIND_TV_RADIUS do
-        for dy = -FIND_TV_RADIUS, FIND_TV_RADIUS do
-            local okSq, square = pcall(function() return cell:getGridSquare(math.floor(x) + dx, math.floor(y) + dy, math.floor(z)) end)
-            if okSq and square then
-                local okDD, deviceData = safeCall(square, "getDeviceData")
-                if okDD and deviceData then
-                    local okIsTV, isTV = safeCall(deviceData, "getIsTelevision")
-                    local okPlaying, isPlaying = safeCall(deviceData, "isPlayingMedia")
-                    if okIsTV and isTV then
-                        checked = checked + 1
-                        print("TWR.Debug: runCheckTVContent -- [" .. checked .. "] TV at (" .. (math.floor(x) + dx) .. "," .. (math.floor(y) + dy) .. "," .. math.floor(z) .. ")"
-                            .. " isPlayingMedia=" .. describe(okPlaying, isPlaying))
-
-                        local okParent, parent = safeCall(deviceData, "getParent")
-                        if okParent and parent then
-                            local okC, container = safeCall(parent, "getContainer")
-                            if okC and container then
-                                local okItems, items = safeCall(container, "getItems")
-                                if okItems and items then
-                                    print("TWR.Debug: runCheckTVContent --   parent container has " .. items:size() .. " item(s)")
-                                    for i = 0, items:size() - 1 do
-                                        local item = items:get(i)
-                                        local okName, name = safeCall(item, "getName")
-                                        local okData, modData = safeCall(item, "getModData")
-                                        local isTWR = okData and modData and modData.TWR_isVHS
-                                        print("TWR.Debug: runCheckTVContent --   item[" .. i .. "]=" .. describe(okName, name)
-                                            .. " TWR_isVHS=" .. tostring(isTWR)
-                                            .. (isTWR and (" TWR_vhsText=" .. tostring(modData.TWR_vhsText)) or ""))
-                                    end
-                                else
-                                    print("TWR.Debug: runCheckTVContent --   parent:getContainer():getItems() FAILED")
-                                end
-                            else
-                                print("TWR.Debug: runCheckTVContent --   parent:getContainer() FAILED/nil -- TV object has no item container")
-                            end
-
-                            -- getContainer() failed -- try plausible
-                            -- direct getters on both deviceData and
-                            -- parent as a fast trial-and-error pass
-                            -- (grep-based discovery only finds methods
-                            -- vanilla Lua actually calls somewhere;
-                            -- this covers the blind spot).
-                            for _, candidate in ipairs({ "getMediaItem", "getInsertedItem", "getItem", "getCurrentItem", "getTape" }) do
-                                local okC1, v1 = safeCall(deviceData, candidate)
-                                if okC1 then
-                                    print("TWR.Debug: runCheckTVContent --   deviceData:" .. candidate .. "() SUCCEEDED -- " .. describe(okC1, v1))
-                                end
-                                local okC2, v2 = safeCall(parent, candidate)
-                                if okC2 then
-                                    print("TWR.Debug: runCheckTVContent --   parent:" .. candidate .. "() SUCCEEDED -- " .. describe(okC2, v2))
-                                end
-                            end
-                        else
-                            print("TWR.Debug: runCheckTVContent --   deviceData:getParent() FAILED/nil")
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    print("TWR.Debug: runCheckTVContent -- scan complete, checked " .. checked .. " television(s)")
-end
-
--- VHS quest-signal groundwork: confirms deviceData:getMediaData() is a
--- real, Lua-callable API (per CGPT-020's official-API research, not yet
--- confirmed live before this probe) and that the object it returns can
--- be matched back to a contentId via reference equality against
--- shared/TWR/RecordedMediaRegistry.lua's registry table -- the exact
--- mechanism a future automatic "player is watching contentId=X" quest
--- trigger would depend on. This is READ-ONLY, no signal is emitted.
-local function findContentIdForMediaData(mediaData)
-    if not (TWR.RecordedMediaRegistry and TWR.RecordedMediaRegistry.registry) then
-        return nil
-    end
-    for contentId, data in pairs(TWR.RecordedMediaRegistry.registry) do
-        if data == mediaData then
-            return contentId
-        end
-    end
-    return nil
-end
-
-local function runCheckMediaIdentity(p)
-    local okX, x = safeCall(p, "getX")
-    local okY, y = safeCall(p, "getY")
-    local okZ, z = safeCall(p, "getZ")
-    if not (okX and okY and okZ) then return end
-
-    local okCell, cell = pcall(function() return getCell() end)
-    if not okCell or not cell then return end
-
-    local checked = 0
-    for dx = -FIND_TV_RADIUS, FIND_TV_RADIUS do
-        for dy = -FIND_TV_RADIUS, FIND_TV_RADIUS do
-            local okSq, square = pcall(function() return cell:getGridSquare(math.floor(x) + dx, math.floor(y) + dy, math.floor(z)) end)
-            if okSq and square then
-                local okDD, deviceData = safeCall(square, "getDeviceData")
-                if okDD and deviceData then
-                    local okHas, hasMedia = safeCall(deviceData, "hasMedia")
-                    local okPlaying, isPlaying = safeCall(deviceData, "isPlayingMedia")
-                    if okHas and hasMedia then
-                        checked = checked + 1
-                        local okMD, mediaData = safeCall(deviceData, "getMediaData")
-                        local contentId = okMD and mediaData and findContentIdForMediaData(mediaData)
-                        print("TWR.Debug: runCheckMediaIdentity -- [" .. checked .. "] square=(" .. (math.floor(x) + dx) .. "," .. (math.floor(y) + dy) .. "," .. math.floor(z) .. ")"
-                            .. " hasMedia=" .. describe(okHas, hasMedia)
-                            .. " isPlayingMedia=" .. describe(okPlaying, isPlaying)
-                            .. " getMediaData()=" .. describe(okMD, mediaData ~= nil and "non-nil object" or mediaData)
-                            .. " resolvedContentId=" .. tostring(contentId))
-                    end
-                end
-            end
-        end
-    end
-
-    print("TWR.Debug: runCheckMediaIdentity -- scan complete, checked " .. checked .. " device(s) with hasMedia=true")
-end
-
--- VHS-EJECT-IDENTITY probe (antagonist/tests/
--- vhs-live-handoff-chatgpt-response.md): gives a tape with a known
--- itemID (printed here), custom display name, TWR_contentId/
--- TWR_discoveryKey, and one extra harmless marker
--- (TWR_ejectTestMarker). Insert it into a real TV, optionally play,
--- then EJECT it through the normal vanilla UI. Run
--- check_vhs_eject_item afterward to see what survived.
-local function runVHSEjectTest(p)
-    local okInv, inventory = safeCall(p, "getInventory")
-    if not okInv or not inventory then return end
-
-    local item, err = TWR.Mechanics.RecordedMedia.buildItem({
-        contentId = "twr.native.lines.test.001",
-        mediaId = "TWR_EJECT_TEST_001",
-        displayName = "TWR Eject Test Tape",
-        lines = { "TWR NATIVE LINE ONE", "TWR NATIVE LINE TWO" },
-        discoveryKey = "twr_eject_test_001",
-    })
-    if not item then
-        print("TWR.Debug: runVHSEjectTest -- buildItem FAILED: " .. tostring(err))
-        return
-    end
-
-    local okData, modData = safeCall(item, "getModData")
-    if okData and modData then
-        modData.TWR_ejectTestMarker = "EJECT_MARKER_12345"
-    end
-
-    local okId, itemId = safeCall(item, "getID")
-    local okAdd = safeCall(inventory, "AddItem", item)
-    if okAdd then
-        pcall(function() sendAddItemToContainer(inventory, item) end)
-    end
-    print("TWR.Debug: runVHSEjectTest -- gave VHS-EJECT-IDENTITY test tape " .. (okAdd and "SUCCEEDED" or "FAILED")
-        .. " -- itemID=" .. describe(okId, itemId) .. " displayName='TWR Eject Test Tape' marker=EJECT_MARKER_12345."
-        .. " Insert into a real TV, optionally play, then EJECT through the normal vanilla UI, then run check_vhs_eject_item.")
-end
-
--- Companion probe for VHS-EJECT-IDENTITY: scans the player's inventory
--- AND nearby containers/ground (same radius-2 pattern as
--- RecordedMedia.lua's findNearbyItemById) for any item carrying
--- TWR_isVHS, and reports itemID/name/modData/resolved MediaData
--- identity so it can be compared against runVHSEjectTest's printed
--- itemID from before insertion.
-local EJECT_CHECK_RADIUS = 2
-
-local function runCheckVHSEjectItem(p)
-    local okX, x = safeCall(p, "getX")
-    local okY, y = safeCall(p, "getY")
-    local okZ, z = safeCall(p, "getZ")
-    if not (okX and okY and okZ) then return end
-
-    local okCell, cell = pcall(function() return getCell() end)
-    if not okCell or not cell then return end
-
-    local function reportItem(item, source)
-        local okId, itemId = safeCall(item, "getID")
-        local okName, name = safeCall(item, "getName")
-        local okData, modData = safeCall(item, "getModData")
-        local isTWR = okData and modData and modData.TWR_isVHS
-        local okMD, mediaData = safeCall(item, "getRecordedMediaData")
-        local resolvedContentId = okMD and mediaData and findContentIdForMediaData(mediaData)
-        print("TWR.Debug: runCheckVHSEjectItem -- [" .. source .. "] itemID=" .. describe(okId, itemId)
-            .. " name=" .. describe(okName, name)
-            .. " TWR_isVHS=" .. tostring(isTWR)
-            .. " TWR_contentId=" .. tostring(isTWR and modData.TWR_contentId or nil)
-            .. " TWR_discoveryKey=" .. tostring(isTWR and modData.TWR_discoveryKey or nil)
-            .. " TWR_ejectTestMarker=" .. tostring(isTWR and modData.TWR_ejectTestMarker or nil)
-            .. " resolvedMediaDataContentId=" .. tostring(resolvedContentId))
-    end
-
-    local found = 0
-    local okInv, inv = safeCall(p, "getInventory")
-    if okInv and inv then
-        local okItems, items = safeCall(inv, "getItems")
-        if okItems and items then
-            for i = 0, items:size() - 1 do
-                local item = items:get(i)
-                local okData, modData = safeCall(item, "getModData")
-                if okData and modData and modData.TWR_isVHS then
-                    found = found + 1
-                    reportItem(item, "inventory")
-                end
-            end
-        end
-    end
-
-    for dx = -EJECT_CHECK_RADIUS, EJECT_CHECK_RADIUS do
-        for dy = -EJECT_CHECK_RADIUS, EJECT_CHECK_RADIUS do
-            local okSq, square = pcall(function() return cell:getGridSquare(math.floor(x) + dx, math.floor(y) + dy, math.floor(z)) end)
-            if okSq and square then
-                local okObjs, objects = safeCall(square, "getObjects")
-                if okObjs and objects then
-                    for i = 0, objects:size() - 1 do
-                        local okC, container = safeCall(objects:get(i), "getContainer")
-                        if okC and container then
-                            local okItems, items = safeCall(container, "getItems")
-                            if okItems and items then
-                                for j = 0, items:size() - 1 do
-                                    local item = items:get(j)
-                                    local okData, modData = safeCall(item, "getModData")
-                                    if okData and modData and modData.TWR_isVHS then
-                                        found = found + 1
-                                        reportItem(item, "square(" .. (math.floor(x) + dx) .. "," .. (math.floor(y) + dy) .. ")")
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    print("TWR.Debug: runCheckVHSEjectItem -- scan complete, found " .. found .. " TWR VHS item(s)")
-end
-
 local function runCoords(p)
     local okX, x = safeCall(p, "getX")
     local okY, y = safeCall(p, "getY")
@@ -936,6 +584,48 @@ local function runCoords(p)
     local text = "TWR coords: (" .. math.floor(x) .. "," .. math.floor(y) .. "," .. math.floor(z) .. ")"
     print("TWR.Debug: runCoords -- " .. text)
     safeCall(p, "Say", text)
+end
+
+-- MAP-SAFE-2 (worldmap-visited-bytecode-chatgpt-review.md) manual
+-- trigger: reveals a 150-tile-radius (300x300) square OFFSET only 250
+-- tiles north of the calling admin's own current position, via the
+-- rebuilt client-first flow (server/TWR/Mechanics/MapReveal.lua ->
+-- client/TWR/Context/MapReveal.lua).
+--
+-- Tuning history (all CONFIRMED live 2026-08-26): a reveal centered
+-- exactly on the caller's own position was indistinguishable from
+-- ground already explored just by standing there ("looks like it...
+-- dont see any differance"). A 500-tile offset was too far -- CONFIRMED
+-- the server->client command still fired and both the local
+-- WorldMapVisited mutation and the real vanilla map/setKnownInSquares
+-- forward succeeded (client log showed the exact success line), yet
+-- nothing was visible even after zooming the map out fully ("nothing
+-- does not reveal any more") -- most likely that offset landed off the
+-- populated map (ocean/void has no visible known-vs-unknown contrast
+-- either way) or simply outside the default map viewport. 250 tiles
+-- (single axis, north only, not diagonal) keeps this near the caller's
+-- existing explored area -- same neighborhood, much likelier to be real
+-- populated terrain -- while still clearing whatever was organically
+-- explored just by standing still.
+--
+-- Also now tells the caller the exact target coordinates via chat
+-- (matching runCoords' own pattern) so there's no ambiguity about where
+-- to look on the map.
+local function runMapReveal(p)
+    local okX, x = safeCall(p, "getX")
+    local okY, y = safeCall(p, "getY")
+    if not (okX and okY) then
+        print("TWR.Debug: runMapReveal -- could not read caller position")
+        return
+    end
+    local cx, cy = math.floor(x), math.floor(y) - 250
+    local ok, err = TWR.Mechanics.MapReveal.revealAroundPoint(p, cx, cy, 150)
+    if not ok then
+        print("TWR.Debug: runMapReveal -- FAILED: " .. tostring(err))
+        return
+    end
+    safeCall(p, "Say", "TWR map reveal target: (" .. cx .. "," .. cy .. ") radius 150 -- look 250 tiles north of here")
+    print("TWR.Debug: runMapReveal -- requested reveal around (" .. cx .. "," .. cy .. ") radius 150")
 end
 
 local MECHANICS = {
@@ -957,20 +647,14 @@ local MECHANICS = {
     recorded_media = runRecordedMedia,
     controlled_key = runControlledKey,
     fixture_kvls = runFixtureKVLS,
-    find_nearby_tv = runFindNearbyTV,
-    check_tv_content = runCheckTVContent,
     vhs_lines_test = runVHSLinesTest,
-    vhs_lines_test_2 = runVHSLinesTest2,
-    check_media_identity = runCheckMediaIdentity,
-    vhs_eject_test = runVHSEjectTest,
-    check_vhs_eject_item = runCheckVHSEjectItem,
-    -- map_reveal DISABLED SERVER-SIDE 2026-08-12 -- removing only the
-    -- client-side button (client/TWR/Context/Debug.lua) was NOT enough:
-    -- a client on a stale/not-yet-updated Workshop version still had
-    -- the old button and could still trigger this. Confirmed live --
-    -- user's map broke a SECOND time via exactly this path. Do not
-    -- re-add until the suspected data-loss root cause (see URGENT/OPEN
-    -- note in existing-world-test-matrix.md) is resolved.
+    -- map_reveal RE-ENABLED 2026-08-15 -- rebuilt as a vanilla-
+    -- equivalent client-first flow after the additive-only bytecode
+    -- confirmation + real vanilla call-site trace (see
+    -- server/TWR/Mechanics/MapReveal.lua's header for the full
+    -- research trail). Still MAP-SAFE-1..6 gated before any further
+    -- promotion -- see worldmap-visited-bytecode-chatgpt-review.md.
+    map_reveal = runMapReveal,
     coords = runCoords,
 }
 

@@ -49,18 +49,14 @@ local MECHANIC_LABELS = {
     { key = "recorded_media", label = "Give dummy VHS tape (P2 test)" },
     { key = "controlled_key", label = "Give dummy controlled key (P3 test)" },
     { key = "fixture_kvls", label = "Spawn key+VHS fixture (P4 KVLS-1/2 test)" },
-    { key = "find_nearby_tv", label = "Find nearby TV/radio (VHS-A probe, read-only)" },
-    { key = "check_tv_content", label = "Check what TV is playing (VHS-E probe, read-only)" },
     { key = "vhs_lines_test", label = "VHS-LINES-1: native caption test (insert into real TV, vanilla UI only)" },
-    { key = "vhs_lines_test_2", label = "VHS-LINES-2: second distinct tape (eject test.001 first, must not cross content)" },
-    { key = "check_media_identity", label = "Check TV media identity (getMediaData->contentId probe, read-only)" },
-    { key = "vhs_eject_test", label = "VHS-EJECT-IDENTITY: give marked tape (insert, eject, then run the check probe)" },
-    { key = "check_vhs_eject_item", label = "VHS-EJECT-IDENTITY: check ejected tape identity (run after ejecting)" },
-    -- map_reveal DISABLED 2026-08-12 -- suspected of wiping previously-
-    -- explored map data on a real dedicated MP client (confirmed prior
-    -- exploration disappeared after a legitimate, small-radius reveal
-    -- call). Root cause not understood yet -- see the URGENT/OPEN note
-    -- in existing-world-test-matrix.md. Do not re-enable until resolved.
+    -- map_reveal RE-ENABLED 2026-08-15 -- rebuilt as a vanilla-
+    -- equivalent client-first flow (server/TWR/Mechanics/MapReveal.lua's
+    -- header has the full research trail). Reveals a 150-tile-radius
+    -- square 250 tiles north of the caller's own position -- server
+    -- also Says the exact target coords in chat. MAP-SAFE-2 style
+    -- manual test.
+    { key = "map_reveal", label = "Reveal map area 250 tiles north (MAP-SAFE-2 test, 150-tile radius)" },
     { key = "coords", label = "Show my coordinates" },
 }
 
