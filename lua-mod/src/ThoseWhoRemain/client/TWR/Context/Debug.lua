@@ -57,6 +57,7 @@ local MECHANIC_LABELS = {
     -- also Says the exact target coords in chat. MAP-SAFE-2 style
     -- manual test.
     { key = "map_reveal", label = "Reveal map area 250 tiles north (MAP-SAFE-2 test, 150-tile radius)" },
+    { key = "container_sprite_probe", label = "Scan nearby containers (sprite/type research, read-only)" },
     { key = "coords", label = "Show my coordinates" },
 }
 

@@ -575,6 +575,67 @@ local function runFixtureKVLS(p)
         .. " -- unlock with the key, take the tape (no direct watch path -- needs a real TV, see vhs-device-research.md). KVLS-3 onward (quest-step advance / sleep / final reward) intentionally not wired, needs the real quest dispatcher.")
 end
 
+-- Read-only research probe for the "nicer boxes for quests" request
+-- (Container.spawnBox currently hardcodes sprite="carpentry_01_19", a
+-- plain wooden crate -- ISWoodenContainer/ISSimpleFurniture's :new()
+-- accepts any sprite string, so real vanilla furniture sprites (filing
+-- cabinets, military crates, footlockers, etc.) are usable the same
+-- way, but the exact real sprite tile NAMES aren't discoverable from
+-- source alone -- grepped vanilla source only ever passes
+-- "carpentry_01_19" through this exact class. Scans nearby squares for
+-- any object with a real container and reports object name + sprite
+-- name + container:getType() (the same "type" ContainerButtonIcons.lua
+-- keys off) so real candidates (cabinet/wardrobe/dresser/
+-- filingcabinet/militarycrate/etc.) can be identified from an actual
+-- world instance. Does not create, insert, lock, or otherwise touch
+-- anything.
+local CONTAINER_PROBE_RADIUS = 6
+
+local function runContainerSpriteProbe(p)
+    local okX, x = safeCall(p, "getX")
+    local okY, y = safeCall(p, "getY")
+    local okZ, z = safeCall(p, "getZ")
+    if not (okX and okY and okZ) then return end
+
+    local okCell, cell = pcall(function() return getCell() end)
+    if not okCell or not cell then return end
+
+    local found = 0
+    for dx = -CONTAINER_PROBE_RADIUS, CONTAINER_PROBE_RADIUS do
+        for dy = -CONTAINER_PROBE_RADIUS, CONTAINER_PROBE_RADIUS do
+            local okSq, square = pcall(function() return cell:getGridSquare(math.floor(x) + dx, math.floor(y) + dy, math.floor(z)) end)
+            if okSq and square then
+                local okObjs, objects = safeCall(square, "getObjects")
+                if okObjs and objects then
+                    for i = 0, objects:size() - 1 do
+                        local obj = objects:get(i)
+                        local okC, container = safeCall(obj, "getContainer")
+                        if okC and container then
+                            found = found + 1
+                            local okName, name = safeCall(obj, "getObjectName")
+                            local okSprite, sprite = safeCall(obj, "getSprite")
+                            local spriteName = nil
+                            if okSprite and sprite then
+                                local okSN, sn = safeCall(sprite, "getName")
+                                spriteName = describe(okSN, sn)
+                            end
+                            local okType, ctype = safeCall(container, "getType")
+                            local okCap, capacity = safeCall(container, "getCapacity")
+                            print("TWR.Debug: runContainerSpriteProbe -- [" .. found .. "] square=(" .. (math.floor(x) + dx) .. "," .. (math.floor(y) + dy) .. "," .. math.floor(z) .. ")"
+                                .. " objectName=" .. describe(okName, name)
+                                .. " sprite=" .. tostring(spriteName)
+                                .. " containerType=" .. describe(okType, ctype)
+                                .. " capacity=" .. describe(okCap, capacity))
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    print("TWR.Debug: runContainerSpriteProbe -- scan complete, radius=" .. CONTAINER_PROBE_RADIUS .. ", found " .. found .. " container(s)")
+end
+
 local function runCoords(p)
     local okX, x = safeCall(p, "getX")
     local okY, y = safeCall(p, "getY")
@@ -655,6 +716,7 @@ local MECHANICS = {
     -- research trail). Still MAP-SAFE-1..6 gated before any further
     -- promotion -- see worldmap-visited-bytecode-chatgpt-review.md.
     map_reveal = runMapReveal,
+    container_sprite_probe = runContainerSpriteProbe,
     coords = runCoords,
 }
 

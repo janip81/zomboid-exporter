@@ -70,6 +70,19 @@
 -- is apparently what actually equips the worn clothing model, not just
 -- loot -- dressInNamedOutfit() alone only selects the definition.
 --
+-- WORN/AGED LOOK FIX 2026-08-26: corpses spawned visually dressed
+-- (per the OUTFIT FIX above) but in pristine, brand-new-looking clothes
+-- -- not the dirty/bloodied look a real zombie corpse should have.
+-- Root cause: dressInNamedOutfit()/DoZombieInventory() only select and
+-- equip the outfit definition; they don't apply any wear. Real vanilla
+-- corpse-creation call sites (client/Tutorial/Steps.lua's
+-- SneakStep/BandageStep, grepped) all call zombie:addBlood(nil, false,
+-- true, false) and zombie:addHole(nil) 7-16 times each, right after
+-- dressing and BEFORE IsoDeadBody.new() -- this is vanilla's own real
+-- mechanism for the aged/bloodied look, applied to the model (which
+-- carries through to the worn clothing layer), not a clothing-condition
+-- field. Added the same calls below.
+--
 -- No require(), no cached cross-file locals -- see TWR.Constants'
 -- header for why.
 -- CONFIRMED live 2026-08-11: media/lua/server/ files are ALSO loaded by
@@ -134,6 +147,14 @@ function Corpse.spawnPermanentCorpse(x, y, z, outfit, femaleChance, lootItems)
     safeCall(zombie, "dressInNamedOutfit", outfit)
     safeCall(zombie, "resetModelNextFrame")
     safeCall(zombie, "DoZombieInventory")
+
+    -- Worn/aged look -- real vanilla precedent (client/Tutorial/Steps.lua),
+    -- see file header. Applied to the model before IsoDeadBody.new(),
+    -- matching every real usage found.
+    for _ = 1, 10 do
+        safeCall(zombie, "addBlood", nil, false, true, false)
+        safeCall(zombie, "addHole", nil)
+    end
 
     local okBody, body = pcall(function() return IsoDeadBody.new(zombie, false) end)
     if not okBody or not body then return false end
