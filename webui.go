@@ -40,8 +40,13 @@ type webuiPageData struct {
 	TWREnabled bool
 
 	// dashboard
-	Players []webuiPlayerRow
-	Events  []webuiEventRow
+	Players          []webuiPlayerRow
+	Events           []webuiEventRow
+	TopKillers       []webuiLeaderboardRow
+	MostTraveled     []webuiLeaderboardRow
+	RoadWarriors     []webuiLeaderboardRow
+	MostDeaths       []webuiLeaderboardRow
+	LongestSurvivors []webuiLeaderboardRow
 
 	// twr
 	Campaigns      []webuiCampaignRow
@@ -94,6 +99,27 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, pg *pgStore, server
 	}
 	data.Events = events
 
+	data.TopKillers, err = webuiFetchLeaderboard(ctx, pg, webuiQueryTopKillers)
+	if err != nil {
+		slog.Warn("webui: fetch top killers failed", "err", err)
+	}
+	data.MostTraveled, err = webuiFetchLeaderboard(ctx, pg, webuiQueryMostTraveled)
+	if err != nil {
+		slog.Warn("webui: fetch most traveled failed", "err", err)
+	}
+	data.RoadWarriors, err = webuiFetchLeaderboard(ctx, pg, webuiQueryRoadWarriors)
+	if err != nil {
+		slog.Warn("webui: fetch road warriors failed", "err", err)
+	}
+	data.MostDeaths, err = webuiFetchLeaderboard(ctx, pg, webuiQueryMostDeaths)
+	if err != nil {
+		slog.Warn("webui: fetch most deaths failed", "err", err)
+	}
+	data.LongestSurvivors, err = webuiFetchLeaderboard(ctx, pg, webuiQueryLongestSurvivors)
+	if err != nil {
+		slog.Warn("webui: fetch longest survivors failed", "err", err)
+	}
+
 	webuiRender(w, "dashboard", data)
 }
 
@@ -143,6 +169,92 @@ func webuiRender(w http.ResponseWriter, name string, data webuiPageData) {
 // tolerant of the OTHER queries failing (renderDashboard/renderTWR
 // log-and-continue per query, same "partial page beats no page"
 // posture as everything else in this file).
+
+// Leaderboard queries all return the same (label, formatted value)
+// shape, so they share one fetch helper -- unlike the TWR row types
+// below (each genuinely different columns), these five are
+// identical in shape immediately, not a hypothetical future need.
+//
+// Field names (zombieKills, km) are grounded in the actual Lua
+// trackers that emit them (lua-mod/src/ExporterLog/Trackers/Kills.lua,
+// Vehicles.lua, Movement.lua) and in discord-bot/milestones.go's own
+// use of the same fields -- not guessed.
+type webuiLeaderboardRow struct {
+	Label, Value string
+}
+
+func webuiFetchLeaderboard(ctx context.Context, pg *pgStore, query string) ([]webuiLeaderboardRow, error) {
+	rows, err := pg.pool.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []webuiLeaderboardRow
+	for rows.Next() {
+		var r webuiLeaderboardRow
+		if err := rows.Scan(&r.Label, &r.Value); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// kill events carry zombieKills as an already-running total (per the
+// Lua tracker), so MAX per player is correct here -- unlike
+// movement_distance/driving_distance below, which emit incremental
+// per-session deltas and need SUM instead.
+const webuiQueryTopKillers = `
+	SELECT COALESCE(p.last_username, e.steam_id), MAX((e.details->>'zombieKills')::int)::text
+	FROM events e
+	JOIN players p ON p.steam_id = e.steam_id
+	WHERE e.event_type = 'kill'
+	GROUP BY COALESCE(p.last_username, e.steam_id)
+	ORDER BY MAX((e.details->>'zombieKills')::int) DESC
+	LIMIT 10
+`
+
+const webuiQueryMostTraveled = `
+	SELECT COALESCE(p.last_username, e.steam_id), ROUND(SUM((e.details->>'km')::numeric), 1)::text || ' km'
+	FROM events e
+	JOIN players p ON p.steam_id = e.steam_id
+	WHERE e.event_type = 'movement_distance'
+	GROUP BY COALESCE(p.last_username, e.steam_id)
+	ORDER BY SUM((e.details->>'km')::numeric) DESC
+	LIMIT 10
+`
+
+const webuiQueryRoadWarriors = `
+	SELECT COALESCE(p.last_username, e.steam_id), ROUND(SUM((e.details->>'km')::numeric), 1)::text || ' km'
+	FROM events e
+	JOIN players p ON p.steam_id = e.steam_id
+	WHERE e.event_type = 'driving_distance'
+	GROUP BY COALESCE(p.last_username, e.steam_id)
+	ORDER BY SUM((e.details->>'km')::numeric) DESC
+	LIMIT 10
+`
+
+const webuiQueryMostDeaths = `
+	SELECT COALESCE(p.last_username, c.steam_id), COUNT(*)::text
+	FROM characters c
+	JOIN players p ON p.steam_id = c.steam_id
+	WHERE c.died_at IS NOT NULL
+	GROUP BY COALESCE(p.last_username, c.steam_id)
+	ORDER BY COUNT(*) DESC
+	LIMIT 10
+`
+
+// Per-life ranking (not grouped by player) -- a player's best single
+// life, not a cumulative total across characters.
+const webuiQueryLongestSurvivors = `
+	SELECT COALESCE(p.last_username, c.steam_id) || ' (character #' || c.character_number || ')',
+	       ROUND(c.hours_survived_at_death::numeric, 1)::text || ' hours'
+	FROM characters c
+	JOIN players p ON p.steam_id = c.steam_id
+	WHERE c.hours_survived_at_death IS NOT NULL
+	ORDER BY c.hours_survived_at_death DESC
+	LIMIT 10
+`
 
 type webuiPlayerRow struct {
 	LastUsername, FirstSeen, LastSeen string
@@ -284,9 +396,9 @@ func webuiFetchStepInstances(ctx context.Context, pg *pgStore) ([]webuiStepInsta
 }
 
 type webuiJobRow struct {
-	ID, ActionType, Status, AttemptCount                     string
-	CreatedAt, DispatchedAt, AcceptedAt, AppliedAt            string
-	StatusBadgeClass                                          string
+	ID, ActionType, Status, AttemptCount           string
+	CreatedAt, DispatchedAt, AcceptedAt, AppliedAt string
+	StatusBadgeClass                               string
 }
 
 func webuiFetchJobs(ctx context.Context, pg *pgStore) ([]webuiJobRow, error) {

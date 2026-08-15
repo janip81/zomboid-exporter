@@ -16,6 +16,40 @@
 <div class="empty">No players recorded yet.</div>
 {{end}}
 
+<h2>Leaderboards</h2>
+<div class="leaderboard-grid">
+  <div class="leaderboard-card">
+    <h3>Top Killers</h3>
+    {{if .TopKillers}}
+    <ol>{{range .TopKillers}}<li>{{.Label}}<span class="value">{{.Value}}</span></li>{{end}}</ol>
+    {{else}}<div class="empty">No data yet.</div>{{end}}
+  </div>
+  <div class="leaderboard-card">
+    <h3>Most Traveled (on foot)</h3>
+    {{if .MostTraveled}}
+    <ol>{{range .MostTraveled}}<li>{{.Label}}<span class="value">{{.Value}}</span></li>{{end}}</ol>
+    {{else}}<div class="empty">No data yet.</div>{{end}}
+  </div>
+  <div class="leaderboard-card">
+    <h3>Road Warriors (driving)</h3>
+    {{if .RoadWarriors}}
+    <ol>{{range .RoadWarriors}}<li>{{.Label}}<span class="value">{{.Value}}</span></li>{{end}}</ol>
+    {{else}}<div class="empty">No data yet.</div>{{end}}
+  </div>
+  <div class="leaderboard-card">
+    <h3>Most Deaths</h3>
+    {{if .MostDeaths}}
+    <ol>{{range .MostDeaths}}<li>{{.Label}}<span class="value">{{.Value}}</span></li>{{end}}</ol>
+    {{else}}<div class="empty">No data yet.</div>{{end}}
+  </div>
+  <div class="leaderboard-card">
+    <h3>Longest Survivors (single life)</h3>
+    {{if .LongestSurvivors}}
+    <ol>{{range .LongestSurvivors}}<li>{{.Label}}<span class="value">{{.Value}}</span></li>{{end}}</ol>
+    {{else}}<div class="empty">No data yet.</div>{{end}}
+  </div>
+</div>
+
 <h2>Recent events</h2>
 {{if .Events}}
 <table>
