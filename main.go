@@ -361,6 +361,7 @@ func main() {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
+	registerWebUIRoutes(mux, pgConcrete, *serverName, *twrEnabled)
 
 	srv := &http.Server{Addr: *listenAddr, Handler: mux}
 	go func() {

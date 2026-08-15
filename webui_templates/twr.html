@@ -1,0 +1,79 @@
+{{define "twr"}}
+{{template "layout-head" .}}
+<h2>Campaigns</h2>
+{{if .Campaigns}}
+<table>
+  <tr><th>ID</th><th>Key</th><th>State</th><th>Started</th></tr>
+  {{range .Campaigns}}
+  <tr>
+    <td class="mono">{{.ID}}</td>
+    <td class="mono">{{.CampaignKey}}</td>
+    <td><span class="badge {{.StateBadgeClass}}">{{.State}}</span></td>
+    <td>{{.StartedAt}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}
+<div class="empty">No campaigns activated yet.</div>
+{{end}}
+
+<h2>Quest instances</h2>
+{{if .QuestInstances}}
+<table>
+  <tr><th>ID</th><th>Quest</th><th>State</th><th>Started</th><th>Completed</th></tr>
+  {{range .QuestInstances}}
+  <tr>
+    <td class="mono">{{.ID}}</td>
+    <td class="mono">{{.QuestKey}}</td>
+    <td><span class="badge {{.StateBadgeClass}}">{{.State}}</span></td>
+    <td>{{.StartedAt}}</td>
+    <td>{{.CompletedAt}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}
+<div class="empty">No quest instances yet.</div>
+{{end}}
+
+<h2>Step instances</h2>
+{{if .StepInstances}}
+<table>
+  <tr><th>ID</th><th>Quest instance</th><th>Step</th><th>State</th><th>Triggered</th><th>Completed</th></tr>
+  {{range .StepInstances}}
+  <tr>
+    <td class="mono">{{.ID}}</td>
+    <td class="mono">{{.QuestInstanceID}}</td>
+    <td class="mono">{{.StepKey}}</td>
+    <td><span class="badge {{.StateBadgeClass}}">{{.State}}</span></td>
+    <td>{{.TriggeredAt}}</td>
+    <td>{{.CompletedAt}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}
+<div class="empty">No step instances yet.</div>
+{{end}}
+
+<h2>Recent jobs (last 25)</h2>
+{{if .Jobs}}
+<table>
+  <tr><th>ID</th><th>Action</th><th>Status</th><th>Attempts</th><th>Created</th><th>Dispatched</th><th>Accepted</th><th>Applied</th></tr>
+  {{range .Jobs}}
+  <tr>
+    <td class="mono">{{.ID}}</td>
+    <td class="mono">{{.ActionType}}</td>
+    <td><span class="badge {{.StatusBadgeClass}}">{{.Status}}</span></td>
+    <td>{{.AttemptCount}}</td>
+    <td>{{.CreatedAt}}</td>
+    <td>{{.DispatchedAt}}</td>
+    <td>{{.AcceptedAt}}</td>
+    <td>{{.AppliedAt}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}
+<div class="empty">No jobs yet.</div>
+{{end}}
+<p class="note">Read-only scaffold -- no retry/mutation actions wired up yet. See job attempts/artifacts directly via psql for now.</p>
+{{template "layout-foot" .}}
+{{end}}

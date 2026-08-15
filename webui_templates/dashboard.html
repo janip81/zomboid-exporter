@@ -1,0 +1,36 @@
+{{define "dashboard"}}
+{{template "layout-head" .}}
+<h2>Players ({{len .Players}})</h2>
+{{if .Players}}
+<table>
+  <tr><th>Username</th><th>First seen</th><th>Last seen</th></tr>
+  {{range .Players}}
+  <tr>
+    <td class="mono">{{.LastUsername}}</td>
+    <td>{{.FirstSeen}}</td>
+    <td>{{.LastSeen}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}
+<div class="empty">No players recorded yet.</div>
+{{end}}
+
+<h2>Recent events</h2>
+{{if .Events}}
+<table>
+  <tr><th>Type</th><th>Steam ID</th><th>Occurred</th><th>Details</th></tr>
+  {{range .Events}}
+  <tr>
+    <td><span class="badge badge-neutral">{{.EventType}}</span></td>
+    <td class="mono">{{.SteamID}}</td>
+    <td>{{.OccurredAt}}</td>
+    <td class="mono">{{.Details}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}
+<div class="empty">No events recorded yet.</div>
+{{end}}
+{{template "layout-foot" .}}
+{{end}}
