@@ -168,18 +168,36 @@ function Corpse.spawnPermanentCorpse(x, y, z, outfit, femaleChance, lootItems)
     -- DoZombieInventory() only select+equip the outfit at full/default
     -- condition -- they apply no wear at all. Explicitly lowering each
     -- worn item's condition to a random low fraction of its max here.
+    -- DIAGNOSTIC 2026-08-26: round 2 (setCondition on worn items) was
+    -- CONFIRMED LIVE to still look pristine. Before guessing a third
+    -- time, print exactly what getWornItems() actually returns and
+    -- whether the condition mutation sticks, so the next fix targets
+    -- the real cause instead of another blind guess.
     local okWorn, wornItems = safeCall(zombie, "getWornItems")
+    print("TWR.Mechanics.Corpse: spawnPermanentCorpse -- getWornItems() ok=" .. tostring(okWorn) .. " wornItems=" .. tostring(wornItems))
     if okWorn and wornItems then
         local okSize, size = safeCall(wornItems, "size")
+        print("TWR.Mechanics.Corpse: spawnPermanentCorpse -- wornItems:size() ok=" .. tostring(okSize) .. " size=" .. tostring(size))
         if okSize then
             for i = 0, size - 1 do
                 local okItem, item = safeCall(wornItems, "get", i)
                 if okItem and item then
+                    local okName, name = safeCall(item, "getName")
+                    local okCondBefore, condBefore = safeCall(item, "getCondition")
                     local okMax, maxCond = safeCall(item, "getConditionMax")
+                    local worn = nil
                     if okMax and maxCond and maxCond > 0 then
-                        local worn = ZombRand(math.floor(maxCond * 0.4)) + 1
+                        worn = ZombRand(math.floor(maxCond * 0.4)) + 1
                         safeCall(item, "setCondition", worn)
                     end
+                    local okCondAfter, condAfter = safeCall(item, "getCondition")
+                    print("TWR.Mechanics.Corpse: spawnPermanentCorpse -- item[" .. i .. "]=" .. tostring(okName and name or "?")
+                        .. " conditionBefore=" .. tostring(okCondBefore and condBefore or "?")
+                        .. " conditionMax=" .. tostring(okMax and maxCond or "?")
+                        .. " setTo=" .. tostring(worn)
+                        .. " conditionAfter=" .. tostring(okCondAfter and condAfter or "?"))
+                else
+                    print("TWR.Mechanics.Corpse: spawnPermanentCorpse -- item[" .. i .. "] getItem FAILED ok=" .. tostring(okItem))
                 end
             end
         end
