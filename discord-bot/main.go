@@ -47,8 +47,15 @@ func main() {
 	curatorNaturalChat := flag.Bool("curator-natural-chat", false, "React to the standalone word 'curator' in ordinary channel messages, not just /curator. REQUIRES the Discord Message Content privileged intent to be enabled for this bot in the Discord Developer Portal, or Discord silently sends empty message content and this never triggers.")
 	curatorChannelID := flag.String("curator-channel-id", "", "Restrict the natural chat trigger to one channel ID. Empty means any channel the bot can see.")
 	curatorAmbientReplyChance := flag.Float64("curator-ambient-reply-chance", 0.25, "Probability (0-1) of replying to an ORDINARY statement that merely mentions 'curator' (as opposed to a direct question/address, which always attempts a reply).")
-	curatorUserCooldown := flag.Duration("curator-user-cooldown", 20*time.Second, "Minimum time between natural-chat Curator replies to the same Discord user.")
-	curatorGlobalCooldown := flag.Duration("curator-global-cooldown", 5*time.Second, "Minimum time between ANY two natural-chat Curator replies, across all users -- caps worst-case LLM call rate during a burst of mentions.")
+	curatorUserCooldown := flag.Duration("curator-user-cooldown", 20*time.Second, "Minimum time between natural-chat Curator replies (canned or LLM) to the same Discord user. Purely conversational pacing -- see --llm-user-cooldown for the LLM-call-specific budget shared with /curator.")
+	curatorGlobalCooldown := flag.Duration("curator-global-cooldown", 5*time.Second, "Minimum time between ANY two natural-chat Curator replies, across all users. Purely conversational pacing -- see --llm-global-cooldown for the LLM-call-specific budget.")
+	// CGPT-051-A: dedicated to the LLM CALL itself, shared by /curator and
+	// natural chat alike (curator_llm_limiter.go) -- distinct from
+	// curator-user/global-cooldown above, which only pace natural-chat
+	// replies (including free canned ones) and never applied to /curator
+	// at all.
+	llmUserCooldown := flag.Duration("llm-user-cooldown", 30*time.Second, "Minimum time between LLM provider calls for the same Discord user, shared by /curator and natural chat. Canned replies are exempt.")
+	llmGlobalCooldown := flag.Duration("llm-global-cooldown", 5*time.Second, "Minimum time between ANY two LLM provider calls, across all users and both /curator and natural chat -- the real ceiling on provider quota consumption.")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -116,6 +123,7 @@ func main() {
 		serverName:   *serverName,
 		db:           dbPool,
 		llmPool:      llmPool,
+		llmLimiter:   newCuratorLLMLimiter(*llmUserCooldown, *llmGlobalCooldown),
 	}
 
 	discordSession, err := discordgo.New("Bot " + discordToken)

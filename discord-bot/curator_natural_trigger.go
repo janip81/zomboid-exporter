@@ -42,6 +42,11 @@ type curatorNaturalTrigger struct {
 }
 
 func newCuratorNaturalTrigger(cfg curatorNaturalTriggerConfig, deps botDeps) *curatorNaturalTrigger {
+	if cfg.AmbientReplyChance < 0 {
+		cfg.AmbientReplyChance = 0
+	} else if cfg.AmbientReplyChance > 1 {
+		cfg.AmbientReplyChance = 1
+	}
 	return &curatorNaturalTrigger{cfg: cfg, deps: deps, lastUserReply: make(map[string]time.Time)}
 }
 
@@ -119,12 +124,16 @@ func (t *curatorNaturalTrigger) handleMessageCreate(s *discordgo.Session, m *dis
 // "curator", or is phrased as a question mentioning "curator" anywhere.
 // Anything else eligible (standalone "curator" elsewhere in an ordinary
 // statement) falls to the ambient/probabilistic path instead.
+//
+// Checking for "?" ANYWHERE in the message (not just as the final
+// character) deliberately catches trailing chatter like "...lol" or an
+// emoji after the question mark.
 func isDirectCuratorAddress(content string) bool {
 	trimmed := strings.ToLower(strings.TrimSpace(content))
 	if strings.HasPrefix(trimmed, "curator") {
 		return true
 	}
-	return strings.Contains(trimmed, "curator") && strings.HasSuffix(trimmed, "?")
+	return strings.Contains(trimmed, "curator") && strings.Contains(trimmed, "?")
 }
 
 func (t *curatorNaturalTrigger) rollAmbientReply() bool {

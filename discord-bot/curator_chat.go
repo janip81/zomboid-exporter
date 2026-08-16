@@ -81,6 +81,16 @@ func askCurator(ctx context.Context, deps botDeps, discordUserID string, candida
 	if deps.llmPool == nil {
 		return "", false
 	}
+	// CGPT-051-A: the shared rate limiter gates the LLM call itself, only
+	// reached once canned routing has already missed -- canned replies
+	// above never touch it (CURATOR-LLM-RATE-3), and this is the single
+	// choke point shared by BOTH /curator and natural chat
+	// (CURATOR-LLM-RATE-1/2), unlike curatorNaturalTrigger's own
+	// cooldown, which paces natural-chat replies in general, not LLM
+	// calls specifically.
+	if deps.llmLimiter != nil && !deps.llmLimiter.allow(discordUserID) {
+		return "", false
+	}
 
 	contextText := buildCuratorContext(ctx, deps, discordUserID, candidateNames)
 	reply, provider, err := deps.llmPool.Reply(ctx, CuratorRequest{

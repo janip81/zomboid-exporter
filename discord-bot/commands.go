@@ -69,6 +69,7 @@ type botDeps struct {
 	serverName   string
 	db           *pgxpool.Pool
 	llmPool      curatorLLMPool
+	llmLimiter   *curatorLLMLimiter
 }
 
 func interactionUserID(i *discordgo.InteractionCreate) string {

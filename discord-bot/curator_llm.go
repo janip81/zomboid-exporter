@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -104,6 +105,55 @@ var knownAdapters = map[string]bool{
 	adapterOpenAIChat: true,
 }
 
+// isProviderPaidEligible is CGPT-051-B's fix: the original check trusted
+// a DB-supplied allow_paid boolean at face value ("row says free, so
+// it's free") even though credential_slot/model are ALSO DB-supplied --
+// a row could claim allow_paid=false while pointing at a genuinely
+// billable model (e.g. credential_slot=openai with any real OpenAI
+// model), silently incurring real charges. Paid eligibility must be a
+// CODE-enforced policy per credential slot, not a DB assertion.
+//
+// Policy (deliberately conservative -- "never assume a free-tier account
+// stays free" per the review):
+//   - local: always free (no external billing surface at all).
+//   - groq: today's public Groq API has no billable path without an
+//     explicit separate paid-plan opt-in outside this bot's control --
+//     treated as free regardless of the row's own allow_paid value.
+//   - openrouter: only its own documented free-tier convention (a
+//     ":free" model-ID suffix) is trusted as free; anything else on this
+//     slot requires the global paid gate.
+//   - openai: no recognized free-tier path exists on this slot at all --
+//     always requires the global paid gate, regardless of allow_paid.
+//   - anything else: no policy defined, fails closed.
+//
+// If a row's own allow_paid=true, the credential-slot-specific free
+// check is skipped entirely and ONLY the global LLM_ALLOW_PAID gate
+// decides -- a free-tier account exhausting its quota must never
+// silently fall through to paid usage.
+func isProviderPaidEligible(credentialSlot, model string, rowAllowPaid, globalAllowPaid bool) (eligible bool, reason string) {
+	if rowAllowPaid {
+		if !globalAllowPaid {
+			return false, "allow_paid=true but LLM_ALLOW_PAID global gate is not enabled"
+		}
+		return true, ""
+	}
+	switch credentialSlot {
+	case "local":
+		return true, ""
+	case "groq":
+		return true, ""
+	case "openrouter":
+		if strings.HasSuffix(model, ":free") {
+			return true, ""
+		}
+		return false, "openrouter model '" + model + "' is not a recognized free-tier model (missing :free suffix) and allow_paid=false"
+	case "openai":
+		return false, "openai credential_slot has no recognized free-tier path -- requires allow_paid=true and LLM_ALLOW_PAID=true"
+	default:
+		return false, "credential_slot " + credentialSlot + " has no recognized free-tier policy"
+	}
+}
+
 // resolvedProvider is a DB row that has already passed the
 // credential/adapter allowlist check and is ready to build a client
 // from. Immutable once built -- refresh swaps the whole snapshot, never
@@ -129,6 +179,11 @@ type providerHealth struct {
 	lastSuccess      time.Time
 }
 
+// availableAt must only ever be called while p.healthMu is held (see
+// curatorProviderPool.isAvailable) -- CGPT-051-D: an earlier version
+// returned this *providerHealth pointer from a locked getter and then
+// read it AFTER releasing the lock, racing against recordSuccess/
+// recordFailure mutating the same object from a concurrent request.
 func (h *providerHealth) availableAt(now time.Time) bool {
 	if h == nil {
 		return true
@@ -268,8 +323,15 @@ func (p *curatorProviderPool) refreshOnce(ctx context.Context) error {
 	return nil
 }
 
+// fingerprint covers every field that changes what a provider actually
+// DOES when called -- CGPT-051-C: it originally omitted allow_paid and
+// baseURLOverride, so e.g. fixing a provider from allow_paid=true (which
+// resolveProvider rejects while LLM_ALLOW_PAID=false) to allow_paid=false
+// produced the SAME fingerprint, meaning resetHealthIfFingerprintChanged
+// never fired and the provider stayed marked misconfigured indefinitely
+// even after the real fix landed.
 func (row llmProviderRow) fingerprint() string {
-	sum := sha256.Sum256([]byte(row.adapter + "|" + row.credentialSlot + "|" + row.model))
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%t|%s", row.adapter, row.credentialSlot, row.model, row.allowPaid, row.baseURLOverride)))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -303,8 +365,8 @@ func (p *curatorProviderPool) resolveProvider(row llmProviderRow) (resolvedProvi
 		}
 	}
 
-	if row.allowPaid && !p.allowPaidGlobal {
-		return resolvedProvider{}, "allow_paid=true but LLM_ALLOW_PAID global gate is not enabled"
+	if eligible, reason := isProviderPaidEligible(row.credentialSlot, row.model, row.allowPaid, p.allowPaidGlobal); !eligible {
+		return resolvedProvider{}, reason
 	}
 
 	var client curatorLLM
@@ -344,10 +406,12 @@ func (p *curatorProviderPool) resetHealthIfFingerprintChanged(name, fingerprint 
 	p.health[name] = &providerHealth{fingerprint: fingerprint}
 }
 
-func (p *curatorProviderPool) getHealth(name string) *providerHealth {
+// isAvailable checks health entirely while holding healthMu (CGPT-051-D)
+// rather than returning a pointer for the caller to read unlocked.
+func (p *curatorProviderPool) isAvailable(name string, now time.Time) bool {
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
-	return p.health[name]
+	return p.health[name].availableAt(now)
 }
 
 func (p *curatorProviderPool) recordSuccess(name string) {
@@ -404,7 +468,7 @@ func (p *curatorProviderPool) Reply(ctx context.Context, req CuratorRequest) (st
 
 	now := time.Now()
 	for _, prov := range providers {
-		if !p.getHealth(prov.name).availableAt(now) {
+		if !p.isAvailable(prov.name, now) {
 			continue
 		}
 		reply, err := prov.client.Reply(ctx, req)
