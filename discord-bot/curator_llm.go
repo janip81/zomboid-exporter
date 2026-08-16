@@ -119,9 +119,18 @@ var knownAdapters = map[string]bool{
 //   - groq: today's public Groq API has no billable path without an
 //     explicit separate paid-plan opt-in outside this bot's control --
 //     treated as free regardless of the row's own allow_paid value.
-//   - openrouter: only its own documented free-tier convention (a
-//     ":free" model-ID suffix) is trusted as free; anything else on this
-//     slot requires the global paid gate.
+//     CGPT-052-B operational caveat: this is an ACCOUNT-STATE
+//     assumption, not something this code can verify -- it holds only
+//     as long as GROQ_API_KEY belongs to an organization intentionally
+//     kept on Groq's Free tier. If that org is ever upgraded to a paid
+//     tier outside this bot, disable the groq provider row (or
+//     deliberately enable paid use via the two-gate policy) -- the bot
+//     has no signal to detect an account-tier change on its own.
+//   - openrouter: its own documented free-tier conventions are trusted
+//     as free -- either the official free-model router (model ==
+//     "openrouter/free", which auto-selects any currently available
+//     free model) or an explicit ":free"-suffixed model ID. Anything
+//     else on this slot requires the global paid gate.
 //   - openai: no recognized free-tier path exists on this slot at all --
 //     always requires the global paid gate, regardless of allow_paid.
 //   - anything else: no policy defined, fails closed.
@@ -143,10 +152,10 @@ func isProviderPaidEligible(credentialSlot, model string, rowAllowPaid, globalAl
 	case "groq":
 		return true, ""
 	case "openrouter":
-		if strings.HasSuffix(model, ":free") {
+		if model == "openrouter/free" || strings.HasSuffix(model, ":free") {
 			return true, ""
 		}
-		return false, "openrouter model '" + model + "' is not a recognized free-tier model (missing :free suffix) and allow_paid=false"
+		return false, "openrouter model '" + model + "' is not a recognized free-tier model (expected \"openrouter/free\" or a \":free\"-suffixed model) and allow_paid=false"
 	case "openai":
 		return false, "openai credential_slot has no recognized free-tier path -- requires allow_paid=true and LLM_ALLOW_PAID=true"
 	default:

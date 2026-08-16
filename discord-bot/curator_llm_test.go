@@ -103,6 +103,7 @@ func TestIsProviderPaidEligible(t *testing.T) {
 		{"local always free", "local", "anything", false, false, true},
 		{"groq treated as free tier", "groq", "llama-3.1", false, false, true},
 		{"openrouter free-suffix model allowed", "openrouter", "meta-llama/llama-3.1-8b-instruct:free", false, false, true},
+		{"openrouter official free router allowed (CGPT-052-A)", "openrouter", "openrouter/free", false, false, true},
 		{"openrouter non-free model rejected without paid gate", "openrouter", "gpt-4", false, false, false},
 		{"openai always rejected without paid gate, even if row claims free", "openai", "gpt-4o-mini", false, false, false},
 		{"row allow_paid=true but global gate off -> rejected", "groq", "whatever", true, false, false},
