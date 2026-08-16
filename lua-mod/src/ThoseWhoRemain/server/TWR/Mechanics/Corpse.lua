@@ -168,40 +168,41 @@ function Corpse.spawnPermanentCorpse(x, y, z, outfit, femaleChance, lootItems)
     -- DoZombieInventory() only select+equip the outfit at full/default
     -- condition -- they apply no wear at all. Explicitly lowering each
     -- worn item's condition to a random low fraction of its max here.
-    -- DIAGNOSTIC 2026-08-26: round 2 (setCondition on worn items) was
-    -- CONFIRMED LIVE to still look pristine. Before guessing a third
-    -- time, print exactly what getWornItems() actually returns and
-    -- whether the condition mutation sticks, so the next fix targets
-    -- the real cause instead of another blind guess.
+    -- ROUND 3, 2026-08-26: diagnostics from round 2 (which called
+    -- getName/getCondition/etc directly on wornItems:get(i)) showed
+    -- EVERY method call failing on a valid, non-nil object -- the
+    -- giveaway that wornItems:get(i) returns a WornItem WRAPPER
+    -- (zombie.characters.WornItems.WornItems), not the actual clothing
+    -- InventoryItem. CONFIRMED real pattern, multiple vanilla usages
+    -- (client/ISUI/ISFitnessUI.lua, ISMakeUpUI.lua,
+    -- LootWindow/Handlers/Mannequin*.lua): the real item is
+    -- wornItems:get(i):getItem(), not wornItems:get(i) directly.
     local okWorn, wornItems = safeCall(zombie, "getWornItems")
-    print("TWR.Mechanics.Corpse: spawnPermanentCorpse -- getWornItems() ok=" .. tostring(okWorn) .. " wornItems=" .. tostring(wornItems))
     if okWorn and wornItems then
         local okSize, size = safeCall(wornItems, "size")
-        print("TWR.Mechanics.Corpse: spawnPermanentCorpse -- wornItems:size() ok=" .. tostring(okSize) .. " size=" .. tostring(size))
         if okSize then
             for i = 0, size - 1 do
-                local okItem, item = safeCall(wornItems, "get", i)
-                if okItem and item then
-                    local okName, name = safeCall(item, "getName")
-                    local okCondBefore, condBefore = safeCall(item, "getCondition")
-                    local okMax, maxCond = safeCall(item, "getConditionMax")
-                    local worn = nil
-                    if okMax and maxCond and maxCond > 0 then
-                        worn = ZombRand(math.floor(maxCond * 0.4)) + 1
-                        safeCall(item, "setCondition", worn)
+                local okSlot, slot = safeCall(wornItems, "get", i)
+                if okSlot and slot then
+                    local okItem, item = safeCall(slot, "getItem")
+                    if okItem and item then
+                        local okMax, maxCond = safeCall(item, "getConditionMax")
+                        if okMax and maxCond and maxCond > 0 then
+                            local worn = ZombRand(math.floor(maxCond * 0.4)) + 1
+                            safeCall(item, "setCondition", worn)
+                        end
                     end
-                    local okCondAfter, condAfter = safeCall(item, "getCondition")
-                    print("TWR.Mechanics.Corpse: spawnPermanentCorpse -- item[" .. i .. "]=" .. tostring(okName and name or "?")
-                        .. " conditionBefore=" .. tostring(okCondBefore and condBefore or "?")
-                        .. " conditionMax=" .. tostring(okMax and maxCond or "?")
-                        .. " setTo=" .. tostring(worn)
-                        .. " conditionAfter=" .. tostring(okCondAfter and condAfter or "?"))
-                else
-                    print("TWR.Mechanics.Corpse: spawnPermanentCorpse -- item[" .. i .. "] getItem FAILED ok=" .. tostring(okItem))
                 end
             end
         end
     end
+
+    -- Refresh again after mutating worn-item condition -- the first
+    -- resetModelNextFrame() call above ran before these items even
+    -- existed (dressInNamedOutfit/DoZombieInventory hadn't run yet), so
+    -- the model may have already baked its appearance before this
+    -- mutation.
+    safeCall(zombie, "resetModelNextFrame")
 
     local okBody, body = pcall(function() return IsoDeadBody.new(zombie, false) end)
     if not okBody or not body then return false end
