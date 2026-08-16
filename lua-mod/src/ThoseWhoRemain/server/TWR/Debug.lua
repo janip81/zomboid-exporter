@@ -591,6 +591,36 @@ end
 -- anything.
 local CONTAINER_PROBE_RADIUS = 6
 
+-- Checks a single (square, listAccessorName) pair, incrementing `found`
+-- (passed by table so the caller's total survives across both accessor
+-- calls) for each object found with a real container.
+local function scanSquareObjectList(square, listAccessorName, cx, cy, cz, foundRef)
+    local okObjs, objects = safeCall(square, listAccessorName)
+    if not (okObjs and objects) then return end
+    for i = 0, objects:size() - 1 do
+        local obj = objects:get(i)
+        local okC, container = safeCall(obj, "getContainer")
+        if okC and container then
+            foundRef.n = foundRef.n + 1
+            local okName, name = safeCall(obj, "getObjectName")
+            local okSprite, sprite = safeCall(obj, "getSprite")
+            local spriteName = nil
+            if okSprite and sprite then
+                local okSN, sn = safeCall(sprite, "getName")
+                spriteName = describe(okSN, sn)
+            end
+            local okType, ctype = safeCall(container, "getType")
+            local okCap, capacity = safeCall(container, "getCapacity")
+            print("TWR.Debug: runContainerSpriteProbe -- [" .. foundRef.n .. "] square=(" .. cx .. "," .. cy .. "," .. cz .. ")"
+                .. " via=" .. listAccessorName
+                .. " objectName=" .. describe(okName, name)
+                .. " sprite=" .. tostring(spriteName)
+                .. " containerType=" .. describe(okType, ctype)
+                .. " capacity=" .. describe(okCap, capacity))
+        end
+    end
+end
+
 local function runContainerSpriteProbe(p)
     local okX, x = safeCall(p, "getX")
     local okY, y = safeCall(p, "getY")
@@ -600,40 +630,26 @@ local function runContainerSpriteProbe(p)
     local okCell, cell = pcall(function() return getCell() end)
     if not okCell or not cell then return end
 
-    local found = 0
+    -- Scans BOTH getObjects() (normal world/map-placed furniture) AND
+    -- getSpecialObjects() -- CONFIRMED real, distinct accessor per
+    -- Container.spawnBox's own header/TEST N: objects added via
+    -- square:AddSpecialObject() (like our own spawned crates) do NOT
+    -- show up in getObjects(), only getSpecialObjects(). Missing this
+    -- the first time this probe ran was why a just-spawned crate
+    -- reported 0 containers found.
+    local foundRef = { n = 0 }
     for dx = -CONTAINER_PROBE_RADIUS, CONTAINER_PROBE_RADIUS do
         for dy = -CONTAINER_PROBE_RADIUS, CONTAINER_PROBE_RADIUS do
             local okSq, square = pcall(function() return cell:getGridSquare(math.floor(x) + dx, math.floor(y) + dy, math.floor(z)) end)
             if okSq and square then
-                local okObjs, objects = safeCall(square, "getObjects")
-                if okObjs and objects then
-                    for i = 0, objects:size() - 1 do
-                        local obj = objects:get(i)
-                        local okC, container = safeCall(obj, "getContainer")
-                        if okC and container then
-                            found = found + 1
-                            local okName, name = safeCall(obj, "getObjectName")
-                            local okSprite, sprite = safeCall(obj, "getSprite")
-                            local spriteName = nil
-                            if okSprite and sprite then
-                                local okSN, sn = safeCall(sprite, "getName")
-                                spriteName = describe(okSN, sn)
-                            end
-                            local okType, ctype = safeCall(container, "getType")
-                            local okCap, capacity = safeCall(container, "getCapacity")
-                            print("TWR.Debug: runContainerSpriteProbe -- [" .. found .. "] square=(" .. (math.floor(x) + dx) .. "," .. (math.floor(y) + dy) .. "," .. math.floor(z) .. ")"
-                                .. " objectName=" .. describe(okName, name)
-                                .. " sprite=" .. tostring(spriteName)
-                                .. " containerType=" .. describe(okType, ctype)
-                                .. " capacity=" .. describe(okCap, capacity))
-                        end
-                    end
-                end
+                local cx, cy, cz = math.floor(x) + dx, math.floor(y) + dy, math.floor(z)
+                scanSquareObjectList(square, "getObjects", cx, cy, cz, foundRef)
+                scanSquareObjectList(square, "getSpecialObjects", cx, cy, cz, foundRef)
             end
         end
     end
 
-    print("TWR.Debug: runContainerSpriteProbe -- scan complete, radius=" .. CONTAINER_PROBE_RADIUS .. ", found " .. found .. " container(s)")
+    print("TWR.Debug: runContainerSpriteProbe -- scan complete, radius=" .. CONTAINER_PROBE_RADIUS .. ", found " .. foundRef.n .. " container(s)")
 end
 
 local function runCoords(p)
