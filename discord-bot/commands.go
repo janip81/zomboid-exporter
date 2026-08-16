@@ -28,6 +28,7 @@ var commandTiers = map[string]commandTier{
 	"online":       tierPublic,
 	"serveruptime": tierPublic,
 	"help":         tierPublic,
+	"curator":      tierPublic,
 	"save":         tierAdmin,
 	"block":        tierAdmin,
 	"unblock":      tierAdmin,
@@ -37,6 +38,13 @@ var slashCommands = []*discordgo.ApplicationCommand{
 	{Name: "online", Description: "List players currently online"},
 	{Name: "serveruptime", Description: "Show how long the server has been up"},
 	{Name: "help", Description: "DM you the list of available commands"},
+	{
+		Name:        "curator",
+		Description: "Ask the Curator a question",
+		Options: []*discordgo.ApplicationCommandOption{
+			{Type: discordgo.ApplicationCommandOptionString, Name: "question", Description: "What do you want to ask?", Required: true},
+		},
+	},
 	{Name: "save", Description: "Save the world (admin only)"},
 	{
 		Name:        "block",
@@ -60,6 +68,7 @@ type botDeps struct {
 	metricsURL   string
 	serverName   string
 	db           *pgxpool.Pool
+	llmPool      curatorLLMPool
 }
 
 func interactionUserID(i *discordgo.InteractionCreate) string {
@@ -175,6 +184,8 @@ func newInteractionHandler(deps botDeps) func(*discordgo.Session, *discordgo.Int
 			handleServerUptime(s, i, deps)
 		case "help":
 			handleHelp(s, i, deps)
+		case "curator":
+			handleCurator(s, i, deps)
 		case "save":
 			handleSave(s, i, deps)
 		case "block":
@@ -223,6 +234,7 @@ func handleOnline(s *discordgo.Session, i *discordgo.InteractionCreate, deps bot
 const helpText = "**Available commands**\n" +
 	"`/online` — list players currently online\n" +
 	"`/serveruptime` — how long the server has been up\n" +
+	"`/curator question:<text>` — ask the Curator a question\n" +
 	"`/help` — this message, sent as a DM\n\n" +
 	"**Admin only**\n" +
 	"`/save` — save the world\n" +

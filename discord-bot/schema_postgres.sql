@@ -90,3 +90,55 @@ CREATE TABLE IF NOT EXISTS discordbot_milestone_hits (
     hit_at       TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (milestone_id, steam_id)
 );
+
+-- Curator LLM feature ----------------------------------------------------
+-- See zomboid-exporter-ideas/curator-llm-integration.md,
+-- curator-llm-provider.md, curator-llm-provider-db-config.md,
+-- curator-natural-trigger-and-identity.md, curator-reply-routing.md for
+-- the full design this schema implements.
+
+-- Explicit Discord user -> Steam player override. NOT a prerequisite for
+-- personal Curator answers -- curator_identity.go resolves identity by
+-- exact unique Discord nickname/display-name/account-name match against
+-- known PZ usernames first (see curator-natural-trigger-and-identity.md);
+-- this table exists only as an admin override for cases that don't fit
+-- that (renamed accounts, Discord/PZ names that genuinely differ, name
+-- collisions). An explicit row here always wins over a name-derived match.
+CREATE TABLE IF NOT EXISTS discordbot_player_links (
+    discord_user_id TEXT PRIMARY KEY,
+    steam_id        TEXT NOT NULL,
+    linked_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    linked_by       TEXT NOT NULL
+);
+
+-- Curator LLM provider configuration. DB-backed (not YAML/flags) so
+-- priority/enabled/model can be changed with one UPDATE, no redeploy --
+-- same reasoning as discordbot_milestones/discordbot_user_roles above.
+--
+-- SECURITY (CGPT-050, see curator-llm-provider-db-config.md): this table
+-- deliberately does NOT store a base_url or an env-var name to read. Both
+-- `adapter` (how to speak to the provider) and `credential_slot` (which
+-- credential to use) are resolved against a FIXED allowlist defined in
+-- Go code (curator_llm.go), never passed to os.Getenv() directly -- a raw
+-- DB-provided env-var name would let a Postgres writer redirect an
+-- unrelated pod secret (e.g. DISCORD_TOKEN) to an arbitrary endpoint.
+-- An unknown adapter/credential_slot value must fail closed as
+-- "misconfigured", not silently resolve to something.
+--
+-- No rows are seeded by the bot itself (unlike discordbot_milestones,
+-- which is the bot's own content) -- each row implies a real account/API
+-- key already exists somewhere, so providers are added via a one-time
+-- psql insert per deployment, same reasoning as bootstrapAdmins taking
+-- explicit IDs from a flag rather than seeding fake admins.
+CREATE TABLE IF NOT EXISTS discordbot_llm_providers (
+    name            TEXT PRIMARY KEY,
+    adapter         TEXT NOT NULL,
+    credential_slot TEXT NOT NULL,
+    priority        INTEGER NOT NULL,
+    enabled         BOOLEAN NOT NULL DEFAULT true,
+    model           TEXT NOT NULL,
+    allow_paid      BOOLEAN NOT NULL DEFAULT false,
+    extra_config    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);

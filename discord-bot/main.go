@@ -37,6 +37,18 @@ func main() {
 	dbName := flag.String("db-name", "zomboid", "Postgres database name")
 	dbUser := flag.String("db-user", "zomboid", "Postgres user (password read from DB_PASSWORD env var)")
 	bootstrapAdminIDs := flag.String("bootstrap-admin-ids", "", "Comma-separated Discord user IDs seeded as admin ONLY if discordbot_user_roles is completely empty (first boot / after a full data wipe). Ignored once any role exists -- day-to-day admin changes go through /block and /unblock, not this flag.")
+
+	// Curator LLM feature -- see zomboid-exporter-ideas/curator-llm-integration.md,
+	// curator-llm-provider.md, curator-llm-provider-db-config.md. Default
+	// OFF and, when off, adds zero DB/network load (curator_llm.go's
+	// newCuratorProviderPool never queries Postgres or starts its refresh
+	// goroutine unless enabled) -- BOT-LLM-1.
+	llmEnabled := flag.Bool("llm-enabled", false, "Enable the Curator LLM chat feature (/curator command + optional natural chat trigger). Provider list/priority/model comes from the discordbot_llm_providers table, not flags -- see curator-llm-provider-db-config.md. Actual paid-provider use additionally requires the LLM_ALLOW_PAID=true env var.")
+	curatorNaturalChat := flag.Bool("curator-natural-chat", false, "React to the standalone word 'curator' in ordinary channel messages, not just /curator. REQUIRES the Discord Message Content privileged intent to be enabled for this bot in the Discord Developer Portal, or Discord silently sends empty message content and this never triggers.")
+	curatorChannelID := flag.String("curator-channel-id", "", "Restrict the natural chat trigger to one channel ID. Empty means any channel the bot can see.")
+	curatorAmbientReplyChance := flag.Float64("curator-ambient-reply-chance", 0.25, "Probability (0-1) of replying to an ORDINARY statement that merely mentions 'curator' (as opposed to a direct question/address, which always attempts a reply).")
+	curatorUserCooldown := flag.Duration("curator-user-cooldown", 20*time.Second, "Minimum time between natural-chat Curator replies to the same Discord user.")
+	curatorGlobalCooldown := flag.Duration("curator-global-cooldown", 5*time.Second, "Minimum time between ANY two natural-chat Curator replies, across all users -- caps worst-case LLM call rate during a burst of mentions.")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -85,12 +97,25 @@ func main() {
 		logger.Warn("--db-host not set, stats/leaderboard/admin-role commands unavailable")
 	}
 
+	llmPool := newCuratorProviderPool(dbPool, *llmEnabled, llmAllowPaidFromEnv())
+	if *llmEnabled {
+		if dbPool == nil {
+			logger.Warn("--llm-enabled=true but no Postgres connection -- Curator LLM replies unavailable, canned responses still work")
+		} else {
+			logger.Info("curator LLM enabled, loading provider config from discordbot_llm_providers", "allowPaid", llmAllowPaidFromEnv())
+		}
+		go llmPool.startRefreshLoop(ctx)
+	} else {
+		logger.Info("curator LLM disabled (--llm-enabled=false), canned Curator responses still available via /curator")
+	}
+
 	deps := botDeps{
 		rconHost:     *rconHost,
 		rconPassword: os.Getenv("RCON_PASSWORD"),
 		metricsURL:   *metricsURL,
 		serverName:   *serverName,
 		db:           dbPool,
+		llmPool:      llmPool,
 	}
 
 	discordSession, err := discordgo.New("Bot " + discordToken)
@@ -99,6 +124,23 @@ func main() {
 		os.Exit(1)
 	}
 	discordSession.AddHandler(newInteractionHandler(deps))
+	if *curatorNaturalChat {
+		// Message Content is a Discord PRIVILEGED intent -- must also be
+		// turned on for this bot in the Developer Portal, or Discord
+		// sends empty Content for ordinary guild messages and the
+		// natural trigger silently never fires. See
+		// curator-natural-trigger-and-identity.md's "Discord requirement."
+		discordSession.Identify.Intents |= discordgo.IntentsMessageContent
+		trigger := newCuratorNaturalTrigger(curatorNaturalTriggerConfig{
+			Enabled:            true,
+			ChannelID:          *curatorChannelID,
+			AmbientReplyChance: *curatorAmbientReplyChance,
+			UserCooldown:       *curatorUserCooldown,
+			GlobalCooldown:     *curatorGlobalCooldown,
+		}, deps)
+		discordSession.AddHandler(trigger.handleMessageCreate)
+		logger.Info("curator natural chat trigger enabled", "channelID", *curatorChannelID)
+	}
 	if err := discordSession.Open(); err != nil {
 		logger.Error("failed to connect to Discord", "err", err)
 		os.Exit(1)
