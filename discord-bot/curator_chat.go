@@ -93,8 +93,9 @@ func askCurator(ctx context.Context, deps botDeps, discordUserID string, candida
 	}
 
 	contextText := buildCuratorContext(ctx, deps, discordUserID, candidateNames)
+	tier := selectCuratorResponseTier()
 	reply, provider, err := deps.llmPool.Reply(ctx, CuratorRequest{
-		Persona:         curatorPersonaPrompt,
+		Persona:         assembleCuratorPersona(tier),
 		Context:         contextText,
 		Message:         message,
 		MaxOutputTokens: curatorMaxOutputTokens,
@@ -105,7 +106,7 @@ func askCurator(ctx context.Context, deps botDeps, discordUserID string, candida
 		}
 		return "", false
 	}
-	slog.Info("curator: LLM reply generated", "provider", provider)
+	slog.Info("curator: LLM reply generated", "provider", provider, "tier", tier)
 	return reply, true
 }
 
