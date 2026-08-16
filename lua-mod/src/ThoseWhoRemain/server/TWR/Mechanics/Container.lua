@@ -533,7 +533,28 @@ end
 -- Survived a full server restart.
 --
 -- Returns the created IsoThumpable (the "crate"), or nil on failure.
-function Container.spawnBox(x, y, z)
+-- Real sprite names confirmed live 2026-08-26 via the container_sprite_probe
+-- debug command (server/TWR/Debug.lua), scanning real furniture/crates
+-- already placed on the map -- NOT guessed. Each entry's sprite is
+-- whatever a matching real world object reported; capacity/containerType
+-- come from the sprite's own baked tile properties (same mechanism as
+-- the default crate below -- our companion table never sets a capacity
+-- field, so it's confirmed to come from the sprite itself, not us).
+-- crate/crate_outdoor are both real crate variants (build-menu vs.
+-- map-placed); wardrobe/dresser/shelves are real house furniture, good
+-- for narrative "hidden stash" quest containers.
+Container.BOX_TYPES = {
+    crate = { sprite = "carpentry_01_19", name = "Wooden Crate" },
+    crate_outdoor = { sprite = "carpentry_01_16", name = "Crate" },
+    wardrobe = { sprite = "furniture_storage_01_0", name = "Wardrobe" },
+    dresser = { sprite = "furniture_storage_01_9", name = "Dresser" },
+    shelves = { sprite = "furniture_shelving_01_44", name = "Shelves" },
+}
+
+-- boxType is optional, one of Container.BOX_TYPES's keys -- defaults to
+-- "crate" (the original, only-ever-used sprite/name), so every existing
+-- call site keeps working unchanged.
+function Container.spawnBox(x, y, z, boxType)
     local okCell, cell = pcall(function() return getCell() end)
     if not okCell or not cell then
         print("TWR.Mechanics.Container: spawnBox -- getCell() failed: " .. tostring(cell))
@@ -546,7 +567,12 @@ function Container.spawnBox(x, y, z)
         return nil
     end
 
-    local sprite = "carpentry_01_19"
+    local boxDef = Container.BOX_TYPES[boxType or "crate"]
+    if not boxDef then
+        print("TWR.Mechanics.Container: spawnBox -- unknown boxType '" .. tostring(boxType) .. "', falling back to 'crate'")
+        boxDef = Container.BOX_TYPES.crate
+    end
+    local sprite = boxDef.sprite
     -- FIX 2026-08-13, found live via a fixture-test crate that visibly
     -- never appeared despite spawnBox() logging success: the previous
     -- comment here ("nil is proven safe there") was WRONG. Real
@@ -572,7 +598,7 @@ function Container.spawnBox(x, y, z)
     local companion = {
         isContainer = true,
         blockAllTheSquare = true,
-        name = "Wooden Crate",
+        name = boxDef.name,
         dismantable = true,
         canBeAlwaysPlaced = true,
         canBeLockedByPadlock = true,

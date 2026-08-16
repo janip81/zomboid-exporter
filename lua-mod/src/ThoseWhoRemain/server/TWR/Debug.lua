@@ -87,6 +87,32 @@ local function runContainer(p)
     print("TWR.Debug: runContainer -- box spawned one tile east, combination-locked to 123, contains a twig")
 end
 
+-- Spawns one of each Container.BOX_TYPES in a row (2 tiles apart, north
+-- of the caller) for a direct visual side-by-side comparison -- built
+-- after container_sprite_probe research confirmed real sprite names
+-- for wardrobe/dresser/shelves/an alternate outdoor crate variant (see
+-- Container.lua's BOX_TYPES header for the full research trail).
+local function runBoxTypeShowcase(p)
+    local okX, x = safeCall(p, "getX")
+    local okY, y = safeCall(p, "getY")
+    local okZ, z = safeCall(p, "getZ")
+    if not (okX and okY and okZ) then return end
+
+    local bx, by, bz = math.floor(x), math.floor(y) - 2, math.floor(z)
+    local offset = 0
+    for boxType, def in pairs(TWR.Mechanics.Container.BOX_TYPES) do
+        local tx = bx + offset
+        local crate = TWR.Mechanics.Container.spawnBox(tx, by, bz, boxType)
+        if crate then
+            TWR.Mechanics.Container.finalizeSpawn(crate)
+            print("TWR.Debug: runBoxTypeShowcase -- boxType=" .. boxType .. " (" .. def.name .. ") spawned at (" .. tx .. "," .. by .. "," .. bz .. ")")
+        else
+            print("TWR.Debug: runBoxTypeShowcase -- boxType=" .. boxType .. " FAILED at (" .. tx .. "," .. by .. "," .. bz .. ")")
+        end
+        offset = offset + 2
+    end
+end
+
 -- TEST K re-verify: padlock-lock path specifically (Container.lockByPadlock),
 -- not yet re-clicked through with the fixed spawnBox() this session --
 -- TEST J's key-lock path was already re-confirmed live via the P4 KVLS
@@ -707,6 +733,7 @@ end
 
 local MECHANICS = {
     container = runContainer,
+    box_type_showcase = runBoxTypeShowcase,
     container_padlock = runContainerPadlock,
     scatter = runScatter,
     map_scatter = runMapScatter,

@@ -32,6 +32,7 @@ TWR.Context.callbacks = TWR.Context.callbacks or {}
 
 local MECHANIC_LABELS = {
     { key = "container", label = "Spawn locked container" },
+    { key = "box_type_showcase", label = "Spawn one of each box type in a row (visual comparison)" },
     { key = "container_padlock", label = "Spawn padlocked container (TEST K re-verify)" },
     { key = "scatter", label = "Scatter into existing containers" },
     { key = "map_scatter", label = "Scatter across map (5 real points, persistent pending)" },
