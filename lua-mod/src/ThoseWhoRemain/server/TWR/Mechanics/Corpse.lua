@@ -156,6 +156,35 @@ function Corpse.spawnPermanentCorpse(x, y, z, outfit, femaleChance, lootItems)
         safeCall(zombie, "addHole", nil)
     end
 
+    -- ROUND 2 of the worn/aged fix, 2026-08-26: CONFIRMED LIVE the
+    -- addBlood/addHole calls above alone were NOT enough -- clothes
+    -- still looked brand new. addBlood/addHole are a skin/gore effect;
+    -- they don't touch a clothing item's own Condition, which is the
+    -- separate per-item attribute that actually drives vanilla's own
+    -- rip/tear clothing sprite states (confirmed real API:
+    -- item:getConditionMax()/item:setCondition(n), e.g.
+    -- shared/Items/OnBreak.lua's own newItem:setCondition(ZombRand(
+    -- newItem:getConditionMax())+1)). dressInNamedOutfit()/
+    -- DoZombieInventory() only select+equip the outfit at full/default
+    -- condition -- they apply no wear at all. Explicitly lowering each
+    -- worn item's condition to a random low fraction of its max here.
+    local okWorn, wornItems = safeCall(zombie, "getWornItems")
+    if okWorn and wornItems then
+        local okSize, size = safeCall(wornItems, "size")
+        if okSize then
+            for i = 0, size - 1 do
+                local okItem, item = safeCall(wornItems, "get", i)
+                if okItem and item then
+                    local okMax, maxCond = safeCall(item, "getConditionMax")
+                    if okMax and maxCond and maxCond > 0 then
+                        local worn = ZombRand(math.floor(maxCond * 0.4)) + 1
+                        safeCall(item, "setCondition", worn)
+                    end
+                end
+            end
+        end
+    end
+
     local okBody, body = pcall(function() return IsoDeadBody.new(zombie, false) end)
     if not okBody or not body then return false end
 
