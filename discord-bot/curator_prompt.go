@@ -209,80 +209,49 @@ FORBIDDEN: What are you doing?
 FORBIDDEN CURATOR: I am collecting data for an ongoing study.
 CORRECT CURATOR: Updating the record. Try not to make it tedious.`
 
-// assembleCuratorPersona builds the full SYSTEM 1 + SYSTEM 2 + examples
-// layer for one reply, per curator-llm-personality.md's "Request
-// construction in the current bot" section. The current CuratorRequest
-// shape has a single Persona field, so SYSTEM 1/2 and the examples are
-// combined here rather than sent as separate messages -- the doc calls
+// assembleCuratorPersona builds the full SYSTEM 1 + SYSTEM 2 + intent
+// guidance + examples layer for one reply, per curator-llm-personality.md's
+// "Request construction in the current bot" section and
+// curator-llm-conversation-routing.md's per-intent guidance injection. The
+// current CuratorRequest shape has a single Persona field, so all layers
+// are combined here rather than sent as separate messages -- the docs call
 // this boundary semantic, not a specific Go struct shape.
-func assembleCuratorPersona(tier curatorResponseTier) string {
-	return curatorPersonaPrompt + "\n\n" + curatorTierPrompts[tier] + "\n\n" + curatorCanonicalExamples
+func assembleCuratorPersona(tier curatorResponseTier, intentGuidance string) string {
+	return curatorPersonaPrompt + "\n\n" + curatorTierPrompts[tier] + "\n\n" + intentGuidance + "\n\n" + curatorCanonicalExamples
 }
 
-// cannedResponsePool holds authored, multi-option replies for high-value
-// identity/canon questions where exact wording matters -- these require
-// no LLM call at all, per curator-reply-routing.md's routing order
-// (canned pool tried before any LLM path). Matching is deliberately
-// simple/deterministic (substring match on a normalized message), not an
-// LLM call, per curator-natural-trigger-and-identity.md's "use
-// deterministic trigger levels rather than an LLM call to decide."
-//
-// Topics/example lines are drawn directly from curator-reply-routing.md's
-// own worked examples -- not invented lore, since this project's lore
-// lives under antagonist/spoilers/ and must never be guessed at here.
-var cannedResponsePool = []struct {
-	triggers []string
-	replies  []string
-}{
-	{
-		triggers: []string{"are you human", "are you a bot", "are you an ai", "are you real"},
-		replies: []string{
-			"An interesting question to direct at something that is, at minimum, currently talking to you.",
-			"Define 'human' precisely, and I will consider answering precisely.",
-			"I am whatever is necessary to continue the observation.",
-		},
-	},
-	{
-		triggers: []string{"are you watching", "are you watching us", "are you watching me"},
-		replies: []string{
-			"Continuously. Try not to let it affect your performance.",
-			"Yes. This has never been in question.",
-			"Always. It is, after all, the point.",
-		},
-	},
-	{
-		triggers: []string{"is this an experiment", "is this a test", "is this an experament"},
-		replies: []string{
-			"Everything is an experiment to someone. Yours is simply better documented.",
-			"That framing is not incorrect.",
-		},
-	},
-	{
-		triggers: []string{"where are you"},
-		replies: []string{
-			"Closer than is comfortable, further than you could reach.",
-			"Somewhere the dead don't complain about the accommodations.",
-		},
-	},
-}
+// curatorIntent is deterministic code's classification of what a
+// conversational message is ABOUT -- curator-llm-conversation-routing.md's
+// central rule: "Deterministic code decides WHETHER and HOW Curator is
+// allowed to answer. The LLM should normally write the actual
+// conversational sentence." The LLM never picks its own intent.
+type curatorIntent string
+
+const (
+	intentIdentity          curatorIntent = "IDENTITY"
+	intentActivityPurpose   curatorIntent = "ACTIVITY_PURPOSE"
+	intentInsultProvocation curatorIntent = "INSULT_PROVOCATION"
+	intentSelfStats         curatorIntent = "SELF_STATS"
+	intentOtherPlayer       curatorIntent = "OTHER_PLAYER"
+	intentLoreMystery       curatorIntent = "LORE_MYSTERY"
+	intentGenericCurator    curatorIntent = "GENERIC_CURATOR"
+)
 
 // curatorIdentityQuestionPattern matches "who/what is/'s (that/this/the)?
-// curator" in any of its common natural phrasings -- curator-llm-personality-
-// live-test-review.md's CGPT-PERSONA-LIVE-02: the live test's exact phrase
-// "who is that curator" fell through the old plain-substring trigger list
-// (it only covered "who is the curator") straight to the LLM, which is
-// precisely the kind of high-value identity question that should always
-// get an authored line instead. A small deterministic regex covers the
+// curator" in any of its common natural phrasings, plus the other
+// never-reveal identity forms from the persona's MYSTERY section (human/
+// bot/AI/real, physical location). The live Discord test's exact phrase
+// "who is that curator" fell through an earlier plain-substring trigger
+// list (CGPT-PERSONA-LIVE-02) -- a small deterministic regex covers the
 // natural variants without an ever-growing, fragile substring list.
-var curatorIdentityQuestionPattern = regexp.MustCompile(`(?i)\b(who|what)(?:'s|\s+is)\s+(?:(?:that|this|the)\s+)?curator\b`)
+var curatorIdentityQuestionPattern = regexp.MustCompile(`(?i)\b(who|what)(?:'s|\s+is)\s+(?:(?:that|this|the)\s+)?curator\b|\bare you (a human|human|a bot|a robot|an ai|real)\b|\bwhere are you\b`)
 
 // curatorBareIdentityQuestions holds phrasings that don't mention "curator"
 // by name ("who are you", "what are you", ...). These must match the
 // ENTIRE question (after stripping a leading "curator" address and
 // trailing punctuation), not merely appear as a substring/prefix --
 // "what are you" is deliberately NOT treated as a match inside "what are
-// you doing", which is an activity question that should still reach the
-// LLM (see CGPT-PERSONA-LIVE-03's few-shot guidance for that case).
+// you doing", which is an ACTIVITY_PURPOSE question instead.
 var curatorBareIdentityQuestions = map[string]bool{
 	"who are you":         true,
 	"what are you":        true,
@@ -290,8 +259,7 @@ var curatorBareIdentityQuestions = map[string]bool{
 }
 
 // isCuratorIdentityQuestion reports whether msg is one of the identity/
-// mystery questions that should always get an authored reply rather than
-// a free-form LLM generation, per CGPT-PERSONA-LIVE-02.
+// mystery questions covered by CGPT-PERSONA-LIVE-02's matcher.
 func isCuratorIdentityQuestion(msg string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(msg))
 	if curatorIdentityQuestionPattern.MatchString(normalized) {
@@ -304,39 +272,179 @@ func isCuratorIdentityQuestion(msg string) bool {
 	return curatorBareIdentityQuestions[stripped]
 }
 
-// curatorIdentityReplies is the authored reply pool for identity/mystery
-// questions -- deliberately never a complete explanation of what the
-// Curator is or does (CURATOR-PERSONA-2/CGPT-PERSONA-LIVE-01: the
-// character is not to be summarized, even in canned form).
-var curatorIdentityReplies = []string{
-	"A question with more history than you have patience for. Ask me something I can actually answer.",
-	"An observer. That is as much identity as you require.",
-	"I have been called worse things by better subjects.",
-	"An observer. That is sufficient.",
-	"You have more useful questions available to you.",
-	"Someone keeping considerably better records than you are.",
-	"A name attached to a collection of observations.",
-	"That answer would spoil several perfectly good hypotheses.",
-	"You are asking the correct question considerably too early.",
+// curatorActivityPurposePattern matches "what are you doing" and its close
+// variants -- these must NOT be swallowed by the identity matcher above.
+var curatorActivityPurposePattern = regexp.MustCompile(`(?i)\bwhat are you doing\b|\bwhat are you up to\b|\bwhat(?:'s|\s+is) your purpose\b|\bwhy are you here\b`)
+
+// curatorInsultPattern is a small, deliberately narrow keyword/phrase list
+// -- broad enough to catch the live-test regression case ("Curator, you're
+// an asshole.") without misclassifying ordinary criticism as an insult.
+var curatorInsultPattern = regexp.MustCompile(`(?i)\b(asshole|idiot|moron|dumbass|loser)\b|\bscrew you\b|\bshut up\b|\bfuck you\b|\byou suck\b`)
+
+// curatorSelfStatsPattern matches questions asking about the speaker's own
+// recorded performance -- these need real Known Facts, never invented
+// numbers (curator-llm-conversation-routing.md's SELF_STATS example).
+var curatorSelfStatsPattern = regexp.MustCompile(`(?i)\bam i doing (well|good|ok|okay|alright)\b|\bhow am i doing\b|\bhow many kills\b|\bmy (stats|kills|deaths)\b|\bhow good am i\b`)
+
+// curatorLoreMysteryPattern matches questions about hidden lore/the Knox
+// Event/whether an experiment is occurring -- the pre-prompt spoiler rule
+// stays absolute regardless of intent (only unlocked facts ever reach the
+// LLM); this only selects mystery-flavored response guidance.
+var curatorLoreMysteryPattern = regexp.MustCompile(`(?i)\bknox event\b|\bare you watching\b|\bwhy are you watching\b|\bis this an experiment\b|\bis this a test\b|\bwhat caused\b|\bwhy are we here\b`)
+
+// curatorOtherPlayerPattern is a best-effort stub -- other-player identity
+// resolution isn't implemented yet (curator_context.go only resolves the
+// SPEAKER), so this intent currently only selects guidance that forbids
+// inventing facts about a third party; it does not yet inject that
+// player's own stats.
+var curatorOtherPlayerPattern = regexp.MustCompile(`(?i)\bwhat do you think (of|about)\b|\bwhat about\b.+\bdoing\b`)
+
+// classifyCuratorIntent is deterministic (no LLM call) per
+// curator-llm-conversation-routing.md: "Do not use an LLM just to classify
+// these simple categories in V1; deterministic matching is cheaper,
+// testable, and fail-closed." Order matters where patterns could overlap --
+// an insult takes priority over a coincidentally-phrased identity/activity
+// question, and identity is checked before the narrower activity pattern.
+func classifyCuratorIntent(msg string) curatorIntent {
+	switch {
+	case curatorInsultPattern.MatchString(msg):
+		return intentInsultProvocation
+	case isCuratorIdentityQuestion(msg):
+		return intentIdentity
+	case curatorActivityPurposePattern.MatchString(msg):
+		return intentActivityPurpose
+	case curatorSelfStatsPattern.MatchString(msg):
+		return intentSelfStats
+	case curatorLoreMysteryPattern.MatchString(msg):
+		return intentLoreMystery
+	case curatorOtherPlayerPattern.MatchString(msg):
+		return intentOtherPlayer
+	default:
+		return intentGenericCurator
+	}
 }
 
-// matchCannedResponse checks msg against the identity-question matcher
-// first (CGPT-PERSONA-LIVE-02 -- these need the broadest, most reliable
-// coverage of any canned topic), then every other canned topic's trigger
-// phrases, returning a random reply from the first match. Returns
-// ok=false if nothing matches, so the caller can fall through to the
-// deterministic/LLM paths per curator-reply-routing.md.
-func matchCannedResponse(msg string) (reply string, ok bool) {
-	if isCuratorIdentityQuestion(msg) {
-		return randomLine(curatorIdentityReplies), true
+// curatorIntentGuidanceText is SYSTEM-guidance-per-intent: injected into
+// the persona alongside the tier prompt so a healthy LLM writes the actual
+// sentence with the right constraints, instead of a random fixed line
+// being chosen for it (curator-llm-conversation-routing.md's "Preferred
+// model: identity intent -> inject identity-specific response guidance ->
+// LLM writes the answer").
+var curatorIntentGuidanceText = map[curatorIntent]string{
+	intentIdentity: `CURRENT CONVERSATION INTENT: IDENTITY
+
+This is an identity/mystery question.
+Do not explain the Curator's actual role, origin, purpose, architecture, or mission.
+Do not recite the private persona description.
+Keep the reply short, evasive, mysterious, and in character.
+A partial answer, deflection, dry remark, or deliberate ambiguity is preferable to an explanation.`,
+
+	intentActivityPurpose: `CURRENT CONVERSATION INTENT: ACTIVITY_PURPOSE
+
+Do NOT answer with a mission statement.
+Do NOT describe watching, recording, cataloguing, compiling data, conducting a study, or maintaining an archive as your literal purpose.
+Prefer a short evasive, dry, or mildly sarcastic answer.`,
+
+	intentInsultProvocation: `CURRENT CONVERSATION INTENT: INSULT_PROVOCATION
+
+Remain calm. Never sound hurt or defensive.
+Acknowledge or dismiss the insult with dry amusement.
+Do not escalate into personal abuse.`,
+
+	intentSelfStats: `CURRENT CONVERSATION INTENT: SELF_STATS
+
+Use only the Known Facts supplied for this reply. Never invent statistics.
+If no relevant observations are available, say so in character rather than guessing.`,
+
+	intentOtherPlayer: `CURRENT CONVERSATION INTENT: OTHER_PLAYER
+
+The speaker is asking about another survivor. Only use facts about that survivor if they are explicitly present in Known Facts.
+Never invent another player's statistics, actions, or reputation. If nothing is known, say so in character.`,
+
+	intentLoreMystery: `CURRENT CONVERSATION INTENT: LORE_MYSTERY
+
+This concerns hidden lore, the Knox Event, or whether "the experiment" is real. Only unlocked/allowed facts have been supplied -- there is no additional hidden information you are withholding beyond what is already excluded from Known Facts.
+Remain ambiguous and mysterious. Never invent lore or a definitive explanation.`,
+
+	intentGenericCurator: `CURRENT CONVERSATION INTENT: GENERIC_CURATOR
+
+Respond naturally in character to the message.`,
+}
+
+// curatorIntentGuidance returns the guidance block for intent, falling
+// back to the generic block if somehow unmapped (defensive -- every
+// curatorIntent constant has an entry, verified by
+// TestCuratorIntentGuidanceText_CoversEveryIntent).
+func curatorIntentGuidance(intent curatorIntent) string {
+	if guidance, ok := curatorIntentGuidanceText[intent]; ok {
+		return guidance
 	}
-	normalized := strings.ToLower(strings.TrimSpace(msg))
-	for _, topic := range cannedResponsePool {
-		for _, trigger := range topic.triggers {
-			if strings.Contains(normalized, trigger) {
-				return randomLine(topic.replies), true
-			}
-		}
+	return curatorIntentGuidanceText[intentGenericCurator]
+}
+
+// curatorIntentFallbacks are the authored replies used ONLY when the LLM
+// is disabled, unavailable, or rate-limited for this request --
+// curator-llm-conversation-routing.md flips the old canned-first routing:
+// canned lines are now a per-intent fallback, not the primary path, so a
+// healthy LLM always sees the actual conversational question. Every line
+// in a pool must be semantically valid for EVERY trigger mapped to that
+// intent's pool -- do not add a generically "Curator-sounding" line to a
+// pool merely because its tone fits (the CGPT-PERSONA-LIVE-02 regression:
+// "I have been called worse things by better subjects." fits
+// INSULT_PROVOCATION, not IDENTITY).
+var curatorIntentFallbacks = map[curatorIntent][]string{
+	intentIdentity: {
+		"A question with more history than you have patience for. Ask me something I can actually answer.",
+		"An observer. That is as much identity as you require.",
+		"An observer. That is sufficient.",
+		"You have more useful questions available to you.",
+		"Someone keeping considerably better records than you are.",
+		"A name attached to a collection of observations.",
+		"That answer would spoil several perfectly good hypotheses.",
+		"You are asking the correct question considerably too early.",
+		"Closer than is comfortable, further than you could reach.",
+		"Somewhere the dead don't complain about the accommodations.",
+		"An interesting question to direct at something that is, at minimum, currently talking to you.",
+		"Define 'human' precisely, and I will consider answering precisely.",
+		"I am whatever is necessary to continue the observation.",
+	},
+	intentActivityPurpose: {
+		"Working.",
+		"Updating several disappointing projections.",
+		"A question I had hoped you would postpone.",
+		"Waiting to see whether this becomes relevant.",
+	},
+	intentInsultProvocation: {
+		"I have been called worse things by better subjects.",
+		"Noted. Your feedback has been assigned the appropriate priority.",
+	},
+	intentSelfStats: {
+		"The record on you is, for the moment, unremarkable.",
+		"Nothing worth reporting at this time.",
+	},
+	intentOtherPlayer: {
+		"That subject is not currently within my available records.",
+		"I decline to speculate about someone who isn't here to be disappointed by it.",
+	},
+	intentLoreMystery: {
+		"Everything is an experiment to someone. Yours is simply better documented.",
+		"That framing is not incorrect.",
+		"Continuously. Try not to let it affect your performance.",
+		"Yes. This has never been in question.",
+		"Always. It is, after all, the point.",
+		"Observation requires something worth observing.",
+		"If the answer were that simple, the archive would be considerably shorter.",
+	},
+	intentGenericCurator: curatorGenericFallbackLines,
+}
+
+// matchIntentFallback returns a random authored line from intent's
+// fallback pool. ok=false only if the pool is missing/empty (defensive --
+// every curatorIntent constant has a non-empty pool above).
+func matchIntentFallback(intent curatorIntent) (reply string, ok bool) {
+	pool := curatorIntentFallbacks[intent]
+	if len(pool) == 0 {
+		return "", false
 	}
-	return "", false
+	return randomLine(pool), true
 }

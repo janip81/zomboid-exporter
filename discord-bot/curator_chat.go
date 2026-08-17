@@ -69,45 +69,46 @@ func buildCuratorContext(ctx context.Context, deps botDeps, discordUserID string
 	return renderCuratorContext(identity, stats)
 }
 
-// askCurator runs the canned-then-LLM routing order from
-// curator-reply-routing.md and returns ok=false if neither path produced
-// a reply (canned didn't match AND the LLM pool is nil/unavailable) --
-// callers decide what "no reply" means for their surface (an authored
-// fallback for an explicit question, or silence for an ambient mention).
+// askCurator implements curator-llm-conversation-routing.md's LLM-first
+// routing: deterministic code decides WHETHER Curator responds (the
+// caller), WHAT the message is about (classifyCuratorIntent), and what
+// Curator actually knows (buildCuratorContext) -- but a healthy LLM writes
+// the actual conversational sentence, rather than a canned line being
+// chosen first. Canned, intent-specific fallback lines are used only when
+// the LLM is disabled, unavailable, or rate-limited, so Curator still has
+// a voice with zero provider dependency. Returns ok=false only if there's
+// truly nothing to say (defensive -- every intent has a non-empty
+// fallback pool); callers decide what "no reply" means for their surface.
 func askCurator(ctx context.Context, deps botDeps, discordUserID string, candidateNames []string, message string) (reply string, ok bool) {
-	if r, matched := matchCannedResponse(message); matched {
-		return r, true
-	}
-	if deps.llmPool == nil {
-		return "", false
-	}
-	// CGPT-051-A: the shared rate limiter gates the LLM call itself, only
-	// reached once canned routing has already missed -- canned replies
-	// above never touch it (CURATOR-LLM-RATE-3), and this is the single
-	// choke point shared by BOTH /curator and natural chat
-	// (CURATOR-LLM-RATE-1/2), unlike curatorNaturalTrigger's own
-	// cooldown, which paces natural-chat replies in general, not LLM
-	// calls specifically.
-	if deps.llmLimiter != nil && !deps.llmLimiter.allow(discordUserID) {
-		return "", false
+	intent := classifyCuratorIntent(message)
+
+	if deps.llmPool != nil {
+		// CGPT-051-A: the shared rate limiter gates the LLM call itself --
+		// the single choke point shared by BOTH /curator and natural chat.
+		// A denial here falls through to the intent fallback pool below
+		// rather than failing the whole interaction (conversation-routing's
+		// "Rate-limit implication": a rate-limited user still gets a
+		// deterministic Curator answer, just without consuming an API call).
+		if deps.llmLimiter == nil || deps.llmLimiter.allow(discordUserID) {
+			contextText := buildCuratorContext(ctx, deps, discordUserID, candidateNames)
+			tier := selectCuratorResponseTier()
+			llmReply, provider, err := deps.llmPool.Reply(ctx, CuratorRequest{
+				Persona:         assembleCuratorPersona(tier, curatorIntentGuidance(intent)),
+				Context:         contextText,
+				Message:         message,
+				MaxOutputTokens: curatorMaxOutputTokens,
+			})
+			if err == nil {
+				slog.Info("curator: LLM reply generated", "provider", provider, "tier", tier, "intent", intent)
+				return llmReply, true
+			}
+			if err != ErrLLMUnavailable {
+				slog.Error("curator: LLM pool returned unexpected error", "err", err)
+			}
+		}
 	}
 
-	contextText := buildCuratorContext(ctx, deps, discordUserID, candidateNames)
-	tier := selectCuratorResponseTier()
-	reply, provider, err := deps.llmPool.Reply(ctx, CuratorRequest{
-		Persona:         assembleCuratorPersona(tier),
-		Context:         contextText,
-		Message:         message,
-		MaxOutputTokens: curatorMaxOutputTokens,
-	})
-	if err != nil {
-		if err != ErrLLMUnavailable {
-			slog.Error("curator: LLM pool returned unexpected error", "err", err)
-		}
-		return "", false
-	}
-	slog.Info("curator: LLM reply generated", "provider", provider, "tier", tier)
-	return reply, true
+	return matchIntentFallback(intent)
 }
 
 func handleCurator(s *discordgo.Session, i *discordgo.InteractionCreate, deps botDeps) {

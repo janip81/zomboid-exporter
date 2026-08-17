@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// --- CGPT-PERSONA-LIVE-02: canned identity routing ------------------------
+// --- CGPT-PERSONA-LIVE-02 / conversation-routing: intent classification ---
 
-func TestIsCuratorIdentityQuestion_PositiveCases(t *testing.T) {
+func TestClassifyCuratorIntent_Identity(t *testing.T) {
 	cases := []string{
 		"who is curator",
 		"who is the curator",
@@ -23,62 +23,133 @@ func TestIsCuratorIdentityQuestion_PositiveCases(t *testing.T) {
 		"curator, what are you?",
 		"curator what are you",
 		"tell me who you are",
+		"are you human",
+		"are you a bot",
+		"are you an ai",
+		"are you real",
+		"where are you",
 	}
 	for _, msg := range cases {
-		if !isCuratorIdentityQuestion(msg) {
-			t.Errorf("expected %q to match as an identity question", msg)
+		if got := classifyCuratorIntent(msg); got != intentIdentity {
+			t.Errorf("classifyCuratorIntent(%q) = %v, want %v", msg, got, intentIdentity)
 		}
 	}
 }
 
-func TestIsCuratorIdentityQuestion_NegativeCases(t *testing.T) {
+func TestClassifyCuratorIntent_ActivityPurposeNotSwallowedByIdentity(t *testing.T) {
 	cases := []string{
 		"what are you doing",
 		"what are you doing here?",
 		"curator, what are you doing right now",
-		"are you human",
-		"are you watching us",
-		"is this an experiment",
-		"curator probably knows where the box is",
-		"where did you put the curator's notes",
+		"what are you up to",
+		"why are you here",
 	}
 	for _, msg := range cases {
-		if isCuratorIdentityQuestion(msg) {
-			t.Errorf("expected %q to NOT match as an identity question", msg)
+		if got := classifyCuratorIntent(msg); got != intentActivityPurpose {
+			t.Errorf("classifyCuratorIntent(%q) = %v, want %v", msg, got, intentActivityPurpose)
 		}
 	}
 }
 
-func TestMatchCannedResponse_IdentityQuestionUsesAuthoredPool(t *testing.T) {
-	reply, ok := matchCannedResponse("who is that curator")
-	if !ok {
-		t.Fatal("expected the live-test regression phrase to match a canned reply")
+func TestClassifyCuratorIntent_InsultProvocation(t *testing.T) {
+	cases := []string{
+		"Curator, you're an asshole.",
+		"you are such an idiot",
+		"shut up curator",
+	}
+	for _, msg := range cases {
+		if got := classifyCuratorIntent(msg); got != intentInsultProvocation {
+			t.Errorf("classifyCuratorIntent(%q) = %v, want %v", msg, got, intentInsultProvocation)
+		}
+	}
+}
+
+// Regression for the exact bug curator-llm-conversation-routing.md reports:
+// an insult-only fallback line must never be reachable from an identity
+// question, and vice versa.
+func TestClassifyCuratorIntent_InsultNeverClassifiedAsIdentity(t *testing.T) {
+	if got := classifyCuratorIntent("curator who are you?"); got != intentIdentity {
+		t.Fatalf("classifyCuratorIntent(%q) = %v, want %v", "curator who are you?", got, intentIdentity)
+	}
+	for _, line := range curatorIntentFallbacks[intentIdentity] {
+		if line == "I have been called worse things by better subjects." {
+			t.Error("insult-only fallback line leaked into the IDENTITY fallback pool")
+		}
 	}
 	found := false
-	for _, want := range curatorIdentityReplies {
-		if reply == want {
+	for _, line := range curatorIntentFallbacks[intentInsultProvocation] {
+		if line == "I have been called worse things by better subjects." {
 			found = true
-			break
 		}
 	}
 	if !found {
-		t.Errorf("reply %q was not drawn from curatorIdentityReplies", reply)
+		t.Error("expected the insult line to live in the INSULT_PROVOCATION fallback pool")
 	}
 }
 
-func TestMatchCannedResponse_ActivityQuestionFallsThrough(t *testing.T) {
-	// "what are you doing" must NOT be swallowed by the identity matcher --
-	// it's the activity-question case CGPT-PERSONA-LIVE-03 addresses via
-	// LLM few-shot guidance, not a canned reply.
-	if _, ok := matchCannedResponse("what are you doing"); ok {
-		t.Error("expected \"what are you doing\" to fall through to the LLM path, not match a canned reply")
+func TestClassifyCuratorIntent_SelfStats(t *testing.T) {
+	cases := []string{
+		"am I doing well?",
+		"how am I doing",
+		"how many kills do I have",
+		"what are my stats",
+	}
+	for _, msg := range cases {
+		if got := classifyCuratorIntent(msg); got != intentSelfStats {
+			t.Errorf("classifyCuratorIntent(%q) = %v, want %v", msg, got, intentSelfStats)
+		}
+	}
+}
+
+func TestClassifyCuratorIntent_LoreMystery(t *testing.T) {
+	cases := []string{
+		"what caused the Knox Event?",
+		"is this an experiment",
+		"is this a test",
+		"are you watching us",
+	}
+	for _, msg := range cases {
+		if got := classifyCuratorIntent(msg); got != intentLoreMystery {
+			t.Errorf("classifyCuratorIntent(%q) = %v, want %v", msg, got, intentLoreMystery)
+		}
+	}
+}
+
+func TestClassifyCuratorIntent_DefaultsToGeneric(t *testing.T) {
+	if got := classifyCuratorIntent("nice base you've got there"); got != intentGenericCurator {
+		t.Errorf("classifyCuratorIntent(...) = %v, want %v", got, intentGenericCurator)
+	}
+}
+
+// --- intent guidance / fallback pool completeness --------------------------
+
+var allCuratorIntents = []curatorIntent{
+	intentIdentity, intentActivityPurpose, intentInsultProvocation,
+	intentSelfStats, intentOtherPlayer, intentLoreMystery, intentGenericCurator,
+}
+
+func TestCuratorIntentGuidanceText_CoversEveryIntent(t *testing.T) {
+	for _, intent := range allCuratorIntents {
+		guidance := curatorIntentGuidance(intent)
+		if !strings.Contains(guidance, "CURRENT CONVERSATION INTENT: "+string(intent)) {
+			t.Errorf("guidance for %v missing its own intent header: %q", intent, guidance)
+		}
+	}
+}
+
+func TestCuratorIntentFallbacks_EveryIntentHasNonEmptyPool(t *testing.T) {
+	for _, intent := range allCuratorIntents {
+		reply, ok := matchIntentFallback(intent)
+		if !ok || reply == "" {
+			t.Errorf("intent %v has no usable fallback pool", intent)
+		}
 	}
 }
 
 // --- CGPT-PERSONA-LIVE-01/03: prompt contract regression ------------------
 
 func TestAssembleCuratorPersona_ContainsRoleDisclosureGuardrail(t *testing.T) {
-	persona := assembleCuratorPersona(curatorTierCommon)
+	persona := assembleCuratorPersona(curatorTierCommon, curatorIntentGuidance(intentGenericCurator))
 	mustContain := []string{
 		"NEVER EXPLAIN YOUR ROLE",
 		"an unseen observer",
@@ -92,9 +163,16 @@ func TestAssembleCuratorPersona_ContainsRoleDisclosureGuardrail(t *testing.T) {
 }
 
 func TestAssembleCuratorPersona_ContainsActivityQuestionGuardrail(t *testing.T) {
-	persona := assembleCuratorPersona(curatorTierCommon)
+	persona := assembleCuratorPersona(curatorTierCommon, curatorIntentGuidance(intentGenericCurator))
 	if !strings.Contains(persona, `what are you doing`) {
 		t.Error("assembled persona missing the anti-mission-statement guidance for activity questions (CGPT-PERSONA-LIVE-03)")
+	}
+}
+
+func TestAssembleCuratorPersona_IncludesIntentGuidance(t *testing.T) {
+	persona := assembleCuratorPersona(curatorTierCommon, curatorIntentGuidance(intentSelfStats))
+	if !strings.Contains(persona, "CURRENT CONVERSATION INTENT: SELF_STATS") {
+		t.Error("assembled persona did not include the requested intent's guidance block")
 	}
 }
 

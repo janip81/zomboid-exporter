@@ -323,16 +323,18 @@ func TestNewCuratorNaturalTrigger_ClampsAmbientChance(t *testing.T) {
 	}
 }
 
-// --- canned response routing -----------------------------------------------
+// --- intent classification + fallback routing -------------------------------
 
-func TestMatchCannedResponse(t *testing.T) {
-	reply, ok := matchCannedResponse("who is the curator?")
+func TestMatchIntentFallback(t *testing.T) {
+	reply, ok := matchIntentFallback(classifyCuratorIntent("who is the curator?"))
 	if !ok || reply == "" {
-		t.Fatal("expected a canned match for a known topic")
+		t.Fatal("expected an intent fallback for a known topic")
 	}
-	_, ok = matchCannedResponse("what's the weather like on Mars")
-	if ok {
-		t.Fatal("expected no canned match for an unrelated question")
+	// classifyCuratorIntent never fails closed to "no intent" -- unrelated
+	// input still gets GENERIC_CURATOR's fallback pool.
+	reply, ok = matchIntentFallback(classifyCuratorIntent("what's the weather like on Mars"))
+	if !ok || reply == "" {
+		t.Fatal("expected the generic fallback pool for an unrelated question")
 	}
 }
 
