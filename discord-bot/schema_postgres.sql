@@ -97,19 +97,34 @@ CREATE TABLE IF NOT EXISTS discordbot_milestone_hits (
 -- curator-natural-trigger-and-identity.md, curator-reply-routing.md for
 -- the full design this schema implements.
 
--- Explicit Discord user -> Steam player override. NOT a prerequisite for
--- personal Curator answers -- curator_identity.go resolves identity by
--- exact unique Discord nickname/display-name/account-name match against
--- known PZ usernames first (see curator-natural-trigger-and-identity.md);
--- this table exists only as an admin override for cases that don't fit
--- that (renamed accounts, Discord/PZ names that genuinely differ, name
--- collisions). An explicit row here always wins over a name-derived match.
+-- Durable Discord user -> Steam player identity link. Populated two ways
+-- (curator-player-auto-linking.md's AUTO-LINK-1): automatically, the first
+-- time curator_context.go's resolveCuratorIdentity() gets a unique exact
+-- Discord nickname/display-name/account-name match against a known PZ
+-- username (link_source = auto_nickname/auto_display_name/
+-- auto_account_username); or manually, via an admin override
+-- (link_source = admin) for cases that don't auto-resolve (renamed
+-- accounts, Discord/PZ names that genuinely differ, name collisions). An
+-- existing row here -- auto or admin -- always wins over a fresh
+-- name-derived match; it is never silently replaced (AUTO-LINK-5/6).
 CREATE TABLE IF NOT EXISTS discordbot_player_links (
     discord_user_id TEXT PRIMARY KEY,
     steam_id        TEXT NOT NULL,
     linked_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     linked_by       TEXT NOT NULL
 );
+
+ALTER TABLE discordbot_player_links
+    ADD COLUMN IF NOT EXISTS link_source TEXT NOT NULL DEFAULT 'manual',
+    ADD COLUMN IF NOT EXISTS matched_name TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMPTZ;
+
+-- One SteamID should have at most one Discord link (AUTO-LINK-2) -- both
+-- tables were confirmed empty before this index was added, so no preflight
+-- dedupe was needed; if this ever fails on a fresh environment, dedupe
+-- discordbot_player_links by steam_id before retrying.
+CREATE UNIQUE INDEX IF NOT EXISTS discordbot_player_links_steam_id_uq
+    ON discordbot_player_links (steam_id);
 
 -- Curator LLM provider configuration. DB-backed (not YAML/flags) so
 -- priority/enabled/model can be changed with one UPDATE, no redeploy --

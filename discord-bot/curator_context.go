@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -42,12 +43,19 @@ func resolveCuratorIdentity(ctx context.Context, db *pgxpool.Pool, discordUserID
 		if uErr != nil {
 			return resolvedIdentity{}, uErr
 		}
-		return resolvedIdentity{SteamID: linkedSteamID, Username: username, Source: "link", Resolved: true}, nil
+		identity := resolvedIdentity{SteamID: linkedSteamID, Username: username, Source: "link", Resolved: true}
+		logCuratorIdentityResolution(discordUserID, identity, false)
+		return identity, nil
 	case !errors.Is(err, pgx.ErrNoRows):
 		return resolvedIdentity{}, err
 	}
 
+	// curator-player-auto-linking.md's AUTO-LINK-4: candidates are tried
+	// in this fixed priority order, and the loop stops at the first
+	// unique match -- lower-priority candidates are never even compared
+	// once one resolves.
 	sources := []string{"nickname", "display_name", "account_username"}
+	linkSources := []string{"auto_nickname", "auto_display_name", "auto_account_username"}
 	for idx, name := range candidateNames {
 		if name == "" {
 			continue
@@ -56,17 +64,107 @@ func resolveCuratorIdentity(ctx context.Context, db *pgxpool.Pool, discordUserID
 		if qErr != nil {
 			return resolvedIdentity{}, qErr
 		}
-		if matchCount == 1 {
-			source := "account_username"
-			if idx < len(sources) {
-				source = sources[idx]
-			}
-			return resolvedIdentity{SteamID: steamID, Username: username, Source: source, Resolved: true}, nil
+		if matchCount != 1 {
+			// 0 (no player by this name) or >1 (ambiguous, e.g. a
+			// duplicate/corrupted steam_id row sharing this username) --
+			// both fail closed for THIS candidate; still try the next one
+			// (AUTO-LINK-3: no fuzzy matching, ever).
+			continue
 		}
-		// matchCount == 0 (no player by this name) or > 1 (ambiguous) --
-		// both fail closed for THIS candidate; still try the next one.
+		source := "account_username"
+		linkSource := "auto_account_username"
+		if idx < len(sources) {
+			source, linkSource = sources[idx], linkSources[idx]
+		}
+
+		// AUTO-LINK-1/2/6: persist the first unique match as a durable
+		// link, fail-closed on any conflict (a concurrent auto-link, an
+		// admin link created in between, or -- if the one-Discord-user-
+		// per-SteamID invariant is already enforced by the DB's unique
+		// index -- this SteamID already belonging to a different Discord
+		// user). Never silently steal/overwrite an existing link.
+		effectiveSteamID, created, pErr := persistAutoLink(ctx, db, discordUserID, steamID, linkSource, name)
+		if pErr != nil {
+			return resolvedIdentity{}, pErr
+		}
+		if effectiveSteamID == "" {
+			// This SteamID is already linked to a DIFFERENT Discord user --
+			// remain unresolved for this candidate rather than using a
+			// match this Discord user isn't durably entitled to.
+			logCuratorIdentityResolution(discordUserID, resolvedIdentity{}, false)
+			continue
+		}
+		if effectiveSteamID != steamID {
+			// Lost a race to a concurrently-created link for THIS Discord
+			// user (AUTO-LINK-5: an existing durable link always wins) --
+			// use whatever is now actually on record instead of our own
+			// name-derived match.
+			effUsername, uErr := lookupUsername(ctx, db, effectiveSteamID)
+			if uErr != nil {
+				return resolvedIdentity{}, uErr
+			}
+			identity := resolvedIdentity{SteamID: effectiveSteamID, Username: effUsername, Source: "link", Resolved: true}
+			logCuratorIdentityResolution(discordUserID, identity, false)
+			return identity, nil
+		}
+
+		identity := resolvedIdentity{SteamID: steamID, Username: username, Source: source, Resolved: true}
+		logCuratorIdentityResolution(discordUserID, identity, created)
+		return identity, nil
 	}
+	logCuratorIdentityResolution(discordUserID, resolvedIdentity{}, false)
 	return resolvedIdentity{}, nil
+}
+
+// persistAutoLink durably links discordUserID -> steamID the first time a
+// unique exact name match resolves one (AUTO-LINK-1). ON CONFLICT DO
+// NOTHING with no target covers a conflict on EITHER unique constraint --
+// discord_user_id's primary key or steam_id's unique index -- so this
+// never overwrites an existing row either way (AUTO-LINK-2/6). The
+// read-back after the insert is the verification step AUTO-LINK-6 calls
+// for: it distinguishes "we created it" / "a concurrent identical link
+// already exists" (both fine, same effective mapping) from "a DIFFERENT
+// link already exists for this Discord user" (use that instead) from "this
+// SteamID is already claimed by a different Discord user" (returns "",
+// forcing the caller to treat this candidate as unresolved).
+func persistAutoLink(ctx context.Context, db *pgxpool.Pool, discordUserID, steamID, linkSource, matchedName string) (effectiveSteamID string, created bool, err error) {
+	tag, err := db.Exec(ctx, `
+		INSERT INTO discordbot_player_links (discord_user_id, steam_id, linked_by, link_source, matched_name, last_verified_at)
+		VALUES ($1, $2, $3, $4, $5, now())
+		ON CONFLICT DO NOTHING
+	`, discordUserID, steamID, "auto", linkSource, matchedName)
+	if err != nil {
+		return "", false, err
+	}
+	weInserted := tag.RowsAffected() == 1
+
+	var actual string
+	qErr := db.QueryRow(ctx, "SELECT steam_id FROM discordbot_player_links WHERE discord_user_id = $1", discordUserID).Scan(&actual)
+	if errors.Is(qErr, pgx.ErrNoRows) {
+		// Our own row wasn't created (the steam_id unique index rejected
+		// it) and no other row exists for this discord user either --
+		// steamID is already claimed by someone else.
+		return "", false, nil
+	}
+	if qErr != nil {
+		return "", false, qErr
+	}
+	return actual, weInserted && actual == steamID, nil
+}
+
+// logCuratorIdentityResolution is server-side-only observability
+// (AUTO-LINK-9) -- steamID/discordUserID never leave the server logs;
+// only semantic facts (never raw IDs) are ever sent to the LLM or Discord,
+// unchanged by this logging (AUTO-LINK-8, renderCuratorContext below).
+func logCuratorIdentityResolution(discordUserID string, identity resolvedIdentity, autoLinkCreated bool) {
+	slog.Info("curator: identity resolution",
+		"discordUserID", discordUserID,
+		"resolved", identity.Resolved,
+		"source", identity.Source,
+		"steamID", identity.SteamID,
+		"username", identity.Username,
+		"autoLinkCreated", autoLinkCreated,
+	)
 }
 
 func lookupUsername(ctx context.Context, db *pgxpool.Pool, steamID string) (string, error) {

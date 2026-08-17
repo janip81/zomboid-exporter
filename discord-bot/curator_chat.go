@@ -64,6 +64,12 @@ func buildCuratorContext(ctx context.Context, deps botDeps, discordUserID string
 		stats, err = fetchCuratorPlayerStats(ctx, deps.db, identity.SteamID)
 		if err != nil {
 			slog.Error("curator: fetch player stats failed", "err", err)
+		} else {
+			// AUTO-LINK-9: server-side only, distinguishes an identity
+			// failure (logged in resolveCuratorIdentity) from a
+			// stats-query problem when a player reports Curator "not
+			// seeing" their real numbers.
+			slog.Info("curator: context stats", "steamID", identity.SteamID, "zombieKills", stats.ZombieKills, "deaths", stats.Deaths)
 		}
 	}
 	return renderCuratorContext(identity, stats)
