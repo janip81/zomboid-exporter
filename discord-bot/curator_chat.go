@@ -100,6 +100,20 @@ func askCurator(ctx context.Context, deps botDeps, discordUserID string, candida
 		statFact = resolveCuratorStatFact(ctx, deps.db, discordUserID, candidateNames, metric, scope)
 	}
 
+	// curator-llm-semantic-stat-resolution.md: for a GENERIC message that
+	// looks plausibly stat/leaderboard-oriented ("who is the drunk on the
+	// server?"), spend a SEPARATE, small LLM call to interpret intent
+	// into a strict validated query plan before falling back to ordinary
+	// conversation -- never called for messages the deterministic
+	// classifier already confidently resolved (SEM-1), and gated on its
+	// own rate-limiter slot since it's a genuinely separate provider call
+	// from the personality reply below.
+	if intent == intentGenericCurator && !statFact.Resolved && deps.llmPool != nil && looksCuratorStatLike(message) {
+		if deps.llmLimiter == nil || deps.llmLimiter.allow(discordUserID) {
+			statFact = resolveCuratorSemanticStatFact(ctx, deps, message)
+		}
+	}
+
 	if deps.llmPool != nil {
 		// CGPT-051-A: the shared rate limiter gates the LLM call itself --
 		// the single choke point shared by BOTH /curator and natural chat.
