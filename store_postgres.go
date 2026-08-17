@@ -292,8 +292,31 @@ func (s *pgStore) activeCharacter(ctx context.Context, steamID string, at time.T
 		return id, nil
 	}
 
-	// No alive character on record -- create character_number 1 (or next
-	// free number) so later events have somewhere to attach.
+	// No alive character on record. A stray/late event for a steamID
+	// that already HAS character history (e.g. an "injury" line that
+	// arrives a moment after a "died" line, before the real respawn's
+	// created_player event lands) must NOT fabricate a brand-new "alive"
+	// character just to have somewhere to attach -- confirmed live: an
+	// injury event 1.4s after a death created exactly such a phantom,
+	// and the genuine respawn 27s later created a second, real
+	// character, leaving two simultaneously is_alive=TRUE rows for one
+	// player. Reuse the most recent existing character instead; the
+	// real respawn's handleCreatedPlayer will overwrite the cache with
+	// the correct new character as soon as it actually arrives.
+	if err := s.pool.QueryRow(ctx, `
+		SELECT id FROM characters WHERE steam_id = $1
+		ORDER BY character_number DESC LIMIT 1
+	`, steamID).Scan(&id); err == nil {
+		s.mu.Lock()
+		s.activeCharBySteamID[steamID] = id
+		s.mu.Unlock()
+		return id, nil
+	}
+
+	// Genuinely no character history at all yet -- the true cold-start
+	// case this fallback exists for (exporter starts mid-session, after
+	// a character already existed in-game). Create character_number 1
+	// (or next free number) so later events have somewhere to attach.
 	var nextNum int
 	if err := s.pool.QueryRow(ctx, `
 		SELECT COALESCE(MAX(character_number), 0) + 1 FROM characters WHERE steam_id = $1

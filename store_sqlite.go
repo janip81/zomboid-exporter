@@ -366,6 +366,21 @@ func (s *sqliteStore) activeCharacter(ctx context.Context, steamID string, at ti
 		return id, nil
 	}
 
+	// No alive character on record but this steamID may already HAVE
+	// character history -- see pgStore.activeCharacter's comment for the
+	// full rationale (a stray/late event must reuse the most recent
+	// existing character rather than fabricate a phantom new "alive" one).
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT id FROM characters WHERE steam_id = ?
+		ORDER BY character_number DESC LIMIT 1
+	`, steamID).Scan(&id); err == nil {
+		s.mu.Lock()
+		s.activeCharBySteamID[steamID] = id
+		s.mu.Unlock()
+		return id, nil
+	}
+
+	// Genuinely no character history at all yet -- true cold start.
 	var nextNum int
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(character_number), 0) + 1 FROM characters WHERE steam_id = ?
