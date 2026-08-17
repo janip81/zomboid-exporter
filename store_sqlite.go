@@ -839,17 +839,21 @@ func (s *sqliteStore) reconcileAllCharacterStats(ctx context.Context) (checked i
 // reconcileCharacterStats mirrors pgStore.reconcileCharacterStats -- see
 // its comment for the full rationale.
 func (s *sqliteStore) reconcileCharacterStats(ctx context.Context, characterID int64) (changed bool, err error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT event_type, details FROM events WHERE character_id = ?`, characterID)
+	rows, err := s.db.QueryContext(ctx, `SELECT event_type, details, occurred_at FROM events WHERE character_id = ?`, characterID)
 	if err != nil {
 		return false, err
 	}
 	var total characterStatDelta
+	var maxOccurredAt string // ISO-8601 TEXT, lexicographically comparable
 	breakdown := map[[2]string]float64{}
 	for rows.Next() {
-		var eventType, details string
-		if err := rows.Scan(&eventType, &details); err != nil {
+		var eventType, details, occurredAt string
+		if err := rows.Scan(&eventType, &details, &occurredAt); err != nil {
 			rows.Close()
 			return false, err
+		}
+		if occurredAt > maxOccurredAt {
+			maxOccurredAt = occurredAt
 		}
 		var fields map[string]any
 		if err := json.Unmarshal([]byte(details), &fields); err != nil {
@@ -877,33 +881,46 @@ func (s *sqliteStore) reconcileCharacterStats(ctx context.Context, characterID i
 	rows.Close()
 
 	var stored characterStatDelta
+	var storedLastEventAt *string
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT zombie_kills, injuries, distance_walked_km, distance_driven_km,
-		       drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours
+		       drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours, last_event_at
 		FROM characters WHERE id = ?
 	`, characterID).Scan(&stored.ZombieKills, &stored.Injuries, &stored.DistanceWalkedKm, &stored.DistanceDrivenKm,
-		&stored.Drinks, &stored.AlcoholMl, &stored.PillsTaken, &stored.BooksRead, &stored.IndoorHours, &stored.OutdoorHours); err != nil {
+		&stored.Drinks, &stored.AlcoholMl, &stored.PillsTaken, &stored.BooksRead, &stored.IndoorHours, &stored.OutdoorHours, &storedLastEventAt); err != nil {
 		return false, err
 	}
 
-	if statAggregatesEqual(stored, total) {
+	// AGG-LIVE-5: last_event_at must be part of the drift comparison too
+	// -- see pgStore.reconcileCharacterStats's comment.
+	lastEventAtDrifted := maxOccurredAt != "" && (storedLastEventAt == nil || *storedLastEventAt != maxOccurredAt)
+	if statAggregatesEqual(stored, total) && !lastEventAtDrifted {
 		return false, nil
 	}
 
 	slog.Warn("character stats reconciliation found drift, repairing",
 		"characterID", characterID,
 		"storedKills", stored.ZombieKills, "recomputedKills", total.ZombieKills,
-		"storedInjuries", stored.Injuries, "recomputedInjuries", total.Injuries)
+		"storedInjuries", stored.Injuries, "recomputedInjuries", total.Injuries,
+		"lastEventAtDrifted", lastEventAtDrifted)
 
+	newLastEventAt := maxOccurredAt
+	if storedLastEventAt != nil && *storedLastEventAt > newLastEventAt {
+		newLastEventAt = *storedLastEventAt // never move it backwards
+	}
+	var lastEventParam any
+	if newLastEventAt != "" {
+		lastEventParam = newLastEventAt
+	}
 	if _, err := s.db.ExecContext(ctx, `
 		UPDATE characters
 		SET zombie_kills = ?, injuries = ?, distance_walked_km = ?, distance_driven_km = ?,
 		    drinks = ?, alcohol_ml = ?, pills_taken = ?, books_read = ?,
-		    indoor_hours = ?, outdoor_hours = ?, stats_revision = ?
+		    indoor_hours = ?, outdoor_hours = ?, stats_revision = ?, last_event_at = ?
 		WHERE id = ?
 	`, total.ZombieKills, total.Injuries, total.DistanceWalkedKm, total.DistanceDrivenKm,
 		total.Drinks, total.AlcoholMl, total.PillsTaken, total.BooksRead, total.IndoorHours, total.OutdoorHours,
-		currentStatsRevision, characterID); err != nil {
+		currentStatsRevision, lastEventParam, characterID); err != nil {
 		return false, err
 	}
 	now := iso(time.Now())

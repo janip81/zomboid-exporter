@@ -759,18 +759,23 @@ func (s *pgStore) reconcileAllCharacterStats(ctx context.Context) (checked int, 
 // intentionally left untouched: reconciliation repairs data, it does not
 // reopen a life to further live aggregation.
 func (s *pgStore) reconcileCharacterStats(ctx context.Context, characterID int64) (changed bool, err error) {
-	rows, err := s.pool.Query(ctx, `SELECT event_type, details FROM events WHERE character_id = $1`, characterID)
+	rows, err := s.pool.Query(ctx, `SELECT event_type, details, occurred_at FROM events WHERE character_id = $1`, characterID)
 	if err != nil {
 		return false, err
 	}
 	var total characterStatDelta
+	var maxOccurredAt time.Time
 	breakdown := map[[2]string]float64{}
 	for rows.Next() {
 		var eventType string
 		var detailsJSON []byte
-		if err := rows.Scan(&eventType, &detailsJSON); err != nil {
+		var occurredAt time.Time
+		if err := rows.Scan(&eventType, &detailsJSON, &occurredAt); err != nil {
 			rows.Close()
 			return false, err
+		}
+		if occurredAt.After(maxOccurredAt) {
+			maxOccurredAt = occurredAt
 		}
 		var fields map[string]any
 		if err := json.Unmarshal(detailsJSON, &fields); err != nil {
@@ -798,32 +803,44 @@ func (s *pgStore) reconcileCharacterStats(ctx context.Context, characterID int64
 	rows.Close()
 
 	var stored characterStatDelta
+	var storedLastEventAt *time.Time
 	if err := s.pool.QueryRow(ctx, `
 		SELECT zombie_kills, injuries, distance_walked_km, distance_driven_km,
-		       drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours
+		       drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours, last_event_at
 		FROM characters WHERE id = $1
 	`, characterID).Scan(&stored.ZombieKills, &stored.Injuries, &stored.DistanceWalkedKm, &stored.DistanceDrivenKm,
-		&stored.Drinks, &stored.AlcoholMl, &stored.PillsTaken, &stored.BooksRead, &stored.IndoorHours, &stored.OutdoorHours); err != nil {
+		&stored.Drinks, &stored.AlcoholMl, &stored.PillsTaken, &stored.BooksRead, &stored.IndoorHours, &stored.OutdoorHours, &storedLastEventAt); err != nil {
 		return false, err
 	}
 
-	if statAggregatesEqual(stored, total) {
+	// AGG-LIVE-5: last_event_at must be part of the drift comparison too,
+	// or a row whose numeric totals already match stays permanently
+	// NULL/stale on databases backfilled before this field existed.
+	lastEventAtDrifted := !maxOccurredAt.IsZero() && (storedLastEventAt == nil || !storedLastEventAt.Equal(maxOccurredAt))
+	if statAggregatesEqual(stored, total) && !lastEventAtDrifted {
 		return false, nil
 	}
 
 	slog.Warn("character stats reconciliation found drift, repairing",
 		"characterID", characterID,
 		"storedKills", stored.ZombieKills, "recomputedKills", total.ZombieKills,
-		"storedInjuries", stored.Injuries, "recomputedInjuries", total.Injuries)
+		"storedInjuries", stored.Injuries, "recomputedInjuries", total.Injuries,
+		"lastEventAtDrifted", lastEventAtDrifted)
 
+	var lastEventParam any
+	if !maxOccurredAt.IsZero() {
+		lastEventParam = maxOccurredAt
+	}
 	if _, err := s.pool.Exec(ctx, `
 		UPDATE characters
 		SET zombie_kills = $2, injuries = $3, distance_walked_km = $4, distance_driven_km = $5,
 		    drinks = $6, alcohol_ml = $7, pills_taken = $8, books_read = $9,
-		    indoor_hours = $10, outdoor_hours = $11, stats_revision = $12
+		    indoor_hours = $10, outdoor_hours = $11, stats_revision = $12,
+		    last_event_at = GREATEST(last_event_at, $13::timestamptz)
 		WHERE id = $1
 	`, characterID, total.ZombieKills, total.Injuries, total.DistanceWalkedKm, total.DistanceDrivenKm,
-		total.Drinks, total.AlcoholMl, total.PillsTaken, total.BooksRead, total.IndoorHours, total.OutdoorHours, currentStatsRevision); err != nil {
+		total.Drinks, total.AlcoholMl, total.PillsTaken, total.BooksRead, total.IndoorHours, total.OutdoorHours,
+		currentStatsRevision, lastEventParam); err != nil {
 		return false, err
 	}
 	now := time.Now()

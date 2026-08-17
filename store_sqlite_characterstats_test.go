@@ -249,6 +249,57 @@ func TestCharacterStats_Backfill_RebuildsFromExistingHistoryOnAliveCharacter(t *
 	}
 }
 
+// AGG-BACKFILL-LAST-EVENT (curator-aggregate-stats-live-test-review.md's
+// AGG-LIVE-5): reconciliation must backfill last_event_at from
+// MAX(events.occurred_at) too, not just the numeric aggregate columns --
+// otherwise a row whose totals already matched stays permanently NULL.
+func TestCharacterStats_Backfill_LastEventAt(t *testing.T) {
+	s := newTestSQLiteStore(t)
+	ctx := context.Background()
+	const sid = "76561197965988309"
+	t0 := time.Now()
+
+	s.handleCreatedPlayer(ctx, &perkEvent{SteamID: sid, Username: "P", Timestamp: t0})
+	var charID int64
+	if err := s.db.QueryRow(`SELECT id FROM characters WHERE steam_id = ?`, sid).Scan(&charID); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	latest := t0.Add(5 * time.Second)
+	for _, ts := range []time.Time{t0.Add(1 * time.Second), latest} {
+		details := detailsJSON(map[string]any{"steamId": sid, "username": "P", "injury": "scratch", "bodyPart": "Arm"})
+		if _, err := s.db.Exec(`
+			INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+			VALUES ('injury', ?, ?, ?, ?, ?)
+		`, sid, charID, iso(ts), details, s.serverName); err != nil {
+			t.Fatalf("seed raw event: %v", err)
+		}
+	}
+	// last_event_at is still NULL -- these events predate the
+	// aggregate-columns migration.
+	var lastEventAt *string
+	if err := s.db.QueryRow(`SELECT last_event_at FROM characters WHERE id = ?`, charID).Scan(&lastEventAt); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if lastEventAt != nil {
+		t.Fatalf("precondition failed: last_event_at = %v, want NULL before backfill", *lastEventAt)
+	}
+
+	changed, err := s.reconcileCharacterStats(ctx, charID)
+	if err != nil {
+		t.Fatalf("reconcileCharacterStats: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected reconciliation to report a change (last_event_at drift alone must count)")
+	}
+
+	if err := s.db.QueryRow(`SELECT last_event_at FROM characters WHERE id = ?`, charID).Scan(&lastEventAt); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if lastEventAt == nil || *lastEventAt != iso(latest) {
+		t.Errorf("last_event_at = %v, want %s (MAX of the raw events)", lastEventAt, iso(latest))
+	}
+}
+
 // AGG-6: the schema accepts multiple simultaneously-alive characters for
 // one SteamID without any constraint violation (character-aggregate-
 // stats.md explicitly forbids auto-enforcing one-alive-per-player).
