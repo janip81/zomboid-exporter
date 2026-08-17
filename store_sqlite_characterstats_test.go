@@ -185,6 +185,70 @@ func TestCharacterStats_AGG5_LifetimeTotalsSumAcrossCharacters(t *testing.T) {
 	}
 }
 
+// CGPT aggregate review's backfill blocker: a fresh aggregate-columns
+// migration adds every column at zero regardless of existing raw event
+// history -- reconcileAllCharacterStats (called once, synchronously, at
+// exporter startup via runStartupCharacterStatsBackfill, before any live
+// pipeline starts) must backfill that history WITHOUT a new event ever
+// arriving, and must do so for a currently-ALIVE (non-finalized)
+// character, not just finalized ones.
+func TestCharacterStats_Backfill_RebuildsFromExistingHistoryOnAliveCharacter(t *testing.T) {
+	s := newTestSQLiteStore(t)
+	ctx := context.Background()
+	const sid = "76561197965988309"
+	t0 := time.Now()
+
+	// Simulate pre-existing raw history from before the aggregate columns
+	// existed: two real kill events already landed in `events`, but
+	// characters.zombie_kills is still at its post-migration default (0).
+	s.handleCreatedPlayer(ctx, &perkEvent{SteamID: sid, Username: "P", Timestamp: t0})
+	var charID int64
+	if err := s.db.QueryRow(`SELECT id FROM characters WHERE steam_id = ?`, sid).Scan(&charID); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	for _, ts := range []time.Time{t0.Add(1 * time.Second), t0.Add(2 * time.Second)} {
+		details := detailsJSON(map[string]any{"steamId": sid, "username": "P", "zombieKills": 500.0, "killMethod": "melee"})
+		if _, err := s.db.Exec(`
+			INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
+			VALUES ('kill', ?, ?, ?, ?, ?)
+		`, sid, charID, iso(ts), details, s.serverName); err != nil {
+			t.Fatalf("seed raw kill event: %v", err)
+		}
+	}
+	// zombie_kills is still 0 -- the aggregate column was never populated
+	// for this pre-existing history.
+	var kills int64
+	if err := s.db.QueryRow(`SELECT zombie_kills FROM characters WHERE id = ?`, charID).Scan(&kills); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if kills != 0 {
+		t.Fatalf("precondition failed: zombie_kills = %d, want 0 before backfill", kills)
+	}
+
+	var isAlive bool
+	if err := s.db.QueryRow(`SELECT is_alive FROM characters WHERE id = ?`, charID).Scan(&isAlive); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if !isAlive {
+		t.Fatal("precondition failed: character must still be alive/non-finalized for this test to prove the fix")
+	}
+
+	checked, repaired, err := s.reconcileAllCharacterStats(ctx)
+	if err != nil {
+		t.Fatalf("reconcileAllCharacterStats: %v", err)
+	}
+	if checked < 1 || repaired < 1 {
+		t.Errorf("checked=%d repaired=%d, want at least 1 of each", checked, repaired)
+	}
+
+	if err := s.db.QueryRow(`SELECT zombie_kills FROM characters WHERE id = ?`, charID).Scan(&kills); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if kills != 2 {
+		t.Errorf("zombie_kills after backfill = %d, want 2 -- matches the acceptance test: existing history is 2 kills, backfill without generating a new kill must reach 2", kills)
+	}
+}
+
 // AGG-6: the schema accepts multiple simultaneously-alive characters for
 // one SteamID without any constraint violation (character-aggregate-
 // stats.md explicitly forbids auto-enforcing one-alive-per-player).

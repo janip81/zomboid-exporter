@@ -53,7 +53,7 @@ func (f *fakeStore) finalizeStaleCharacters(ctx context.Context, graceWindow tim
 	return 0, nil
 }
 
-func (f *fakeStore) reconcileFinalizedCharacterStats(ctx context.Context) (int, int, error) {
+func (f *fakeStore) reconcileAllCharacterStats(ctx context.Context) (int, int, error) {
 	return 0, 0, nil
 }
 

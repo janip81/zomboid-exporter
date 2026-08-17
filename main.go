@@ -338,6 +338,12 @@ func main() {
 		}
 	}
 
+	// Synchronous and BEFORE any live-ingestion pipeline starts -- see
+	// runStartupCharacterStatsBackfill's comment (CGPT aggregate review's
+	// blocker: a fresh aggregate-columns migration adds every column at
+	// zero regardless of existing raw event history).
+	runStartupCharacterStatsBackfill(ctx, db)
+
 	go runPerkLogPipeline(ctx, *dataPath, *serverName, perkMetrics, db)
 	go runExporterLogPipeline(ctx, *dataPath, db, mqttPub)
 	go runConnectionsPipeline(ctx, *dataPath, db)

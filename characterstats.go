@@ -266,12 +266,37 @@ func runCharacterFinalizationPipeline(ctx context.Context, db eventStore) {
 	}
 }
 
-// runCharacterReconciliationPipeline periodically recomputes finalized
-// characters' aggregate stats from raw events and repairs any drift --
+// runStartupCharacterStatsBackfill runs reconcileAllCharacterStats once,
+// synchronously, before any live event pipeline starts -- CGPT aggregate
+// review's blocker: the aggregate columns are added at zero regardless of
+// how much raw event history already exists, so without this pass
+// running first, Curator would report 0 for players with real recorded
+// history until the (previously 24h-interval, finalized-only)
+// reconciliation eventually reached them. Running it here, before
+// main.go spawns any `go run*Pipeline` goroutine, also avoids racing a
+// live increment against this pass's own read-then-overwrite of the same
+// row -- see reconcileAllCharacterStats' comment on why that race is not
+// otherwise fully closed.
+func runStartupCharacterStatsBackfill(ctx context.Context, db eventStore) {
+	if db == nil {
+		return
+	}
+	slog.Info("backfilling character aggregate stats from raw event history...")
+	checked, repaired, err := db.reconcileAllCharacterStats(ctx)
+	if err != nil {
+		slog.Warn("character stats startup backfill failed -- aggregates may be incomplete until the next periodic reconciliation", "err", err)
+		return
+	}
+	slog.Info("character stats startup backfill complete", "checked", checked, "repaired", repaired)
+}
+
+// runCharacterReconciliationPipeline periodically recomputes every
+// character's aggregate stats from raw events and repairs any drift --
 // character-aggregate-stats.md's "nightly reconciliation / rebuild safety
-// net". Raw events remain authoritative; this is the deterministic
-// recoverability path if aggregation logic, ingestion, or the stored
-// values themselves ever drift.
+// net", the ongoing counterpart to runStartupCharacterStatsBackfill's
+// one-time pass. Raw events remain authoritative; this is the
+// deterministic recoverability path if aggregation logic, ingestion, or
+// the stored values themselves ever drift.
 func runCharacterReconciliationPipeline(ctx context.Context, db eventStore) {
 	if db == nil {
 		return
@@ -283,7 +308,7 @@ func runCharacterReconciliationPipeline(ctx context.Context, db eventStore) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			n, repaired, err := db.reconcileFinalizedCharacterStats(ctx)
+			n, repaired, err := db.reconcileAllCharacterStats(ctx)
 			if err != nil {
 				slog.Warn("character stats reconciliation failed", "err", err)
 				continue

@@ -82,13 +82,17 @@ type eventStore interface {
 	// finalized.
 	finalizeStaleCharacters(ctx context.Context, graceWindow time.Duration) (int64, error)
 
-	// reconcileFinalizedCharacterStats recomputes every finalized
-	// character's aggregate columns from raw events and repairs any
-	// drift found -- character-aggregate-stats.md's nightly
-	// reconciliation safety net, run periodically by
-	// runCharacterReconciliationPipeline. Returns how many characters
-	// were checked and how many needed repair.
-	reconcileFinalizedCharacterStats(ctx context.Context) (checked int, repaired int, err error)
+	// reconcileAllCharacterStats recomputes EVERY character's aggregate
+	// columns from raw events and repairs any drift found --
+	// character-aggregate-stats.md's nightly reconciliation safety net.
+	// Deliberately covers alive/non-finalized characters too, not just
+	// finalized ones: it's also main.go's one-time startup backfill pass
+	// (a fresh aggregate-columns migration adds every column at zero
+	// regardless of how much raw event history already exists -- without
+	// this running before any stat is ever read, Curator would report 0
+	// for a player who has genuinely already recorded kills). Returns
+	// how many characters were checked and how many needed repair.
+	reconcileAllCharacterStats(ctx context.Context) (checked int, repaired int, err error)
 
 	Close()
 }

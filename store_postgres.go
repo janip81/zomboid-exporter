@@ -711,12 +711,16 @@ func (s *pgStore) finalizeStaleCharacters(ctx context.Context, graceWindow time.
 	return tag.RowsAffected(), nil
 }
 
-// reconcileFinalizedCharacterStats implements the eventStore interface --
-// see its comment. Recomputes every finalized character's aggregates from
-// its own raw events (using the exact same aggregateDeltaForEvent rules
-// live ingestion uses) and repairs the stored row if it drifted.
-func (s *pgStore) reconcileFinalizedCharacterStats(ctx context.Context) (checked int, repaired int, err error) {
-	rows, err := s.pool.Query(ctx, `SELECT id FROM characters WHERE stats_finalized = true`)
+// reconcileAllCharacterStats implements the eventStore interface -- see
+// its comment. Recomputes EVERY character's aggregates from its own raw
+// events (using the exact same aggregateDeltaForEvent rules live
+// ingestion uses) and repairs the stored row if it drifted -- covers
+// currently-alive/non-finalized characters too, not just finalized ones,
+// which matters for the one-time startup backfill (a fresh aggregate
+// migration adds every column at zero regardless of how much raw history
+// already exists) as much as for the periodic drift-repair safety net.
+func (s *pgStore) reconcileAllCharacterStats(ctx context.Context) (checked int, repaired int, err error) {
+	rows, err := s.pool.Query(ctx, `SELECT id FROM characters`)
 	if err != nil {
 		return 0, 0, err
 	}

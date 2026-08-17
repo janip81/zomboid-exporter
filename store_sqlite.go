@@ -801,10 +801,10 @@ func (s *sqliteStore) finalizeStaleCharacters(ctx context.Context, graceWindow t
 	return res.RowsAffected()
 }
 
-// reconcileFinalizedCharacterStats implements the eventStore interface --
-// see pgStore.reconcileFinalizedCharacterStats's comment.
-func (s *sqliteStore) reconcileFinalizedCharacterStats(ctx context.Context) (checked int, repaired int, err error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM characters WHERE stats_finalized = 1`)
+// reconcileAllCharacterStats implements the eventStore interface -- see
+// pgStore.reconcileAllCharacterStats's comment.
+func (s *sqliteStore) reconcileAllCharacterStats(ctx context.Context) (checked int, repaired int, err error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM characters`)
 	if err != nil {
 		return 0, 0, err
 	}
