@@ -35,6 +35,23 @@ CREATE TABLE IF NOT EXISTS characters (
 CREATE INDEX IF NOT EXISTS idx_characters_steam_id_alive
     ON characters (steam_id) WHERE is_alive = 1;
 
+-- Per-life aggregate stat columns are added via migrateCharacterStatsColumns
+-- (store_sqlite.go) -- SQLite has no ADD COLUMN IF NOT EXISTS, so they
+-- can't be declared here for a pre-existing database. See
+-- schema_stats_postgres.sql's comment on the same columns for the full
+-- rationale (character-aggregate-stats.md).
+
+-- Dynamic per-item breakdown (favorite drink, most-used weapon, etc.) --
+-- see schema_stats_postgres.sql's comment on the same table.
+CREATE TABLE IF NOT EXISTS character_stat_breakdown (
+    character_id INTEGER NOT NULL REFERENCES characters(id),
+    category     TEXT NOT NULL,
+    value_key    TEXT NOT NULL,
+    value        REAL NOT NULL DEFAULT 0,
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (character_id, category, value_key)
+);
+
 CREATE TABLE IF NOT EXISTS skill_snapshots (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     character_id INTEGER NOT NULL REFERENCES characters(id),

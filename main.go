@@ -341,6 +341,8 @@ func main() {
 	go runPerkLogPipeline(ctx, *dataPath, *serverName, perkMetrics, db)
 	go runExporterLogPipeline(ctx, *dataPath, db, mqttPub)
 	go runConnectionsPipeline(ctx, *dataPath, db)
+	go runCharacterFinalizationPipeline(ctx, db)
+	go runCharacterReconciliationPipeline(ctx, db)
 
 	// TWR is an opt-in subsystem -- stats-only deployments (e.g. the
 	// normal ExporterLog-only production server) must never open/read

@@ -75,6 +75,10 @@ func newSQLiteStore(ctx context.Context, path, serverName string) (*sqliteStore,
 		db.Close()
 		return nil, err
 	}
+	if err := s.migrateCharacterStatsColumns(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := s.loadActiveCharacters(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -192,6 +196,45 @@ func (s *sqliteStore) migrateTWRJobAttemptsSteamID(ctx context.Context) error {
 			continue
 		}
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE twr_job_attempts ADD COLUMN `+col+` TEXT`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateCharacterStatsColumns adds the per-life aggregate columns to
+// characters -- see schema_stats_postgres.sql's comment on the same
+// columns (character-aggregate-stats.md). Postgres declares these inline
+// via ADD COLUMN IF NOT EXISTS in schema_stats_postgres.sql; SQLite has
+// no such clause, hence the hasColumn() check, same pattern as
+// migrateTWRJobAttemptsSteamID above.
+func (s *sqliteStore) migrateCharacterStatsColumns(ctx context.Context) error {
+	cols := []struct{ name, ddl string }{
+		{"zombie_kills", `ALTER TABLE characters ADD COLUMN zombie_kills INTEGER NOT NULL DEFAULT 0`},
+		{"injuries", `ALTER TABLE characters ADD COLUMN injuries INTEGER NOT NULL DEFAULT 0`},
+		{"distance_walked_km", `ALTER TABLE characters ADD COLUMN distance_walked_km REAL NOT NULL DEFAULT 0`},
+		{"distance_driven_km", `ALTER TABLE characters ADD COLUMN distance_driven_km REAL NOT NULL DEFAULT 0`},
+		{"drinks", `ALTER TABLE characters ADD COLUMN drinks INTEGER NOT NULL DEFAULT 0`},
+		{"alcohol_ml", `ALTER TABLE characters ADD COLUMN alcohol_ml REAL NOT NULL DEFAULT 0`},
+		{"pills_taken", `ALTER TABLE characters ADD COLUMN pills_taken INTEGER NOT NULL DEFAULT 0`},
+		{"books_read", `ALTER TABLE characters ADD COLUMN books_read INTEGER NOT NULL DEFAULT 0`},
+		{"vehicle_collisions", `ALTER TABLE characters ADD COLUMN vehicle_collisions INTEGER NOT NULL DEFAULT 0`},
+		{"indoor_hours", `ALTER TABLE characters ADD COLUMN indoor_hours REAL NOT NULL DEFAULT 0`},
+		{"outdoor_hours", `ALTER TABLE characters ADD COLUMN outdoor_hours REAL NOT NULL DEFAULT 0`},
+		{"last_event_at", `ALTER TABLE characters ADD COLUMN last_event_at TEXT`},
+		{"stats_finalized", `ALTER TABLE characters ADD COLUMN stats_finalized INTEGER NOT NULL DEFAULT 0`},
+		{"stats_finalized_at", `ALTER TABLE characters ADD COLUMN stats_finalized_at TEXT`},
+		{"stats_revision", `ALTER TABLE characters ADD COLUMN stats_revision INTEGER NOT NULL DEFAULT 1`},
+	}
+	for _, c := range cols {
+		has, err := s.hasColumn(ctx, "characters", c.name)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, c.ddl); err != nil {
 			return err
 		}
 	}
@@ -439,6 +482,11 @@ func (s *sqliteStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {
 		slog.Warn("upsertPlayer failed", "err", err)
 		return
 	}
+	// character-aggregate-stats.md's finalization trigger 1 -- see
+	// pgStore.handleCreatedPlayer's comment for the full rationale.
+	if err := s.finalizeDeadCharacters(ctx, ev.SteamID, ev.Timestamp); err != nil {
+		slog.Warn("finalize previous character failed", "err", err)
+	}
 	var nextNum int
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(character_number), 0) + 1 FROM characters WHERE steam_id = ?
@@ -447,9 +495,9 @@ func (s *sqliteStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {
 		return
 	}
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO characters (steam_id, character_number, created_at, is_alive, server)
-		VALUES (?, ?, ?, 1, ?)
-	`, ev.SteamID, nextNum, iso(ev.Timestamp), s.serverName)
+		INSERT INTO characters (steam_id, character_number, created_at, is_alive, server, stats_revision)
+		VALUES (?, ?, ?, 1, ?, ?)
+	`, ev.SteamID, nextNum, iso(ev.Timestamp), s.serverName, currentStatsRevision)
 	if err != nil {
 		slog.Warn("insert character failed", "err", err)
 		return
@@ -673,7 +721,203 @@ func (s *sqliteStore) ingestExporterEvent(ctx context.Context, ev *exporterEvent
 		VALUES (?, ?, ?, ?, ?, ?)
 	`, ev.EventType, steamID, charID, iso(ev.Timestamp), details, s.serverName); err != nil {
 		slog.Warn("insert exporter event failed", "type", ev.EventType, "err", err)
+		return
 	}
+	if err := s.applyCharacterStatDelta(ctx, charID, aggregateDeltaForEvent(ev.EventType, ev.Fields), ev.Timestamp); err != nil {
+		slog.Warn("apply character stat delta failed", "type", ev.EventType, "err", err)
+	}
+}
+
+// applyCharacterStatDelta mirrors pgStore.applyCharacterStatDelta -- see
+// its comment for the full rationale. SQLite has no GREATEST(); ISO-8601
+// TEXT timestamps compare correctly lexicographically, so a CASE
+// expression does the same job without the NULL-propagation trap SQLite's
+// own scalar max(x,y) has (it returns NULL if EITHER argument is NULL,
+// unlike Postgres' GREATEST which ignores NULLs).
+func (s *sqliteStore) applyCharacterStatDelta(ctx context.Context, charID int64, d characterStatDelta, at time.Time) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE characters
+		SET zombie_kills = zombie_kills + ?,
+		    injuries = injuries + ?,
+		    distance_walked_km = distance_walked_km + ?,
+		    distance_driven_km = distance_driven_km + ?,
+		    drinks = drinks + ?,
+		    alcohol_ml = alcohol_ml + ?,
+		    pills_taken = pills_taken + ?,
+		    books_read = books_read + ?,
+		    indoor_hours = indoor_hours + ?,
+		    outdoor_hours = outdoor_hours + ?,
+		    last_event_at = CASE WHEN last_event_at IS NULL OR ? > last_event_at THEN ? ELSE last_event_at END
+		WHERE id = ? AND stats_finalized = 0
+	`, d.ZombieKills, d.Injuries, d.DistanceWalkedKm, d.DistanceDrivenKm,
+		d.Drinks, d.AlcoholMl, d.PillsTaken, d.BooksRead, d.IndoorHours, d.OutdoorHours,
+		iso(at), iso(at), charID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 || len(d.Breakdown) == 0 {
+		return nil
+	}
+	for _, b := range d.Breakdown {
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO character_stat_breakdown (character_id, category, value_key, value, updated_at)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT (character_id, category, value_key)
+			DO UPDATE SET value = character_stat_breakdown.value + excluded.value, updated_at = excluded.updated_at
+		`, charID, b.Category, b.ValueKey, b.Value, iso(at)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// finalizeDeadCharacters mirrors pgStore.finalizeDeadCharacters.
+func (s *sqliteStore) finalizeDeadCharacters(ctx context.Context, steamID string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE characters
+		SET stats_finalized = 1, stats_finalized_at = ?, stats_revision = ?
+		WHERE steam_id = ? AND is_alive = 0 AND stats_finalized = 0
+	`, iso(at), currentStatsRevision, steamID)
+	return err
+}
+
+// finalizeStaleCharacters implements the eventStore interface -- see
+// pgStore.finalizeStaleCharacters's comment.
+func (s *sqliteStore) finalizeStaleCharacters(ctx context.Context, graceWindow time.Duration) (int64, error) {
+	cutoff := iso(time.Now().Add(-graceWindow))
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE characters
+		SET stats_finalized = 1, stats_finalized_at = ?, stats_revision = ?
+		WHERE is_alive = 0 AND stats_finalized = 0
+		  AND COALESCE(last_event_at, died_at) < ?
+	`, iso(time.Now()), currentStatsRevision, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// reconcileFinalizedCharacterStats implements the eventStore interface --
+// see pgStore.reconcileFinalizedCharacterStats's comment.
+func (s *sqliteStore) reconcileFinalizedCharacterStats(ctx context.Context) (checked int, repaired int, err error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM characters WHERE stats_finalized = 1`)
+	if err != nil {
+		return 0, 0, err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, err
+	}
+	rows.Close()
+
+	for _, id := range ids {
+		changed, rErr := s.reconcileCharacterStats(ctx, id)
+		if rErr != nil {
+			slog.Warn("reconcile character stats failed", "characterID", id, "err", rErr)
+			continue
+		}
+		checked++
+		if changed {
+			repaired++
+		}
+	}
+	return checked, repaired, nil
+}
+
+// reconcileCharacterStats mirrors pgStore.reconcileCharacterStats -- see
+// its comment for the full rationale.
+func (s *sqliteStore) reconcileCharacterStats(ctx context.Context, characterID int64) (changed bool, err error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT event_type, details FROM events WHERE character_id = ?`, characterID)
+	if err != nil {
+		return false, err
+	}
+	var total characterStatDelta
+	breakdown := map[[2]string]float64{}
+	for rows.Next() {
+		var eventType, details string
+		if err := rows.Scan(&eventType, &details); err != nil {
+			rows.Close()
+			return false, err
+		}
+		var fields map[string]any
+		if err := json.Unmarshal([]byte(details), &fields); err != nil {
+			continue
+		}
+		d := aggregateDeltaForEvent(eventType, fields)
+		total.ZombieKills += d.ZombieKills
+		total.Injuries += d.Injuries
+		total.DistanceWalkedKm += d.DistanceWalkedKm
+		total.DistanceDrivenKm += d.DistanceDrivenKm
+		total.Drinks += d.Drinks
+		total.AlcoholMl += d.AlcoholMl
+		total.PillsTaken += d.PillsTaken
+		total.BooksRead += d.BooksRead
+		total.IndoorHours += d.IndoorHours
+		total.OutdoorHours += d.OutdoorHours
+		for _, b := range d.Breakdown {
+			breakdown[[2]string{b.Category, b.ValueKey}] += b.Value
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, err
+	}
+	rows.Close()
+
+	var stored characterStatDelta
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT zombie_kills, injuries, distance_walked_km, distance_driven_km,
+		       drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours
+		FROM characters WHERE id = ?
+	`, characterID).Scan(&stored.ZombieKills, &stored.Injuries, &stored.DistanceWalkedKm, &stored.DistanceDrivenKm,
+		&stored.Drinks, &stored.AlcoholMl, &stored.PillsTaken, &stored.BooksRead, &stored.IndoorHours, &stored.OutdoorHours); err != nil {
+		return false, err
+	}
+
+	if statAggregatesEqual(stored, total) {
+		return false, nil
+	}
+
+	slog.Warn("character stats reconciliation found drift, repairing",
+		"characterID", characterID,
+		"storedKills", stored.ZombieKills, "recomputedKills", total.ZombieKills,
+		"storedInjuries", stored.Injuries, "recomputedInjuries", total.Injuries)
+
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE characters
+		SET zombie_kills = ?, injuries = ?, distance_walked_km = ?, distance_driven_km = ?,
+		    drinks = ?, alcohol_ml = ?, pills_taken = ?, books_read = ?,
+		    indoor_hours = ?, outdoor_hours = ?, stats_revision = ?
+		WHERE id = ?
+	`, total.ZombieKills, total.Injuries, total.DistanceWalkedKm, total.DistanceDrivenKm,
+		total.Drinks, total.AlcoholMl, total.PillsTaken, total.BooksRead, total.IndoorHours, total.OutdoorHours,
+		currentStatsRevision, characterID); err != nil {
+		return false, err
+	}
+	now := iso(time.Now())
+	for k, v := range breakdown {
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO character_stat_breakdown (character_id, category, value_key, value, updated_at)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT (character_id, category, value_key)
+			DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+		`, characterID, k[0], k[1], v, now); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
 }
 
 // handleSessionEvent persists a parsed connections.txt session_start/

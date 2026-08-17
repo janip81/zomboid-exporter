@@ -39,6 +39,52 @@ CREATE TABLE IF NOT EXISTS characters (
 CREATE INDEX IF NOT EXISTS idx_characters_steam_id_alive
     ON characters (steam_id) WHERE is_alive;
 
+-- Per-life aggregate stats, incrementally derived from raw ExporterLog
+-- events as they're ingested -- see character-aggregate-stats.md. Raw
+-- events remain the authoritative source; these columns exist so Curator/
+-- stat queries don't have to rescan the full events table every time.
+-- vehicle_collisions has no source event yet (no crash-detection tracker
+-- exists in the Lua mod) -- the column is reserved and always 0 until one
+-- is added.
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS zombie_kills BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS injuries BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS distance_walked_km DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS distance_driven_km DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS drinks BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS alcohol_ml DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS pills_taken BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS books_read BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS vehicle_collisions BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS indoor_hours DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS outdoor_hours DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS last_event_at TIMESTAMPTZ;
+-- stats_finalized=false is the live-aggregation lock (character-aggregate-
+-- stats.md: "Do not use is_alive=false itself as the aggregation lock:
+-- telemetry can arrive just after the death record" -- confirmed live by
+-- the phantom-character bug this design directly follows from). Normal
+-- incremental updates only ever touch rows where this is still false;
+-- only finalizeDeadCharacters/finalizeStaleCharacters set it true, and
+-- only reconciliation may still repair a row after that.
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS stats_finalized BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS stats_finalized_at TIMESTAMPTZ;
+-- Which aggregation ruleset produced the stored values -- lets a future
+-- rule change (e.g. a corrected delta/total interpretation) selectively
+-- rebuild old lives instead of silently mixing two incompatible rulesets.
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS stats_revision INTEGER NOT NULL DEFAULT 1;
+
+-- Dynamic per-item breakdown (favorite drink, most-used weapon, etc.) --
+-- deliberately NOT columns on characters, since the item vocabulary is
+-- open-ended (character-aggregate-stats.md: "Do not turn dynamic
+-- categories into columns").
+CREATE TABLE IF NOT EXISTS character_stat_breakdown (
+    character_id BIGINT NOT NULL REFERENCES characters(id),
+    category     TEXT NOT NULL,
+    value_key    TEXT NOT NULL,
+    value        DOUBLE PRECISION NOT NULL DEFAULT 0,
+    updated_at   TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (character_id, category, value_key)
+);
+
 CREATE TABLE IF NOT EXISTS skill_snapshots (
     id           BIGSERIAL PRIMARY KEY,
     character_id BIGINT NOT NULL REFERENCES characters(id),

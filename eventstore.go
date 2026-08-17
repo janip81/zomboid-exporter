@@ -1,6 +1,9 @@
 package main
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // eventStore persists parsed PerkLog events for later querying (player
 // history, leaderboards, a public stats site, etc.). It's entirely
@@ -69,6 +72,23 @@ type eventStore interface {
 	// old and current alike.
 	getFileOffset(ctx context.Context, path string) (int64, error)
 	setFileOffset(ctx context.Context, path string, offset int64) error
+
+	// finalizeStaleCharacters permanently locks live aggregation
+	// (stats_finalized=true) for every dead character that has gone
+	// characterStatGraceWindow past its last telemetry with no new
+	// created_player superseding it -- character-aggregate-stats.md's
+	// time-based finalization trigger, run periodically by
+	// runCharacterFinalizationPipeline. Returns how many rows were
+	// finalized.
+	finalizeStaleCharacters(ctx context.Context, graceWindow time.Duration) (int64, error)
+
+	// reconcileFinalizedCharacterStats recomputes every finalized
+	// character's aggregate columns from raw events and repairs any
+	// drift found -- character-aggregate-stats.md's nightly
+	// reconciliation safety net, run periodically by
+	// runCharacterReconciliationPipeline. Returns how many characters
+	// were checked and how many needed repair.
+	reconcileFinalizedCharacterStats(ctx context.Context) (checked int, repaired int, err error)
 
 	Close()
 }

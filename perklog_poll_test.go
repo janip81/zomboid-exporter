@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // fakeStore is an in-memory eventStore for testing the poll/offset logic
@@ -46,6 +47,14 @@ func (f *fakeStore) getFileOffset(ctx context.Context, path string) (int64, erro
 func (f *fakeStore) setFileOffset(ctx context.Context, path string, offset int64) error {
 	f.offsets[path] = offset
 	return nil
+}
+
+func (f *fakeStore) finalizeStaleCharacters(ctx context.Context, graceWindow time.Duration) (int64, error) {
+	return 0, nil
+}
+
+func (f *fakeStore) reconcileFinalizedCharacterStats(ctx context.Context) (int, int, error) {
+	return 0, 0, nil
 }
 
 // dispatch mirrors what main.go's runPerkLogPipeline does with each parsed

@@ -362,6 +362,13 @@ func (s *pgStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {
 		slog.Warn("upsertPlayer failed", "err", err)
 		return
 	}
+	// character-aggregate-stats.md's finalization trigger 1: a genuine
+	// new life is the strongest possible signal the previous dead one is
+	// over -- finalize it now rather than waiting out the grace-window
+	// sweep.
+	if err := s.finalizeDeadCharacters(ctx, ev.SteamID, ev.Timestamp); err != nil {
+		slog.Warn("finalize previous character failed", "err", err)
+	}
 	var nextNum int
 	if err := s.pool.QueryRow(ctx, `
 		SELECT COALESCE(MAX(character_number), 0) + 1 FROM characters WHERE steam_id = $1
@@ -371,10 +378,10 @@ func (s *pgStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {
 	}
 	var charID int64
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO characters (steam_id, character_number, created_at, is_alive, server)
-		VALUES ($1, $2, $3, TRUE, $4)
+		INSERT INTO characters (steam_id, character_number, created_at, is_alive, server, stats_revision)
+		VALUES ($1, $2, $3, TRUE, $4, $5)
 		RETURNING id
-	`, ev.SteamID, nextNum, ev.Timestamp, s.serverName).Scan(&charID)
+	`, ev.SteamID, nextNum, ev.Timestamp, s.serverName, currentStatsRevision).Scan(&charID)
 	if err != nil {
 		slog.Warn("insert character failed", "err", err)
 		return
@@ -624,7 +631,209 @@ func (s *pgStore) ingestExporterEvent(ctx context.Context, ev *exporterEvent, st
 		VALUES ($1, $2, $3, $4, $5::jsonb, $6)
 	`, ev.EventType, steamID, charID, ev.Timestamp, string(details), s.serverName); err != nil {
 		slog.Warn("insert exporter event failed", "type", ev.EventType, "err", err)
+		return
 	}
+	if err := s.applyCharacterStatDelta(ctx, charID, aggregateDeltaForEvent(ev.EventType, ev.Fields), ev.Timestamp); err != nil {
+		slog.Warn("apply character stat delta failed", "type", ev.EventType, "err", err)
+	}
+}
+
+// applyCharacterStatDelta adds d's contribution to charID's aggregate
+// columns and last_event_at, and records any breakdown entries -- but
+// only if the character isn't finalized yet (character-aggregate-
+// stats.md: "Normal live updates must include WHERE stats_finalized =
+// false"). A late event for an already-finalized character is silently
+// a no-op here; reconciliation is the only path allowed to still touch
+// it.
+func (s *pgStore) applyCharacterStatDelta(ctx context.Context, charID int64, d characterStatDelta, at time.Time) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE characters
+		SET zombie_kills = zombie_kills + $2,
+		    injuries = injuries + $3,
+		    distance_walked_km = distance_walked_km + $4,
+		    distance_driven_km = distance_driven_km + $5,
+		    drinks = drinks + $6,
+		    alcohol_ml = alcohol_ml + $7,
+		    pills_taken = pills_taken + $8,
+		    books_read = books_read + $9,
+		    indoor_hours = indoor_hours + $10,
+		    outdoor_hours = outdoor_hours + $11,
+		    last_event_at = GREATEST(last_event_at, $12)
+		WHERE id = $1 AND stats_finalized = false
+	`, charID, d.ZombieKills, d.Injuries, d.DistanceWalkedKm, d.DistanceDrivenKm,
+		d.Drinks, d.AlcoholMl, d.PillsTaken, d.BooksRead, d.IndoorHours, d.OutdoorHours, at)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 || len(d.Breakdown) == 0 {
+		return nil
+	}
+	for _, b := range d.Breakdown {
+		if _, err := s.pool.Exec(ctx, `
+			INSERT INTO character_stat_breakdown (character_id, category, value_key, value, updated_at)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (character_id, category, value_key)
+			DO UPDATE SET value = character_stat_breakdown.value + EXCLUDED.value, updated_at = EXCLUDED.updated_at
+		`, charID, b.Category, b.ValueKey, b.Value, at); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// finalizeDeadCharacters locks live aggregation for every dead,
+// not-yet-finalized character belonging to steamID -- see
+// handleCreatedPlayer's call site (finalization trigger 1).
+func (s *pgStore) finalizeDeadCharacters(ctx context.Context, steamID string, at time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE characters
+		SET stats_finalized = true, stats_finalized_at = $2, stats_revision = $3
+		WHERE steam_id = $1 AND is_alive = false AND stats_finalized = false
+	`, steamID, at, currentStatsRevision)
+	return err
+}
+
+// finalizeStaleCharacters implements the eventStore interface -- see its
+// comment. graceWindow's cutoff is measured from last_event_at, falling
+// back to died_at for a character that received no further telemetry at
+// all after death.
+func (s *pgStore) finalizeStaleCharacters(ctx context.Context, graceWindow time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-graceWindow)
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE characters
+		SET stats_finalized = true, stats_finalized_at = now(), stats_revision = $2
+		WHERE is_alive = false AND stats_finalized = false
+		  AND COALESCE(last_event_at, died_at) < $1
+	`, cutoff, currentStatsRevision)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// reconcileFinalizedCharacterStats implements the eventStore interface --
+// see its comment. Recomputes every finalized character's aggregates from
+// its own raw events (using the exact same aggregateDeltaForEvent rules
+// live ingestion uses) and repairs the stored row if it drifted.
+func (s *pgStore) reconcileFinalizedCharacterStats(ctx context.Context) (checked int, repaired int, err error) {
+	rows, err := s.pool.Query(ctx, `SELECT id FROM characters WHERE stats_finalized = true`)
+	if err != nil {
+		return 0, 0, err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, err
+	}
+	rows.Close()
+
+	for _, id := range ids {
+		changed, rErr := s.reconcileCharacterStats(ctx, id)
+		if rErr != nil {
+			slog.Warn("reconcile character stats failed", "characterID", id, "err", rErr)
+			continue
+		}
+		checked++
+		if changed {
+			repaired++
+		}
+	}
+	return checked, repaired, nil
+}
+
+// reconcileCharacterStats recomputes characterID's aggregate columns from
+// its raw events and, if the recomputed totals differ from what's
+// stored, repairs the row (and its breakdown rows) and logs the
+// correction -- character-aggregate-stats.md's AGG-4. stats_finalized is
+// intentionally left untouched: reconciliation repairs data, it does not
+// reopen a life to further live aggregation.
+func (s *pgStore) reconcileCharacterStats(ctx context.Context, characterID int64) (changed bool, err error) {
+	rows, err := s.pool.Query(ctx, `SELECT event_type, details FROM events WHERE character_id = $1`, characterID)
+	if err != nil {
+		return false, err
+	}
+	var total characterStatDelta
+	breakdown := map[[2]string]float64{}
+	for rows.Next() {
+		var eventType string
+		var detailsJSON []byte
+		if err := rows.Scan(&eventType, &detailsJSON); err != nil {
+			rows.Close()
+			return false, err
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(detailsJSON, &fields); err != nil {
+			continue // malformed/legacy details -- skip rather than fail the whole reconciliation
+		}
+		d := aggregateDeltaForEvent(eventType, fields)
+		total.ZombieKills += d.ZombieKills
+		total.Injuries += d.Injuries
+		total.DistanceWalkedKm += d.DistanceWalkedKm
+		total.DistanceDrivenKm += d.DistanceDrivenKm
+		total.Drinks += d.Drinks
+		total.AlcoholMl += d.AlcoholMl
+		total.PillsTaken += d.PillsTaken
+		total.BooksRead += d.BooksRead
+		total.IndoorHours += d.IndoorHours
+		total.OutdoorHours += d.OutdoorHours
+		for _, b := range d.Breakdown {
+			breakdown[[2]string{b.Category, b.ValueKey}] += b.Value
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, err
+	}
+	rows.Close()
+
+	var stored characterStatDelta
+	if err := s.pool.QueryRow(ctx, `
+		SELECT zombie_kills, injuries, distance_walked_km, distance_driven_km,
+		       drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours
+		FROM characters WHERE id = $1
+	`, characterID).Scan(&stored.ZombieKills, &stored.Injuries, &stored.DistanceWalkedKm, &stored.DistanceDrivenKm,
+		&stored.Drinks, &stored.AlcoholMl, &stored.PillsTaken, &stored.BooksRead, &stored.IndoorHours, &stored.OutdoorHours); err != nil {
+		return false, err
+	}
+
+	if statAggregatesEqual(stored, total) {
+		return false, nil
+	}
+
+	slog.Warn("character stats reconciliation found drift, repairing",
+		"characterID", characterID,
+		"storedKills", stored.ZombieKills, "recomputedKills", total.ZombieKills,
+		"storedInjuries", stored.Injuries, "recomputedInjuries", total.Injuries)
+
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE characters
+		SET zombie_kills = $2, injuries = $3, distance_walked_km = $4, distance_driven_km = $5,
+		    drinks = $6, alcohol_ml = $7, pills_taken = $8, books_read = $9,
+		    indoor_hours = $10, outdoor_hours = $11, stats_revision = $12
+		WHERE id = $1
+	`, characterID, total.ZombieKills, total.Injuries, total.DistanceWalkedKm, total.DistanceDrivenKm,
+		total.Drinks, total.AlcoholMl, total.PillsTaken, total.BooksRead, total.IndoorHours, total.OutdoorHours, currentStatsRevision); err != nil {
+		return false, err
+	}
+	now := time.Now()
+	for k, v := range breakdown {
+		if _, err := s.pool.Exec(ctx, `
+			INSERT INTO character_stat_breakdown (character_id, category, value_key, value, updated_at)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (character_id, category, value_key)
+			DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at
+		`, characterID, k[0], k[1], v, now); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
 }
 
 // handleSessionEvent persists a parsed connections.txt session_start/
