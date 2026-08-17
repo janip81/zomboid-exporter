@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // pure Go, CGO-free -- keeps the distroless/CGO_ENABLED=0 build intact
@@ -20,10 +21,16 @@ var schemaSQLite string
 // as pgStore, translated to SQLite's dialect (no JSONB, TIMESTAMPTZ, or
 // native BOOLEAN -- see schema_sqlite.sql for the details).
 type sqliteStore struct {
-	db                  *sql.DB
-	serverName          string
+	db         *sql.DB
+	serverName string
+
+	// mu protects everything below -- see pgStore's copy of this comment;
+	// the same three independently-ticking goroutines share this store.
+	mu                  sync.Mutex
 	activeCharBySteamID map[string]int64
 	steamIDByUsername   map[string]string
+	pendingByUsername   map[string][]pendingExporterEvent
+	pendingTotal        int
 }
 
 func newSQLiteStore(ctx context.Context, path, serverName string) (*sqliteStore, error) {
@@ -45,7 +52,13 @@ func newSQLiteStore(ctx context.Context, path, serverName string) (*sqliteStore,
 		db.Close()
 		return nil, err
 	}
-	s := &sqliteStore{db: db, serverName: serverName, activeCharBySteamID: make(map[string]int64), steamIDByUsername: make(map[string]string)}
+	s := &sqliteStore{
+		db:                  db,
+		serverName:          serverName,
+		activeCharBySteamID: make(map[string]int64),
+		steamIDByUsername:   make(map[string]string),
+		pendingByUsername:   make(map[string][]pendingExporterEvent),
+	}
 	if err := s.migrateServerColumn(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -63,6 +76,10 @@ func newSQLiteStore(ctx context.Context, path, serverName string) (*sqliteStore,
 		return nil, err
 	}
 	if err := s.loadActiveCharacters(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := s.preloadCanonicalSteamIDs(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -283,7 +300,36 @@ func (s *sqliteStore) loadActiveCharacters(ctx context.Context) error {
 		if err := rows.Scan(&steamID, &id); err != nil {
 			return err
 		}
+		s.mu.Lock()
 		s.activeCharBySteamID[steamID] = id
+		s.mu.Unlock()
+	}
+	return rows.Err()
+}
+
+// preloadCanonicalSteamIDs mirrors pgStore.preloadCanonicalSteamIDs -- see
+// its comment for the full rationale.
+func (s *sqliteStore) preloadCanonicalSteamIDs(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT last_username, MAX(steam_id)
+		FROM players
+		WHERE server = ?
+		GROUP BY last_username
+		HAVING COUNT(DISTINCT steam_id) = 1
+	`, s.serverName)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for rows.Next() {
+		var username, steamID string
+		if err := rows.Scan(&username, &steamID); err != nil {
+			return err
+		}
+		s.steamIDByUsername[username] = steamID
 	}
 	return rows.Err()
 }
@@ -302,17 +348,21 @@ func (s *sqliteStore) upsertPlayer(ctx context.Context, steamID, username string
 }
 
 func (s *sqliteStore) activeCharacter(ctx context.Context, steamID string, at time.Time) (int64, error) {
-	if id, ok := s.activeCharBySteamID[steamID]; ok {
+	s.mu.Lock()
+	id, ok := s.activeCharBySteamID[steamID]
+	s.mu.Unlock()
+	if ok {
 		return id, nil
 	}
 
-	var id int64
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id FROM characters WHERE steam_id = ? AND is_alive = 1
 		ORDER BY character_number DESC LIMIT 1
 	`, steamID).Scan(&id)
 	if err == nil {
+		s.mu.Lock()
 		s.activeCharBySteamID[steamID] = id
+		s.mu.Unlock()
 		return id, nil
 	}
 
@@ -333,7 +383,9 @@ func (s *sqliteStore) activeCharacter(ctx context.Context, steamID string, at ti
 	if err != nil {
 		return 0, err
 	}
+	s.mu.Lock()
 	s.activeCharBySteamID[steamID] = id
+	s.mu.Unlock()
 	return id, nil
 }
 
@@ -346,7 +398,7 @@ func detailsJSON(v map[string]any) string {
 }
 
 func (s *sqliteStore) handleLogin(ctx context.Context, ev *perkEvent) {
-	s.rememberSteamID(ev.Username, ev.SteamID)
+	s.rememberSteamID(ctx, ev.Username, ev.SteamID)
 	if err := s.upsertPlayer(ctx, ev.SteamID, ev.Username, ev.Timestamp); err != nil {
 		slog.Warn("upsertPlayer failed", "err", err)
 		return
@@ -367,7 +419,7 @@ func (s *sqliteStore) handleLogin(ctx context.Context, ev *perkEvent) {
 }
 
 func (s *sqliteStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {
-	s.rememberSteamID(ev.Username, ev.SteamID)
+	s.rememberSteamID(ctx, ev.Username, ev.SteamID)
 	if err := s.upsertPlayer(ctx, ev.SteamID, ev.Username, ev.Timestamp); err != nil {
 		slog.Warn("upsertPlayer failed", "err", err)
 		return
@@ -392,7 +444,9 @@ func (s *sqliteStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {
 		slog.Warn("LastInsertId failed", "err", err)
 		return
 	}
+	s.mu.Lock()
 	s.activeCharBySteamID[ev.SteamID] = charID
+	s.mu.Unlock()
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
 		VALUES ('created_player', ?, ?, ?, '{}', ?)
@@ -403,7 +457,7 @@ func (s *sqliteStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {
 }
 
 func (s *sqliteStore) handleDied(ctx context.Context, ev *perkEvent) {
-	s.rememberSteamID(ev.Username, ev.SteamID)
+	s.rememberSteamID(ctx, ev.Username, ev.SteamID)
 	charID, err := s.activeCharacter(ctx, ev.SteamID, ev.Timestamp)
 	if err != nil {
 		slog.Warn("activeCharacter failed", "err", err)
@@ -421,7 +475,9 @@ func (s *sqliteStore) handleDied(ctx context.Context, ev *perkEvent) {
 		slog.Warn("update character died failed", "err", err)
 		return
 	}
+	s.mu.Lock()
 	delete(s.activeCharBySteamID, ev.SteamID)
+	s.mu.Unlock()
 	details := detailsJSON(map[string]any{"hours_survived": ev.HoursSurvived, "x": ev.X, "y": ev.Y, "z": ev.Z})
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
@@ -433,7 +489,7 @@ func (s *sqliteStore) handleDied(ctx context.Context, ev *perkEvent) {
 }
 
 func (s *sqliteStore) handleLevelChanged(ctx context.Context, ev *perkEvent) {
-	s.rememberSteamID(ev.Username, ev.SteamID)
+	s.rememberSteamID(ctx, ev.Username, ev.SteamID)
 	charID, err := s.activeCharacter(ctx, ev.SteamID, ev.Timestamp)
 	if err != nil {
 		slog.Warn("activeCharacter failed", "err", err)
@@ -457,7 +513,7 @@ func (s *sqliteStore) handleLevelChanged(ctx context.Context, ev *perkEvent) {
 }
 
 func (s *sqliteStore) handleSkills(ctx context.Context, ev *perkEvent) {
-	s.rememberSteamID(ev.Username, ev.SteamID)
+	s.rememberSteamID(ctx, ev.Username, ev.SteamID)
 	charID, err := s.activeCharacter(ctx, ev.SteamID, ev.Timestamp)
 	if err != nil {
 		slog.Warn("activeCharacter failed", "err", err)
@@ -491,29 +547,79 @@ func (s *sqliteStore) handleSkills(ctx context.Context, ev *perkEvent) {
 
 // rememberSteamID/canonicalSteamID -- see pgStore's copy of this comment
 // for the full rationale (Lua-side SteamID64 precision loss).
-func (s *sqliteStore) rememberSteamID(username, steamID string) {
-	if username != "" && steamID != "" {
-		s.steamIDByUsername[username] = steamID
+// rememberSteamID/canonicalSteamID -- see pgStore's copy of this comment
+// for the full rationale (Lua-side SteamID64 precision loss, the hard
+// rule against ever trusting a Lua-derived value as a fallback, and the
+// pending-event queue this now flushes).
+func (s *sqliteStore) rememberSteamID(ctx context.Context, username, steamID string) {
+	if username == "" || steamID == "" {
+		return
+	}
+	s.mu.Lock()
+	s.steamIDByUsername[username] = steamID
+	pending := s.pendingByUsername[username]
+	delete(s.pendingByUsername, username)
+	s.pendingTotal -= len(pending)
+	s.mu.Unlock()
+
+	for _, p := range pending {
+		s.ingestExporterEvent(ctx, p.ev, steamID)
 	}
 }
 
-func (s *sqliteStore) canonicalSteamID(username, fallback string) string {
-	if id, ok := s.steamIDByUsername[username]; ok {
-		return id
+func (s *sqliteStore) canonicalSteamID(username string) (steamID string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, ok := s.steamIDByUsername[username]
+	return id, ok
+}
+
+// enqueuePendingExporterEvent mirrors pgStore.enqueuePendingExporterEvent
+// -- see its comment for the full rationale.
+func (s *sqliteStore) enqueuePendingExporterEvent(ev *exporterEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.evictExpiredPendingLocked()
+
+	if len(s.pendingByUsername[ev.Username]) >= pendingEventsPerUserMax || s.pendingTotal >= pendingEventsGlobalMax {
+		slog.Warn("dropping ExporterLog event: pending-canonical-SteamID queue full", "type", ev.EventType, "username", ev.Username)
+		return
 	}
-	return fallback
+	s.pendingByUsername[ev.Username] = append(s.pendingByUsername[ev.Username], pendingExporterEvent{ev: ev, queuedAt: time.Now()})
+	s.pendingTotal++
+}
+
+// evictExpiredPendingLocked mirrors pgStore.evictExpiredPendingLocked --
+// see its comment for the full rationale. Caller must hold s.mu.
+func (s *sqliteStore) evictExpiredPendingLocked() {
+	now := time.Now()
+	for username, pending := range s.pendingByUsername {
+		kept := pending[:0]
+		for _, p := range pending {
+			if now.Sub(p.queuedAt) > pendingEventTTL {
+				slog.Warn("dropping ExporterLog event: no canonical SteamID within TTL", "type", p.ev.EventType, "username", username, "ttl", pendingEventTTL)
+				s.pendingTotal--
+				continue
+			}
+			kept = append(kept, p)
+		}
+		if len(kept) == 0 {
+			delete(s.pendingByUsername, username)
+		} else {
+			s.pendingByUsername[username] = kept
+		}
+	}
 }
 
 // handleExporterEvent persists a parsed ExporterLog.txt line generically:
 // event_type is whatever the Lua mod's "type" field says, and the full
 // decoded payload is kept verbatim in details -- see exporterlog.go.
 func (s *sqliteStore) handleExporterEvent(ctx context.Context, ev *exporterEvent) {
-	details := detailsJSON(ev.Fields)
-
 	// Player-less system event (e.g. world_stats) -- see
 	// pgStore.handleExporterEvent's comment on the same check for the
 	// full rationale.
 	if ev.Username == "" && ev.SteamID == "" {
+		details := detailsJSON(ev.Fields)
 		if _, err := s.db.ExecContext(ctx, `
 			INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
 			VALUES (?, NULL, NULL, ?, ?, ?)
@@ -523,11 +629,21 @@ func (s *sqliteStore) handleExporterEvent(ctx context.Context, ev *exporterEvent
 		return
 	}
 
-	steamID := s.canonicalSteamID(ev.Username, ev.SteamID)
-	if steamID == "" {
-		slog.Warn("dropping ExporterLog event with no steamId", "type", ev.EventType, "username", ev.Username)
+	// steamid64-canonicalization-and-lua-precision.md's hard rule --
+	// see pgStore.handleExporterEvent's comment for the full rationale.
+	steamID, ok := s.canonicalSteamID(ev.Username)
+	if !ok {
+		s.enqueuePendingExporterEvent(ev)
 		return
 	}
+	s.ingestExporterEvent(ctx, ev, steamID)
+}
+
+// ingestExporterEvent mirrors pgStore.ingestExporterEvent -- see its
+// comment for the full rationale.
+func (s *sqliteStore) ingestExporterEvent(ctx context.Context, ev *exporterEvent, steamID string) {
+	details := detailsJSON(canonicalizeExporterFields(ev.Fields, steamID))
+
 	if err := s.upsertPlayer(ctx, steamID, ev.Username, ev.Timestamp); err != nil {
 		slog.Warn("upsertPlayer failed", "err", err)
 		return
@@ -550,7 +666,7 @@ func (s *sqliteStore) handleExporterEvent(ctx context.Context, ev *exporterEvent
 // session spans logins/deaths/new characters), so character_id is
 // always NULL here, unlike the character-linked handlers above.
 func (s *sqliteStore) handleSessionEvent(ctx context.Context, ev *sessionEvent) {
-	s.rememberSteamID(ev.Username, ev.SteamID)
+	s.rememberSteamID(ctx, ev.Username, ev.SteamID)
 	if err := s.upsertPlayer(ctx, ev.SteamID, ev.Username, ev.Timestamp); err != nil {
 		slog.Warn("upsertPlayer failed", "err", err)
 		return

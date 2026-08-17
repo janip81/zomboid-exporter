@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -64,6 +65,27 @@ func parseExporterLogLine(line string) *exporterEvent {
 		Username:  username,
 		Fields:    fields,
 	}
+}
+
+// canonicalizeExporterFields returns fields with "steamId" replaced by
+// canonicalSteamID, per steamid64-canonicalization-and-lua-precision.md's
+// "Canonicalize the event JSON too": a raw Lua-derived steamId stored
+// verbatim in events.details is easy to mistake for authoritative
+// identity later (dashboards, Curator, debugging). The original
+// Lua-derived value is kept under "_luaSteamId" only when it actually
+// differs, as a diagnostic breadcrumb -- never as identity. Returns
+// fields unchanged (no clone, no allocation) when there's nothing to
+// canonicalize, which is the common case once the steamIDByUsername
+// cache is warm.
+func canonicalizeExporterFields(fields map[string]any, canonicalSteamID string) map[string]any {
+	luaVal, ok := fields["steamId"].(string)
+	if !ok || luaVal == canonicalSteamID {
+		return fields
+	}
+	out := maps.Clone(fields)
+	out["steamId"] = canonicalSteamID
+	out["_luaSteamId"] = luaVal
+	return out
 }
 
 // listExporterLogs returns every ExporterLog.txt under dataPath, oldest

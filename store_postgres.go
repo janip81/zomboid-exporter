@@ -6,11 +6,34 @@ import (
 	"encoding/json"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// Pending-ExporterLog-event queue tuning -- see rememberSteamID/
+// canonicalSteamID's comment and steamid64-canonicalization-and-lua-
+// precision.md. pendingEventTTL is generous relative to the 3s poll
+// interval (perklog.go/connections.go/exporterlog.go) since a session's
+// native connections.txt/PerkLog.txt line for a brand-new player can lag
+// behind their first in-game action by a few polls.
+const (
+	pendingEventTTL         = 45 * time.Second
+	pendingEventsPerUserMax = 20
+	pendingEventsGlobalMax  = 500
+)
+
+// pendingExporterEvent is a player-scoped ExporterLog event held in memory
+// because no canonical (native-sourced) SteamID64 is known yet for its
+// username -- see steamid64-canonicalization-and-lua-precision.md's hard
+// rule that a Lua/Kahlua-derived SteamID64 must never create durable
+// player identity.
+type pendingExporterEvent struct {
+	ev       *exporterEvent
+	queuedAt time.Time
+}
 
 //go:embed schema_stats_postgres.sql
 var schemaStatsSQL string
@@ -30,10 +53,19 @@ var schemaTWRSQL string
 // (which carry no character identifier of their own) can be attributed to
 // the right character row without a query on every line.
 type pgStore struct {
-	pool                *pgxpool.Pool
-	serverName          string
+	pool       *pgxpool.Pool
+	serverName string
+
+	// mu protects everything below -- all three maps are read/written
+	// from three independently-ticking goroutines (runPerkLogPipeline,
+	// runExporterLogPipeline, runConnectionsPipeline in main.go all share
+	// this one *pgStore), which plain unsynchronized map access does not
+	// support safely.
+	mu                  sync.Mutex
 	activeCharBySteamID map[string]int64
 	steamIDByUsername   map[string]string
+	pendingByUsername   map[string][]pendingExporterEvent
+	pendingTotal        int
 }
 
 func newPgStore(ctx context.Context, dsn, serverName string, twrEnabled bool) (*pgStore, error) {
@@ -55,7 +87,13 @@ func newPgStore(ctx context.Context, dsn, serverName string, twrEnabled bool) (*
 			return nil, err
 		}
 	}
-	s := &pgStore{pool: pool, serverName: serverName, activeCharBySteamID: make(map[string]int64), steamIDByUsername: make(map[string]string)}
+	s := &pgStore{
+		pool:                pool,
+		serverName:          serverName,
+		activeCharBySteamID: make(map[string]int64),
+		steamIDByUsername:   make(map[string]string),
+		pendingByUsername:   make(map[string][]pendingExporterEvent),
+	}
 	if err := s.migrateServerColumn(ctx); err != nil {
 		pool.Close()
 		return nil, err
@@ -69,6 +107,10 @@ func newPgStore(ctx context.Context, dsn, serverName string, twrEnabled bool) (*
 		return nil, err
 	}
 	if err := s.loadActiveCharacters(ctx); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	if err := s.preloadCanonicalSteamIDs(ctx); err != nil {
 		pool.Close()
 		return nil, err
 	}
@@ -172,7 +214,44 @@ func (s *pgStore) loadActiveCharacters(ctx context.Context) error {
 		if err := rows.Scan(&steamID, &id); err != nil {
 			return err
 		}
+		s.mu.Lock()
 		s.activeCharBySteamID[steamID] = id
+		s.mu.Unlock()
+	}
+	return rows.Err()
+}
+
+// preloadCanonicalSteamIDs seeds steamIDByUsername from existing DB
+// history at startup, per steamid64-canonicalization-and-lua-
+// precision.md's "Preload canonical cache at startup" -- without this,
+// the exporter begins every restart with an empty identity cache even
+// for players it has known about for weeks, widening the cold-start
+// window where a Lua-derived SteamID64 would otherwise have to be
+// queued/dropped. Only genuinely unambiguous usernames are loaded
+// (COUNT(DISTINCT steam_id) = 1): an existing dirty duplicate (two
+// SteamIDs sharing a username) is NOT guessed at here -- that requires
+// an explicit reconciliation, not a preload heuristic.
+func (s *pgStore) preloadCanonicalSteamIDs(ctx context.Context) error {
+	rows, err := s.pool.Query(ctx, `
+		SELECT last_username, MAX(steam_id)
+		FROM players
+		WHERE server = $1
+		GROUP BY last_username
+		HAVING COUNT(DISTINCT steam_id) = 1
+	`, s.serverName)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for rows.Next() {
+		var username, steamID string
+		if err := rows.Scan(&username, &steamID); err != nil {
+			return err
+		}
+		s.steamIDByUsername[username] = steamID
 	}
 	return rows.Err()
 }
@@ -195,17 +274,21 @@ func (s *pgStore) upsertPlayer(ctx context.Context, steamID, username string, se
 // covers the case where the exporter starts mid-session, after a
 // character already existed in-game.
 func (s *pgStore) activeCharacter(ctx context.Context, steamID string, at time.Time) (int64, error) {
-	if id, ok := s.activeCharBySteamID[steamID]; ok {
+	s.mu.Lock()
+	id, ok := s.activeCharBySteamID[steamID]
+	s.mu.Unlock()
+	if ok {
 		return id, nil
 	}
 
-	var id int64
 	err := s.pool.QueryRow(ctx, `
 		SELECT id FROM characters WHERE steam_id = $1 AND is_alive
 		ORDER BY character_number DESC LIMIT 1
 	`, steamID).Scan(&id)
 	if err == nil {
+		s.mu.Lock()
 		s.activeCharBySteamID[steamID] = id
+		s.mu.Unlock()
 		return id, nil
 	}
 
@@ -224,12 +307,14 @@ func (s *pgStore) activeCharacter(ctx context.Context, steamID string, at time.T
 	`, steamID, nextNum, at, s.serverName).Scan(&id); err != nil {
 		return 0, err
 	}
+	s.mu.Lock()
 	s.activeCharBySteamID[steamID] = id
+	s.mu.Unlock()
 	return id, nil
 }
 
 func (s *pgStore) handleLogin(ctx context.Context, ev *perkEvent) {
-	s.rememberSteamID(ev.Username, ev.SteamID)
+	s.rememberSteamID(ctx, ev.Username, ev.SteamID)
 	if err := s.upsertPlayer(ctx, ev.SteamID, ev.Username, ev.Timestamp); err != nil {
 		slog.Warn("upsertPlayer failed", "err", err)
 		return
@@ -249,7 +334,7 @@ func (s *pgStore) handleLogin(ctx context.Context, ev *perkEvent) {
 }
 
 func (s *pgStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {
-	s.rememberSteamID(ev.Username, ev.SteamID)
+	s.rememberSteamID(ctx, ev.Username, ev.SteamID)
 	if err := s.upsertPlayer(ctx, ev.SteamID, ev.Username, ev.Timestamp); err != nil {
 		slog.Warn("upsertPlayer failed", "err", err)
 		return
@@ -271,7 +356,9 @@ func (s *pgStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {
 		slog.Warn("insert character failed", "err", err)
 		return
 	}
+	s.mu.Lock()
 	s.activeCharBySteamID[ev.SteamID] = charID
+	s.mu.Unlock()
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
 		VALUES ('created_player', $1, $2, $3, '{}'::jsonb, $4)
@@ -282,7 +369,7 @@ func (s *pgStore) handleCreatedPlayer(ctx context.Context, ev *perkEvent) {
 }
 
 func (s *pgStore) handleDied(ctx context.Context, ev *perkEvent) {
-	s.rememberSteamID(ev.Username, ev.SteamID)
+	s.rememberSteamID(ctx, ev.Username, ev.SteamID)
 	charID, err := s.activeCharacter(ctx, ev.SteamID, ev.Timestamp)
 	if err != nil {
 		slog.Warn("activeCharacter failed", "err", err)
@@ -300,7 +387,9 @@ func (s *pgStore) handleDied(ctx context.Context, ev *perkEvent) {
 		slog.Warn("update character died failed", "err", err)
 		return
 	}
+	s.mu.Lock()
 	delete(s.activeCharBySteamID, ev.SteamID)
+	s.mu.Unlock()
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
 		VALUES ('died', $1, $2, $3, jsonb_build_object('hours_survived', $4::float8, 'x', $5::int, 'y', $6::int, 'z', $7::int), $8)
@@ -311,7 +400,7 @@ func (s *pgStore) handleDied(ctx context.Context, ev *perkEvent) {
 }
 
 func (s *pgStore) handleLevelChanged(ctx context.Context, ev *perkEvent) {
-	s.rememberSteamID(ev.Username, ev.SteamID)
+	s.rememberSteamID(ctx, ev.Username, ev.SteamID)
 	charID, err := s.activeCharacter(ctx, ev.SteamID, ev.Timestamp)
 	if err != nil {
 		slog.Warn("activeCharacter failed", "err", err)
@@ -334,7 +423,7 @@ func (s *pgStore) handleLevelChanged(ctx context.Context, ev *perkEvent) {
 }
 
 func (s *pgStore) handleSkills(ctx context.Context, ev *perkEvent) {
-	s.rememberSteamID(ev.Username, ev.SteamID)
+	s.rememberSteamID(ctx, ev.Username, ev.SteamID)
 	charID, err := s.activeCharacter(ctx, ev.SteamID, ev.Timestamp)
 	if err != nil {
 		slog.Warn("activeCharacter failed", "err", err)
@@ -354,48 +443,111 @@ func (s *pgStore) handleSkills(ctx context.Context, ev *perkEvent) {
 }
 
 // rememberSteamID/canonicalSteamID: player:getSteamID() in Lua loses
-// precision for a real SteamID64 (Lua numbers are doubles, exact only
-// to 2^53 -- a SteamID64 is ~7.6e16), confirmed live to produce a
-// different wrong digit string depending on when it's called. PerkLog.
-// txt and connections.txt are both written natively by the Java engine
-// and never pass through that lossy conversion, so their steam_id is
-// always exact -- rememberSteamID is called from every handler sourced
-// from those two files to build a username -> correct-steam_id cache,
-// and handleExporterEvent (Lua-mod-sourced, unreliable steamId) prefers
-// that cache over trusting its own event's steamId.
-func (s *pgStore) rememberSteamID(username, steamID string) {
-	if username != "" && steamID != "" {
-		s.steamIDByUsername[username] = steamID
+// precision for a real SteamID64 (Lua numbers are doubles, exact only to
+// 2^53 -- a SteamID64 is ~7.6e16). PerkLog.txt and connections.txt are
+// both written natively by the Java engine and never pass through that
+// lossy conversion, so their steam_id is always exact -- rememberSteamID
+// is called from every handler sourced from those two files to build a
+// username -> correct-steam_id cache. Per
+// steamid64-canonicalization-and-lua-precision.md's hard rule, a
+// Lua/Kahlua-derived SteamID64 (handleExporterEvent's ev.SteamID) must
+// NEVER be trusted as a fallback when the cache doesn't have an answer
+// yet -- doing so previously let a corrupted value create a permanent,
+// wrong players row during the cold-start window before this cache
+// warms up. Instead, rememberSteamID flushes any ExporterLog events that
+// were queued for this username while waiting (see
+// enqueuePendingExporterEvent).
+func (s *pgStore) rememberSteamID(ctx context.Context, username, steamID string) {
+	if username == "" || steamID == "" {
+		return
+	}
+	s.mu.Lock()
+	s.steamIDByUsername[username] = steamID
+	pending := s.pendingByUsername[username]
+	delete(s.pendingByUsername, username)
+	s.pendingTotal -= len(pending)
+	s.mu.Unlock()
+
+	for _, p := range pending {
+		s.ingestExporterEvent(ctx, p.ev, steamID)
 	}
 }
 
-func (s *pgStore) canonicalSteamID(username, fallback string) string {
-	if id, ok := s.steamIDByUsername[username]; ok {
-		return id
+// canonicalSteamID returns the native-sourced SteamID64 for username, if
+// one is known yet. ok=false means "not yet known" -- callers must queue
+// or drop, never substitute a Lua-derived value (see rememberSteamID's
+// comment).
+func (s *pgStore) canonicalSteamID(username string) (steamID string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, ok := s.steamIDByUsername[username]
+	return id, ok
+}
+
+// enqueuePendingExporterEvent holds a player-scoped ExporterLog event in
+// memory until rememberSteamID learns this username's canonical SteamID
+// (or the TTL expires and it's dropped with a warning -- see
+// steamid64-canonicalization-and-lua-precision.md's "Required ingestion
+// behavior"). Bounded both per-username and globally so a flood of events
+// for usernames that never get a canonical mapping (e.g. a bot account,
+// or a genuinely broken PerkLog/connections pipeline) can't grow this
+// queue without limit.
+func (s *pgStore) enqueuePendingExporterEvent(ev *exporterEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.evictExpiredPendingLocked()
+
+	if len(s.pendingByUsername[ev.Username]) >= pendingEventsPerUserMax || s.pendingTotal >= pendingEventsGlobalMax {
+		slog.Warn("dropping ExporterLog event: pending-canonical-SteamID queue full", "type", ev.EventType, "username", ev.Username)
+		return
 	}
-	return fallback
+	s.pendingByUsername[ev.Username] = append(s.pendingByUsername[ev.Username], pendingExporterEvent{ev: ev, queuedAt: time.Now()})
+	s.pendingTotal++
+}
+
+// evictExpiredPendingLocked drops pending events older than
+// pendingEventTTL, loudly (steamid64-canonicalization-and-lua-
+// precision.md: "log expiration/drop loudly ... never fall back to Lua
+// SteamID when TTL expires"). Caller must hold s.mu.
+func (s *pgStore) evictExpiredPendingLocked() {
+	now := time.Now()
+	for username, pending := range s.pendingByUsername {
+		kept := pending[:0]
+		for _, p := range pending {
+			if now.Sub(p.queuedAt) > pendingEventTTL {
+				slog.Warn("dropping ExporterLog event: no canonical SteamID within TTL", "type", p.ev.EventType, "username", username, "ttl", pendingEventTTL)
+				s.pendingTotal--
+				continue
+			}
+			kept = append(kept, p)
+		}
+		if len(kept) == 0 {
+			delete(s.pendingByUsername, username)
+		} else {
+			s.pendingByUsername[username] = kept
+		}
+	}
 }
 
 // handleExporterEvent persists a parsed ExporterLog.txt line generically:
 // event_type is whatever the Lua mod's "type" field says, and the full
 // decoded payload is kept verbatim in details -- see exporterlog.go.
 func (s *pgStore) handleExporterEvent(ctx context.Context, ev *exporterEvent) {
-	details, err := json.Marshal(ev.Fields)
-	if err != nil {
-		slog.Warn("marshal ExporterLog details failed", "type", ev.EventType, "err", err)
-		return
-	}
-
 	// Player-less system event (e.g. world_stats -- the first event
 	// type this mod ever emits with no player attached at all).
 	// Confirmed by BOTH username and steamId being empty: every real
 	// player-scoped event always carries a username even on the rare
 	// occasion steamId resolution itself fails, so that failure case
-	// still falls through to the drop-with-warning path below,
-	// unchanged. No player to upsert or active-character lookup to do
-	// -- steam_id/character_id are just NULL (see
-	// migrateEventsSteamIDNullable for why that's a safe column type).
+	// still falls through to the queue-or-drop path below, unchanged.
+	// No player to upsert or active-character lookup to do -- steam_id/
+	// character_id are just NULL (see migrateEventsSteamIDNullable for
+	// why that's a safe column type).
 	if ev.Username == "" && ev.SteamID == "" {
+		details, err := json.Marshal(ev.Fields)
+		if err != nil {
+			slog.Warn("marshal ExporterLog details failed", "type", ev.EventType, "err", err)
+			return
+		}
 		if _, err := s.pool.Exec(ctx, `
 			INSERT INTO events (event_type, steam_id, character_id, occurred_at, details, server)
 			VALUES ($1, NULL, NULL, $2, $3::jsonb, $4)
@@ -405,11 +557,36 @@ func (s *pgStore) handleExporterEvent(ctx context.Context, ev *exporterEvent) {
 		return
 	}
 
-	steamID := s.canonicalSteamID(ev.Username, ev.SteamID)
-	if steamID == "" {
-		slog.Warn("dropping ExporterLog event with no steamId", "type", ev.EventType, "username", ev.Username)
+	// steamid64-canonicalization-and-lua-precision.md's hard rule:
+	// ev.SteamID (Lua/Kahlua-derived) is diagnostic-only and must never
+	// create or select durable player identity. Only a canonical,
+	// native-sourced mapping may be used -- if one isn't known yet, queue
+	// the event instead of trusting ev.SteamID as a fallback.
+	steamID, ok := s.canonicalSteamID(ev.Username)
+	if !ok {
+		s.enqueuePendingExporterEvent(ev)
 		return
 	}
+	s.ingestExporterEvent(ctx, ev, steamID)
+}
+
+// ingestExporterEvent does the actual player upsert + character
+// resolution + event insert for a Lua ExporterLog event, given an
+// already-canonical steamID -- called either directly from
+// handleExporterEvent (cache hit) or later from rememberSteamID's flush
+// of a previously-queued event (cache was just populated). Canonicalizes
+// the stored details JSON too (steamid64-canonicalization-and-lua-
+// precision.md's "Canonicalize the event JSON too"): the corrupted
+// Lua-derived value, if present and different, is preserved under
+// "_luaSteamId" for diagnostics rather than left under the normal
+// "steamId" key where it could be mistaken for authoritative identity.
+func (s *pgStore) ingestExporterEvent(ctx context.Context, ev *exporterEvent, steamID string) {
+	details, err := json.Marshal(canonicalizeExporterFields(ev.Fields, steamID))
+	if err != nil {
+		slog.Warn("marshal ExporterLog details failed", "type", ev.EventType, "err", err)
+		return
+	}
+
 	if err := s.upsertPlayer(ctx, steamID, ev.Username, ev.Timestamp); err != nil {
 		slog.Warn("upsertPlayer failed", "err", err)
 		return
@@ -432,7 +609,7 @@ func (s *pgStore) handleExporterEvent(ctx context.Context, ev *exporterEvent) {
 // session spans logins/deaths/new characters), so character_id is
 // always NULL here, unlike the character-linked handlers above.
 func (s *pgStore) handleSessionEvent(ctx context.Context, ev *sessionEvent) {
-	s.rememberSteamID(ev.Username, ev.SteamID)
+	s.rememberSteamID(ctx, ev.Username, ev.SteamID)
 	if err := s.upsertPlayer(ctx, ev.SteamID, ev.Username, ev.Timestamp); err != nil {
 		slog.Warn("upsertPlayer failed", "err", err)
 		return
