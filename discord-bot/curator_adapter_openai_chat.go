@@ -91,6 +91,16 @@ func (c *openAIChatClient) Reply(ctx context.Context, req CuratorRequest) (strin
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests:
 		return "", newRateLimitedError(fmt.Errorf("rate limited (status %d)", resp.StatusCode))
+	case resp.StatusCode == http.StatusPaymentRequired:
+		// curator-cerebras-free-tier-diagnostic.md's live finding: Cerebras
+		// returns 402 for a key/project with no usable free inference
+		// entitlement, distinct from rate limiting -- it will never
+		// resolve itself after a short cooldown, so it must not be
+		// classified as errKindTransient (which retries every ~30s
+		// forever). Never logs response body: it could echo request
+		// content back, and the classification alone is all the pool
+		// needs.
+		return "", newBillingRequiredError(fmt.Errorf("billing/entitlement required (status %d)", resp.StatusCode))
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return "", newAuthError(fmt.Errorf("auth rejected (status %d)", resp.StatusCode))
 	case resp.StatusCode >= 500:

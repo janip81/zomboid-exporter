@@ -52,6 +52,17 @@ const (
 	errKindTransient providerErrorKind = iota
 	errKindRateLimited
 	errKindAuth
+	// errKindBillingRequired is a distinct kind from errKindTransient --
+	// curator-cerebras-free-tier-diagnostic.md's live finding: a 402 from
+	// Cerebras is an explicit "this key/project has no usable free
+	// inference entitlement" response, not a transient blip. Treating it
+	// as transient (30s cooldown, retried forever) would silently keep
+	// hammering a provider that will never succeed until Jani fixes the
+	// account's billing/entitlement state out of band -- see
+	// isProviderPaidEligible's doc comment: a free-tier row must NEVER
+	// auto-escalate to paid usage, so a 402 must fail that provider and
+	// move on, never retry with implied payment.
+	errKindBillingRequired
 )
 
 type providerError struct {
@@ -65,6 +76,9 @@ func (e *providerError) Unwrap() error { return e.err }
 func newTransientError(err error) error   { return &providerError{kind: errKindTransient, err: err} }
 func newRateLimitedError(err error) error { return &providerError{kind: errKindRateLimited, err: err} }
 func newAuthError(err error) error        { return &providerError{kind: errKindAuth, err: err} }
+func newBillingRequiredError(err error) error {
+	return &providerError{kind: errKindBillingRequired, err: err}
+}
 
 // ErrLLMUnavailable is returned when no provider could answer (disabled,
 // empty pool, or every configured provider currently unhealthy/rate
@@ -197,12 +211,13 @@ type resolvedProvider struct {
 // persisted to discordbot_llm_providers (that table is configuration,
 // this is runtime fact). Keyed by provider name.
 type providerHealth struct {
-	fingerprint      string
-	rateLimitedUntil time.Time
-	unhealthyUntil   time.Time
-	misconfigured    bool
-	lastError        string
-	lastSuccess      time.Time
+	fingerprint             string
+	rateLimitedUntil        time.Time
+	unhealthyUntil          time.Time
+	billingUnavailableUntil time.Time
+	misconfigured           bool
+	lastError               string
+	lastSuccess             time.Time
 }
 
 // availableAt must only ever be called while p.healthMu is held (see
@@ -217,12 +232,13 @@ func (h *providerHealth) availableAt(now time.Time) bool {
 	if h.misconfigured {
 		return false
 	}
-	return now.After(h.rateLimitedUntil) && now.After(h.unhealthyUntil)
+	return now.After(h.rateLimitedUntil) && now.After(h.unhealthyUntil) && now.After(h.billingUnavailableUntil)
 }
 
 const (
-	rateLimitCooldown = 5 * time.Minute
-	unhealthyCooldown = 30 * time.Second
+	rateLimitCooldown       = 5 * time.Minute
+	unhealthyCooldown       = 30 * time.Second
+	billingRequiredCooldown = 1 * time.Hour
 )
 
 // curatorProviderPool is the curatorLLMPool implementation. Safe for
@@ -451,6 +467,7 @@ func (p *curatorProviderPool) recordSuccess(name string) {
 	h.lastSuccess = time.Now()
 	h.rateLimitedUntil = time.Time{}
 	h.unhealthyUntil = time.Time{}
+	h.billingUnavailableUntil = time.Time{}
 	h.lastError = ""
 }
 
@@ -469,7 +486,21 @@ func (p *curatorProviderPool) recordFailure(name string, err error) {
 	switch {
 	case errors.As(err, &pe) && pe.kind == errKindRateLimited:
 		h.rateLimitedUntil = now.Add(rateLimitCooldown)
+	case errors.As(err, &pe) && pe.kind == errKindBillingRequired:
+		// curator-cerebras-free-tier-diagnostic.md: a billing/entitlement
+		// failure (402) is not a quick blip -- retrying it every 30s like
+		// a generic transient error would hammer a provider that won't
+		// recover on its own. But unlike an auth failure (a wrong/revoked
+		// key, which needs a config change to ever be right again), an
+		// entitlement/quota state CAN change on its own over time -- so
+		// this gets a long bounded cooldown, not permanent
+		// misconfiguration.
+		h.billingUnavailableUntil = now.Add(billingRequiredCooldown)
 	case errors.As(err, &pe) && pe.kind == errKindAuth:
+		// Persistent, not time-bound: a wrong/revoked credential won't
+		// become right again on any timer -- only a config change
+		// (caught by resetHealthIfFingerprintChanged) or a process
+		// restart clears it.
 		h.misconfigured = true
 	default:
 		h.unhealthyUntil = now.Add(unhealthyCooldown)

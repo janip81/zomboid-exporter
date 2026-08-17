@@ -251,6 +251,74 @@ func TestPool_RateLimitedProviderSkippedUntilCooldownExpires(t *testing.T) {
 	}
 }
 
+// curator-cerebras-free-tier-diagnostic.md's pool test: a billing/
+// entitlement failure (HTTP 402) must be treated as a LONG bounded
+// cooldown (billingRequiredCooldown, currently 1h) -- not a 30s transient
+// retry (too aggressive, hammers a provider that won't recover that
+// fast) and not permanent like an auth failure (an entitlement/quota
+// state can change on its own, unlike a wrong credential). Provider 10
+// fails with 402; provider 20 should be used every time within the
+// cooldown window, with no retry gap where 10 gets tried again.
+func TestPool_BillingRequiredProviderGetsLongCooldown(t *testing.T) {
+	cerebras := &fakeCuratorLLM{err: newBillingRequiredError(errors.New("402"))}
+	gemini := &fakeCuratorLLM{reply: "gemini answered"}
+	pool := newCuratorProviderPool(nil, true, false)
+	pool.providers = []resolvedProvider{
+		{name: "cerebras", priority: 10, client: cerebras},
+		{name: "gemini", priority: 20, client: gemini},
+	}
+
+	reply, provider, err := pool.Reply(context.Background(), CuratorRequest{Message: "hi"})
+	if err != nil {
+		t.Fatalf("request #1: unexpected error: %v", err)
+	}
+	if provider != "gemini" || reply != "gemini answered" {
+		t.Fatalf("request #1: got provider=%q reply=%q, want gemini", provider, reply)
+	}
+	if cerebras.callCount() != 1 {
+		t.Fatalf("cerebras should have been attempted exactly once, got %d calls", cerebras.callCount())
+	}
+
+	if pool.isAvailable("cerebras", time.Now()) {
+		t.Error("provider should be unavailable immediately after a 402")
+	}
+	if pool.isAvailable("cerebras", time.Now().Add(30*time.Second)) {
+		t.Error("a 402 must not be treated as a 30s transient cooldown -- too aggressive a retry for a billing failure")
+	}
+	if pool.isAvailable("cerebras", time.Now().Add(billingRequiredCooldown-time.Second)) {
+		t.Error("provider should still be unavailable just before the billing cooldown elapses")
+	}
+	if !pool.isAvailable("cerebras", time.Now().Add(billingRequiredCooldown+time.Second)) {
+		t.Error("provider should become available again after the billing cooldown elapses -- unlike an auth failure, this must not be permanent")
+	}
+
+	reply, provider, err = pool.Reply(context.Background(), CuratorRequest{Message: "hi again"})
+	if err != nil {
+		t.Fatalf("request #2: unexpected error: %v", err)
+	}
+	if provider != "gemini" || reply != "gemini answered" {
+		t.Fatalf("request #2: got provider=%q reply=%q, want gemini", provider, reply)
+	}
+	if cerebras.callCount() != 1 {
+		t.Errorf("cerebras should still show only 1 call (skipped within the cooldown, not retried) on request #2, got %d", cerebras.callCount())
+	}
+}
+
+// Safety test: a 402 must never cause the pool to reach for a paid
+// provider or otherwise change configuration -- it just fails that
+// provider and falls through to ErrLLMUnavailable if nothing else is
+// configured, exactly like any other unavailable provider.
+func TestPool_BillingRequiredNeverTriggersPaidFallback(t *testing.T) {
+	cerebras := &fakeCuratorLLM{err: newBillingRequiredError(errors.New("402"))}
+	pool := newCuratorProviderPool(nil, true, false) // allowPaidGlobal=false
+	pool.providers = []resolvedProvider{{name: "cerebras", priority: 10, client: cerebras}}
+
+	_, _, err := pool.Reply(context.Background(), CuratorRequest{Message: "hi"})
+	if !errors.Is(err, ErrLLMUnavailable) {
+		t.Fatalf("got err=%v, want ErrLLMUnavailable -- a 402 must fall back to deterministic/canned replies, never silently enable paid usage", err)
+	}
+}
+
 // --- CGPT-051-D: concurrent health access under -race ---------------------
 
 func TestPool_ConcurrentHealthAccess(t *testing.T) {
