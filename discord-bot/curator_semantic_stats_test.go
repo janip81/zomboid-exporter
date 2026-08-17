@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 // --- curator-llm-semantic-stat-resolution.md acceptance tests -------------
@@ -137,6 +138,30 @@ func TestAskCurator_GenericStatLikeMessageAttemptsResolver(t *testing.T) {
 	}
 	if !pool.sawResolverCall {
 		t.Error("expected the semantic resolver to be called for a GENERIC stat-like message")
+	}
+}
+
+// Regression for the live-test finding: the resolver call and the
+// personality call must share ONE rate-limit consumption per
+// interaction, not one each -- otherwise the resolver's own successful
+// allow() immediately re-arms the cooldown and denies the personality
+// call moments later, so a resolved leaderboard fact could never
+// actually get Curator's voice. Uses a REAL curatorLLMLimiter (not a
+// no-op) so the fix is verified against the actual cooldown logic, not
+// just a mock that always says yes.
+func TestAskCurator_ResolverAndPersonalityShareOneRateLimitCheck(t *testing.T) {
+	pool := &recordingPool{}
+	limiter := newCuratorLLMLimiter(time.Hour, time.Hour) // generous cooldowns -- one interaction must not exhaust it twice
+	deps := botDeps{llmPool: pool, llmLimiter: limiter}
+
+	if _, ok := askCurator(context.Background(), deps, "user-1", nil, "who is the drunk on the server?"); !ok {
+		t.Fatal("expected a reply")
+	}
+	if !pool.sawResolverCall {
+		t.Fatal("expected the resolver call to run")
+	}
+	if !pool.sawPersonalityCall {
+		t.Error("expected the personality call to ALSO run in the same interaction -- if this fails, the resolver's own allow() is denying the personality call again (the bug this test guards against)")
 	}
 }
 

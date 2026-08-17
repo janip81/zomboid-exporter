@@ -100,46 +100,48 @@ func askCurator(ctx context.Context, deps botDeps, discordUserID string, candida
 		statFact = resolveCuratorStatFact(ctx, deps.db, discordUserID, candidateNames, metric, scope)
 	}
 
+	// CGPT-051-A: the shared rate limiter gates LLM usage for this WHOLE
+	// interaction -- checked (and consumed) exactly ONCE here, not once
+	// per provider call. Live-test finding: the semantic resolver call
+	// below and the personality call further down used to each check the
+	// limiter separately, which meant the resolver's own successful
+	// allow() immediately re-armed the cooldown clock and denied the
+	// personality call moments later (so a resolved leaderboard fact
+	// could never actually get Curator's voice, only the raw fallback
+	// sentence), and a single fuzzy question burned the user's entire
+	// cooldown window before their next message even had a chance. One
+	// user-visible question is one budget unit, regardless of how many
+	// provider calls answering it happens to take.
+	llmAllowed := deps.llmPool != nil && (deps.llmLimiter == nil || deps.llmLimiter.allow(discordUserID))
+
 	// curator-llm-semantic-stat-resolution.md: for a GENERIC message that
 	// looks plausibly stat/leaderboard-oriented ("who is the drunk on the
 	// server?"), spend a SEPARATE, small LLM call to interpret intent
 	// into a strict validated query plan before falling back to ordinary
 	// conversation -- never called for messages the deterministic
-	// classifier already confidently resolved (SEM-1), and gated on its
-	// own rate-limiter slot since it's a genuinely separate provider call
-	// from the personality reply below.
-	if intent == intentGenericCurator && !statFact.Resolved && deps.llmPool != nil && looksCuratorStatLike(message) {
-		if deps.llmLimiter == nil || deps.llmLimiter.allow(discordUserID) {
-			statFact = resolveCuratorSemanticStatFact(ctx, deps, message)
-		}
+	// classifier already confidently resolved (SEM-1).
+	if llmAllowed && intent == intentGenericCurator && !statFact.Resolved && looksCuratorStatLike(message) {
+		statFact = resolveCuratorSemanticStatFact(ctx, deps, message)
 	}
 
-	if deps.llmPool != nil {
-		// CGPT-051-A: the shared rate limiter gates the LLM call itself --
-		// the single choke point shared by BOTH /curator and natural chat.
-		// A denial here falls through to the intent fallback pool below
-		// rather than failing the whole interaction (conversation-routing's
-		// "Rate-limit implication": a rate-limited user still gets a
-		// deterministic Curator answer, just without consuming an API call).
-		if deps.llmLimiter == nil || deps.llmLimiter.allow(discordUserID) {
-			contextText := buildCuratorContext(ctx, deps, discordUserID, candidateNames)
-			if statFact.Resolved {
-				contextText = statFact.KnownFact + "\n" + contextText
-			}
-			tier := selectCuratorResponseTier()
-			llmReply, provider, err := deps.llmPool.Reply(ctx, CuratorRequest{
-				Persona:         assembleCuratorPersona(tier, curatorIntentGuidance(intent)),
-				Context:         contextText,
-				Message:         message,
-				MaxOutputTokens: curatorMaxOutputTokens,
-			})
-			if err == nil {
-				slog.Info("curator: LLM reply generated", "provider", provider, "tier", tier, "intent", intent)
-				return llmReply, true
-			}
-			if err != ErrLLMUnavailable {
-				slog.Error("curator: LLM pool returned unexpected error", "err", err)
-			}
+	if llmAllowed {
+		contextText := buildCuratorContext(ctx, deps, discordUserID, candidateNames)
+		if statFact.Resolved {
+			contextText = statFact.KnownFact + "\n" + contextText
+		}
+		tier := selectCuratorResponseTier()
+		llmReply, provider, err := deps.llmPool.Reply(ctx, CuratorRequest{
+			Persona:         assembleCuratorPersona(tier, curatorIntentGuidance(intent)),
+			Context:         contextText,
+			Message:         message,
+			MaxOutputTokens: curatorMaxOutputTokens,
+		})
+		if err == nil {
+			slog.Info("curator: LLM reply generated", "provider", provider, "tier", tier, "intent", intent)
+			return llmReply, true
+		}
+		if err != ErrLLMUnavailable {
+			slog.Error("curator: LLM pool returned unexpected error", "err", err)
 		}
 	}
 
