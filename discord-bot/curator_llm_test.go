@@ -33,7 +33,7 @@ func TestResolveProvider_UnknownCredentialSlotRejected(t *testing.T) {
 // accepts an env-var NAME from the DB row at all -- this test documents
 // that by construction rather than by probing os.Getenv() directly.
 func TestCredentialSlots_OnlyFixedAllowlistEntries(t *testing.T) {
-	want := map[string]bool{"groq": true, "openrouter": true, "openai": true, "local": true}
+	want := map[string]bool{"groq": true, "cerebras": true, "gemini": true, "openrouter": true, "openai": true, "local": true}
 	if len(credentialSlots) != len(want) {
 		t.Fatalf("credentialSlots has %d entries, expected exactly %d -- if you added a slot, update this test too", len(credentialSlots), len(want))
 	}
@@ -102,6 +102,8 @@ func TestIsProviderPaidEligible(t *testing.T) {
 	}{
 		{"local always free", "local", "anything", false, false, true},
 		{"groq treated as free tier", "groq", "llama-3.1", false, false, true},
+		{"cerebras treated as free tier", "cerebras", "llama-3.3-70b", false, false, true},
+		{"gemini treated as free tier", "gemini", "gemini-2.0-flash", false, false, true},
 		{"openrouter free-suffix model allowed", "openrouter", "meta-llama/llama-3.1-8b-instruct:free", false, false, true},
 		{"openrouter official free router allowed (CGPT-052-A)", "openrouter", "openrouter/free", false, false, true},
 		{"openrouter non-free model rejected without paid gate", "openrouter", "gpt-4", false, false, false},

@@ -88,6 +88,8 @@ type knownCredential struct {
 
 var credentialSlots = map[string]knownCredential{
 	"groq":       {envVar: "GROQ_API_KEY", baseURL: "https://api.groq.com/openai/v1"},
+	"cerebras":   {envVar: "CEREBRAS_API_KEY", baseURL: "https://api.cerebras.ai/v1"},
+	"gemini":     {envVar: "GEMINI_API_KEY", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai"},
 	"openrouter": {envVar: "OPENROUTER_API_KEY", baseURL: "https://openrouter.ai/api/v1"},
 	"openai":     {envVar: "OPENAI_API_KEY", baseURL: "https://api.openai.com/v1"},
 	"local":      {envVar: "", baseURL: ""},
@@ -126,6 +128,17 @@ var knownAdapters = map[string]bool{
 //     tier outside this bot, disable the groq provider row (or
 //     deliberately enable paid use via the two-gate policy) -- the bot
 //     has no signal to detect an account-tier change on its own.
+//   - cerebras: same account-state assumption as groq -- Jani confirmed
+//     the configured CEREBRAS_API_KEY is on Cerebras's free tier with no
+//     billing attached, treated as free regardless of the row's own
+//     allow_paid value. Same caveat as groq: disable the row (or opt in
+//     via the two-gate policy) if that key's account is ever upgraded.
+//   - gemini: same account-state assumption -- Jani confirmed the
+//     configured GEMINI_API_KEY is a Google AI Studio key with no GCP
+//     billing account attached ("Free tier" shown on the key itself),
+//     treated as free regardless of the row's own allow_paid value. Same
+//     caveat: this stops being true the moment that key (or a
+//     replacement) is linked to a billing-enabled project.
 //   - openrouter: its own documented free-tier conventions are trusted
 //     as free -- either the official free-model router (model ==
 //     "openrouter/free", which auto-selects any currently available
@@ -150,6 +163,10 @@ func isProviderPaidEligible(credentialSlot, model string, rowAllowPaid, globalAl
 	case "local":
 		return true, ""
 	case "groq":
+		return true, ""
+	case "cerebras":
+		return true, ""
+	case "gemini":
 		return true, ""
 	case "openrouter":
 		if model == "openrouter/free" || strings.HasSuffix(model, ":free") {
