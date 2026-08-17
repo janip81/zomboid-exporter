@@ -213,10 +213,20 @@ type curatorPlayerStats struct {
 	FirstSeen        time.Time
 	LastSeen         time.Time
 	ZombieKills      int
+	Injuries         int
 	Deaths           int
 	IsCurrentlyAlive bool
 }
 
+// fetchCuratorPlayerStats reads lifetime totals from characters'
+// per-life aggregate columns (character-aggregate-stats.md, exporter
+// side) rather than scanning the full events table on every Curator
+// request -- a player may have only a handful of character rows, so
+// summing them is effectively free by comparison. ZombieKills/Injuries
+// are exact COUNT(*)-of-events semantics (see the exporter's
+// aggregateDeltaForEvent), not the Lua-side running total, so they
+// remain correct across a corrupted/imprecise Lua steamId or a player
+// with many lives.
 func fetchCuratorPlayerStats(ctx context.Context, db *pgxpool.Pool, steamID string) (curatorPlayerStats, error) {
 	var stats curatorPlayerStats
 	err := db.QueryRow(ctx, "SELECT last_username, first_seen, last_seen FROM players WHERE steam_id = $1", steamID).
@@ -228,13 +238,10 @@ func fetchCuratorPlayerStats(ctx context.Context, db *pgxpool.Pool, steamID stri
 		return curatorPlayerStats{}, err
 	}
 
-	// Running zombieKills total is the event's OWN field (kindField
-	// pattern, see milestones.go) -- take the max ever reported, not a
-	// sum, since each kill event already carries a running total.
 	err = db.QueryRow(ctx, `
-		SELECT COALESCE(MAX((details->>'zombieKills')::int), 0)
-		FROM events WHERE steam_id = $1 AND event_type = 'kill'
-	`, steamID).Scan(&stats.ZombieKills)
+		SELECT COALESCE(SUM(zombie_kills), 0), COALESCE(SUM(injuries), 0)
+		FROM characters WHERE steam_id = $1
+	`, steamID).Scan(&stats.ZombieKills, &stats.Injuries)
 	if err != nil {
 		return curatorPlayerStats{}, err
 	}
@@ -268,6 +275,7 @@ func renderCuratorContext(identity resolvedIdentity, stats curatorPlayerStats) s
 		fmt.Fprintf(&b, "First observed: %s. Last observed: %s.\n", stats.FirstSeen.Format("2006-01-02"), stats.LastSeen.Format("2006-01-02"))
 	}
 	fmt.Fprintf(&b, "Zombies eliminated: %d.\n", stats.ZombieKills)
+	fmt.Fprintf(&b, "Injuries sustained: %d.\n", stats.Injuries)
 	fmt.Fprintf(&b, "Deaths recorded: %d.\n", stats.Deaths)
 	if stats.IsCurrentlyAlive {
 		b.WriteString("Currently alive.\n")
