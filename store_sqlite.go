@@ -215,6 +215,7 @@ func (s *sqliteStore) migrateCharacterStatsColumns(ctx context.Context) error {
 		{"distance_walked_km", `ALTER TABLE characters ADD COLUMN distance_walked_km REAL NOT NULL DEFAULT 0`},
 		{"distance_driven_km", `ALTER TABLE characters ADD COLUMN distance_driven_km REAL NOT NULL DEFAULT 0`},
 		{"drinks", `ALTER TABLE characters ADD COLUMN drinks INTEGER NOT NULL DEFAULT 0`},
+		{"alcoholic_drinks", `ALTER TABLE characters ADD COLUMN alcoholic_drinks INTEGER NOT NULL DEFAULT 0`},
 		{"alcohol_ml", `ALTER TABLE characters ADD COLUMN alcohol_ml REAL NOT NULL DEFAULT 0`},
 		{"pills_taken", `ALTER TABLE characters ADD COLUMN pills_taken INTEGER NOT NULL DEFAULT 0`},
 		{"books_read", `ALTER TABLE characters ADD COLUMN books_read INTEGER NOT NULL DEFAULT 0`},
@@ -742,6 +743,7 @@ func (s *sqliteStore) applyCharacterStatDelta(ctx context.Context, charID int64,
 		    distance_walked_km = distance_walked_km + ?,
 		    distance_driven_km = distance_driven_km + ?,
 		    drinks = drinks + ?,
+		    alcoholic_drinks = alcoholic_drinks + ?,
 		    alcohol_ml = alcohol_ml + ?,
 		    pills_taken = pills_taken + ?,
 		    books_read = books_read + ?,
@@ -750,7 +752,7 @@ func (s *sqliteStore) applyCharacterStatDelta(ctx context.Context, charID int64,
 		    last_event_at = CASE WHEN last_event_at IS NULL OR ? > last_event_at THEN ? ELSE last_event_at END
 		WHERE id = ? AND stats_finalized = 0
 	`, d.ZombieKills, d.Injuries, d.DistanceWalkedKm, d.DistanceDrivenKm,
-		d.Drinks, d.AlcoholMl, d.PillsTaken, d.BooksRead, d.IndoorHours, d.OutdoorHours,
+		d.Drinks, d.AlcoholicDrinks, d.AlcoholMl, d.PillsTaken, d.BooksRead, d.IndoorHours, d.OutdoorHours,
 		iso(at), iso(at), charID)
 	if err != nil {
 		return err
@@ -865,6 +867,7 @@ func (s *sqliteStore) reconcileCharacterStats(ctx context.Context, characterID i
 		total.DistanceWalkedKm += d.DistanceWalkedKm
 		total.DistanceDrivenKm += d.DistanceDrivenKm
 		total.Drinks += d.Drinks
+		total.AlcoholicDrinks += d.AlcoholicDrinks
 		total.AlcoholMl += d.AlcoholMl
 		total.PillsTaken += d.PillsTaken
 		total.BooksRead += d.BooksRead
@@ -884,10 +887,10 @@ func (s *sqliteStore) reconcileCharacterStats(ctx context.Context, characterID i
 	var storedLastEventAt *string
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT zombie_kills, injuries, distance_walked_km, distance_driven_km,
-		       drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours, last_event_at
+		       drinks, alcoholic_drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours, last_event_at
 		FROM characters WHERE id = ?
 	`, characterID).Scan(&stored.ZombieKills, &stored.Injuries, &stored.DistanceWalkedKm, &stored.DistanceDrivenKm,
-		&stored.Drinks, &stored.AlcoholMl, &stored.PillsTaken, &stored.BooksRead, &stored.IndoorHours, &stored.OutdoorHours, &storedLastEventAt); err != nil {
+		&stored.Drinks, &stored.AlcoholicDrinks, &stored.AlcoholMl, &stored.PillsTaken, &stored.BooksRead, &stored.IndoorHours, &stored.OutdoorHours, &storedLastEventAt); err != nil {
 		return false, err
 	}
 
@@ -915,11 +918,11 @@ func (s *sqliteStore) reconcileCharacterStats(ctx context.Context, characterID i
 	if _, err := s.db.ExecContext(ctx, `
 		UPDATE characters
 		SET zombie_kills = ?, injuries = ?, distance_walked_km = ?, distance_driven_km = ?,
-		    drinks = ?, alcohol_ml = ?, pills_taken = ?, books_read = ?,
+		    drinks = ?, alcoholic_drinks = ?, alcohol_ml = ?, pills_taken = ?, books_read = ?,
 		    indoor_hours = ?, outdoor_hours = ?, stats_revision = ?, last_event_at = ?
 		WHERE id = ?
 	`, total.ZombieKills, total.Injuries, total.DistanceWalkedKm, total.DistanceDrivenKm,
-		total.Drinks, total.AlcoholMl, total.PillsTaken, total.BooksRead, total.IndoorHours, total.OutdoorHours,
+		total.Drinks, total.AlcoholicDrinks, total.AlcoholMl, total.PillsTaken, total.BooksRead, total.IndoorHours, total.OutdoorHours,
 		currentStatsRevision, lastEventParam, characterID); err != nil {
 		return false, err
 	}

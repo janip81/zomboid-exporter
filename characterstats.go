@@ -46,6 +46,7 @@ type characterStatDelta struct {
 	DistanceWalkedKm float64
 	DistanceDrivenKm float64
 	Drinks           int64
+	AlcoholicDrinks  int64
 	AlcoholMl        float64
 	PillsTaken       int64
 	BooksRead        int64
@@ -145,12 +146,18 @@ func aggregateDeltaForEvent(eventType string, fields map[string]any) characterSt
 		d.Drinks = 1
 		if fluid := fieldString(fields, "fluid"); fluid != "" {
 			d.Breakdown = append(d.Breakdown, statBreakdownDelta{"drink_fluid", fluid, 1})
-			// No alcohol-content/ABV field exists in the payload at all
-			// -- this is necessarily an approximation (liters * 1000ml),
-			// and ISDrinkFromBottle events carry no "liters" field, so
-			// that path systematically under-counts. Documented
-			// limitation, not a bug: there is no better source data.
+			// curator-llm-semantic-stat-resolution.md: alcohol_ml is
+			// necessarily an approximation (liters * 1000ml, and
+			// ISDrinkFromBottle events carry no "liters" field at all,
+			// so that path systematically under-counts volume) --
+			// documented limitation, not a bug, there is no better
+			// source data for volume specifically. alcoholic_drinks is
+			// the reliable companion metric for "who drinks the most /
+			// who's the drunk"-style questions: a plain COUNT of
+			// alcoholic drink EVENTS, which every drink path reports
+			// regardless of whether it also reports a volume.
 			if alcoholicFluids[fluid] {
+				d.AlcoholicDrinks = 1
 				if liters, ok := fieldFloat(fields, "liters"); ok {
 					d.AlcoholMl = liters * 1000
 				}
@@ -227,6 +234,7 @@ func statAggregatesEqual(a, b characterStatDelta) bool {
 	return a.ZombieKills == b.ZombieKills &&
 		a.Injuries == b.Injuries &&
 		a.Drinks == b.Drinks &&
+		a.AlcoholicDrinks == b.AlcoholicDrinks &&
 		a.PillsTaken == b.PillsTaken &&
 		a.BooksRead == b.BooksRead &&
 		closeEnough(a.DistanceWalkedKm, b.DistanceWalkedKm) &&

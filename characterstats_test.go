@@ -48,6 +48,9 @@ func TestAggregateDeltaForEvent_Drink_AlcoholicFluidComputesMl(t *testing.T) {
 	if d.Drinks != 1 {
 		t.Errorf("Drinks = %d, want 1", d.Drinks)
 	}
+	if d.AlcoholicDrinks != 1 {
+		t.Errorf("AlcoholicDrinks = %d, want 1", d.AlcoholicDrinks)
+	}
 	if d.AlcoholMl != 330 {
 		t.Errorf("AlcoholMl = %v, want 330 (0.33L * 1000)", d.AlcoholMl)
 	}
@@ -58,16 +61,24 @@ func TestAggregateDeltaForEvent_Drink_NonAlcoholicFluidNoAlcohol(t *testing.T) {
 	if d.Drinks != 1 {
 		t.Errorf("Drinks = %d, want 1", d.Drinks)
 	}
+	if d.AlcoholicDrinks != 0 {
+		t.Errorf("AlcoholicDrinks = %d, want 0 for a non-alcoholic fluid", d.AlcoholicDrinks)
+	}
 	if d.AlcoholMl != 0 {
 		t.Errorf("AlcoholMl = %v, want 0 for a non-alcoholic fluid", d.AlcoholMl)
 	}
 }
 
-func TestAggregateDeltaForEvent_Drink_MissingLitersDoesNotPanic(t *testing.T) {
-	// ISDrinkFromBottle carries no "liters" field at all.
+func TestAggregateDeltaForEvent_Drink_MissingLitersStillCountsAlcoholicDrink(t *testing.T) {
+	// ISDrinkFromBottle carries no "liters" field at all -- alcohol_ml
+	// under-counts here, but alcoholic_drinks (a plain event count) must
+	// not, since it doesn't depend on volume being reported.
 	d := aggregateDeltaForEvent("drink", map[string]any{"fluid": "Vodka", "item": "Base.WhiskeyFull"})
 	if d.Drinks != 1 {
 		t.Errorf("Drinks = %d, want 1", d.Drinks)
+	}
+	if d.AlcoholicDrinks != 1 {
+		t.Errorf("AlcoholicDrinks = %d, want 1 even without a liters field", d.AlcoholicDrinks)
 	}
 	if d.AlcoholMl != 0 {
 		t.Errorf("AlcoholMl = %v, want 0 when liters is absent", d.AlcoholMl)

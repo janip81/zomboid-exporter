@@ -51,6 +51,12 @@ ALTER TABLE characters ADD COLUMN IF NOT EXISTS injuries BIGINT NOT NULL DEFAULT
 ALTER TABLE characters ADD COLUMN IF NOT EXISTS distance_walked_km DOUBLE PRECISION NOT NULL DEFAULT 0;
 ALTER TABLE characters ADD COLUMN IF NOT EXISTS distance_driven_km DOUBLE PRECISION NOT NULL DEFAULT 0;
 ALTER TABLE characters ADD COLUMN IF NOT EXISTS drinks BIGINT NOT NULL DEFAULT 0;
+-- Companion to alcohol_ml (curator-llm-semantic-stat-resolution.md): a
+-- plain COUNT of alcoholic drink events, reliable regardless of whether
+-- that drink's volume was reported (alcohol_ml under-counts on drink
+-- paths with no "liters" field). This is the metric "who drinks the
+-- most / who's the drunk" should leaderboard on, not alcohol_ml.
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS alcoholic_drinks BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE characters ADD COLUMN IF NOT EXISTS alcohol_ml DOUBLE PRECISION NOT NULL DEFAULT 0;
 ALTER TABLE characters ADD COLUMN IF NOT EXISTS pills_taken BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE characters ADD COLUMN IF NOT EXISTS books_read BIGINT NOT NULL DEFAULT 0;

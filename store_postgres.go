@@ -653,15 +653,16 @@ func (s *pgStore) applyCharacterStatDelta(ctx context.Context, charID int64, d c
 		    distance_walked_km = distance_walked_km + $4,
 		    distance_driven_km = distance_driven_km + $5,
 		    drinks = drinks + $6,
-		    alcohol_ml = alcohol_ml + $7,
-		    pills_taken = pills_taken + $8,
-		    books_read = books_read + $9,
-		    indoor_hours = indoor_hours + $10,
-		    outdoor_hours = outdoor_hours + $11,
-		    last_event_at = GREATEST(last_event_at, $12)
+		    alcoholic_drinks = alcoholic_drinks + $7,
+		    alcohol_ml = alcohol_ml + $8,
+		    pills_taken = pills_taken + $9,
+		    books_read = books_read + $10,
+		    indoor_hours = indoor_hours + $11,
+		    outdoor_hours = outdoor_hours + $12,
+		    last_event_at = GREATEST(last_event_at, $13)
 		WHERE id = $1 AND stats_finalized = false
 	`, charID, d.ZombieKills, d.Injuries, d.DistanceWalkedKm, d.DistanceDrivenKm,
-		d.Drinks, d.AlcoholMl, d.PillsTaken, d.BooksRead, d.IndoorHours, d.OutdoorHours, at)
+		d.Drinks, d.AlcoholicDrinks, d.AlcoholMl, d.PillsTaken, d.BooksRead, d.IndoorHours, d.OutdoorHours, at)
 	if err != nil {
 		return err
 	}
@@ -787,6 +788,7 @@ func (s *pgStore) reconcileCharacterStats(ctx context.Context, characterID int64
 		total.DistanceWalkedKm += d.DistanceWalkedKm
 		total.DistanceDrivenKm += d.DistanceDrivenKm
 		total.Drinks += d.Drinks
+		total.AlcoholicDrinks += d.AlcoholicDrinks
 		total.AlcoholMl += d.AlcoholMl
 		total.PillsTaken += d.PillsTaken
 		total.BooksRead += d.BooksRead
@@ -806,10 +808,10 @@ func (s *pgStore) reconcileCharacterStats(ctx context.Context, characterID int64
 	var storedLastEventAt *time.Time
 	if err := s.pool.QueryRow(ctx, `
 		SELECT zombie_kills, injuries, distance_walked_km, distance_driven_km,
-		       drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours, last_event_at
+		       drinks, alcoholic_drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours, last_event_at
 		FROM characters WHERE id = $1
 	`, characterID).Scan(&stored.ZombieKills, &stored.Injuries, &stored.DistanceWalkedKm, &stored.DistanceDrivenKm,
-		&stored.Drinks, &stored.AlcoholMl, &stored.PillsTaken, &stored.BooksRead, &stored.IndoorHours, &stored.OutdoorHours, &storedLastEventAt); err != nil {
+		&stored.Drinks, &stored.AlcoholicDrinks, &stored.AlcoholMl, &stored.PillsTaken, &stored.BooksRead, &stored.IndoorHours, &stored.OutdoorHours, &storedLastEventAt); err != nil {
 		return false, err
 	}
 
@@ -834,12 +836,12 @@ func (s *pgStore) reconcileCharacterStats(ctx context.Context, characterID int64
 	if _, err := s.pool.Exec(ctx, `
 		UPDATE characters
 		SET zombie_kills = $2, injuries = $3, distance_walked_km = $4, distance_driven_km = $5,
-		    drinks = $6, alcohol_ml = $7, pills_taken = $8, books_read = $9,
-		    indoor_hours = $10, outdoor_hours = $11, stats_revision = $12,
-		    last_event_at = GREATEST(last_event_at, $13::timestamptz)
+		    drinks = $6, alcoholic_drinks = $7, alcohol_ml = $8, pills_taken = $9, books_read = $10,
+		    indoor_hours = $11, outdoor_hours = $12, stats_revision = $13,
+		    last_event_at = GREATEST(last_event_at, $14::timestamptz)
 		WHERE id = $1
 	`, characterID, total.ZombieKills, total.Injuries, total.DistanceWalkedKm, total.DistanceDrivenKm,
-		total.Drinks, total.AlcoholMl, total.PillsTaken, total.BooksRead, total.IndoorHours, total.OutdoorHours,
+		total.Drinks, total.AlcoholicDrinks, total.AlcoholMl, total.PillsTaken, total.BooksRead, total.IndoorHours, total.OutdoorHours,
 		currentStatsRevision, lastEventParam); err != nil {
 		return false, err
 	}
