@@ -234,12 +234,22 @@ func formatLeaderboardValue(unit string, total float64) string {
 // this function; no SteamID or internal character ID reaches the
 // caller, matching AUTO-LINK-8/CGPT-050's "minimize data sent to free
 // third-party providers" rule.
-func resolveCuratorLeaderboardFact(ctx context.Context, db *pgxpool.Pool, metric string) curatorStatFact {
+//
+// serverName scopes the query to this bot's own server
+// (characters.server = $1) -- the schema deliberately supports several
+// Zomboid servers sharing one Postgres database, and a leaderboard with
+// no server filter would silently blend another server's players into
+// "server-wide," which is exactly the "target=server" plan field's
+// promise being broken. HAVING SUM(...) > 0 excludes a "winner" whose
+// real total is zero: a plan resolving cleanly to an all-zero column is
+// not evidence anyone actually did the thing, and Curator must not claim
+// otherwise (a false positive is worse than saying nothing).
+func resolveCuratorLeaderboardFact(ctx context.Context, db *pgxpool.Pool, serverName, metric string) curatorStatFact {
 	if db == nil {
 		return curatorStatFact{}
 	}
 	if metric == "deaths" {
-		return resolveCuratorDeathsLeaderboardFact(ctx, db)
+		return resolveCuratorDeathsLeaderboardFact(ctx, db, serverName)
 	}
 	m, ok := leaderboardMetricColumns[metric]
 	if !ok {
@@ -253,12 +263,14 @@ func resolveCuratorLeaderboardFact(ctx context.Context, db *pgxpool.Pool, metric
 		FROM (
 			SELECT steam_id, SUM(%s) AS total
 			FROM characters
+			WHERE server = $1
 			GROUP BY steam_id
+			HAVING SUM(%s) > 0
 			ORDER BY total DESC
 			LIMIT 1
 		) agg
 		JOIN players p ON p.steam_id = agg.steam_id
-	`, m.column)).Scan(&username, &total)
+	`, m.column, m.column), serverName).Scan(&username, &total)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return curatorStatFact{}
 	}
@@ -274,8 +286,11 @@ func resolveCuratorLeaderboardFact(ctx context.Context, db *pgxpool.Pool, metric
 
 // resolveCuratorDeathsLeaderboardFact is deaths' own query shape --
 // COUNT of died_at rows grouped by steamID, not a SUM of a character
-// aggregate column like every other metric.
-func resolveCuratorDeathsLeaderboardFact(ctx context.Context, db *pgxpool.Pool) curatorStatFact {
+// aggregate column like every other metric. WHERE died_at IS NOT NULL
+// already excludes a zero-death "winner" by construction (a player with
+// zero deaths contributes no row to COUNT at all), so no separate HAVING
+// is needed here the way the SUM-based metrics need one.
+func resolveCuratorDeathsLeaderboardFact(ctx context.Context, db *pgxpool.Pool, serverName string) curatorStatFact {
 	var username string
 	var total int
 	err := db.QueryRow(ctx, `
@@ -283,13 +298,13 @@ func resolveCuratorDeathsLeaderboardFact(ctx context.Context, db *pgxpool.Pool) 
 		FROM (
 			SELECT steam_id, COUNT(*) AS total
 			FROM characters
-			WHERE died_at IS NOT NULL
+			WHERE server = $1 AND died_at IS NOT NULL
 			GROUP BY steam_id
 			ORDER BY total DESC
 			LIMIT 1
 		) agg
 		JOIN players p ON p.steam_id = agg.steam_id
-	`).Scan(&username, &total)
+	`, serverName).Scan(&username, &total)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return curatorStatFact{}
 	}
@@ -315,7 +330,7 @@ func resolveCuratorSemanticStatFact(ctx context.Context, deps botDeps, message s
 		slog.Info("curator: semantic resolver", "resolverAttempted", true, "planAccepted", false)
 		return curatorStatFact{}
 	}
-	fact := resolveCuratorLeaderboardFact(ctx, deps.db, plan.Metric)
+	fact := resolveCuratorLeaderboardFact(ctx, deps.db, deps.serverName, plan.Metric)
 	slog.Info("curator: semantic resolver",
 		"resolverAttempted", true, "planAccepted", true,
 		"intent", plan.Intent, "metric", plan.Metric, "operation", plan.Operation,
