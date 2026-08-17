@@ -286,6 +286,111 @@ var curatorInsultPattern = regexp.MustCompile(`(?i)\b(asshole|idiot|moron|dumbas
 // numbers (curator-llm-conversation-routing.md's SELF_STATS example).
 var curatorSelfStatsPattern = regexp.MustCompile(`(?i)\bam i doing (well|good|ok|okay|alright)\b|\bhow am i doing\b|\bhow many kills\b|\bmy (stats|kills|deaths)\b|\bhow good am i\b`)
 
+// curatorStatMetric is which specific aggregate a classified SELF_STATS
+// question is asking about -- curator-aggregate-stats-live-test-review.md's
+// CURATOR-AGG-LIVE-1: "how far have i walked?" and "how many kills"
+// are both SELF_STATS, but need different Known Facts and different
+// deterministic-fallback sentences.
+type curatorStatMetric string
+
+const (
+	statMetricKills         curatorStatMetric = "kills"
+	statMetricDeaths        curatorStatMetric = "deaths"
+	statMetricInjuries      curatorStatMetric = "injuries"
+	statMetricWalkDistance  curatorStatMetric = "walk_distance"
+	statMetricDriveDistance curatorStatMetric = "drive_distance"
+	statMetricDrinks        curatorStatMetric = "drinks"
+	statMetricAlcohol       curatorStatMetric = "alcohol"
+	statMetricPills         curatorStatMetric = "pills"
+	statMetricBooks         curatorStatMetric = "books"
+	statMetricIndoorTime    curatorStatMetric = "indoor_time"
+	statMetricOutdoorTime   curatorStatMetric = "outdoor_time"
+	statMetricGeneral       curatorStatMetric = "general"
+)
+
+// curatorStatScope is lifetime (sum across every recorded character) or
+// current_life (the single most-recently-recorded character only).
+// curator-aggregate-stats-live-test-review.md's CURATOR-AGG-LIVE-4: until
+// a reliable native signal proves which living character is actually
+// loaded, "current_life" means the LATEST RECORDED character, a
+// deliberately weaker claim than "the character currently selected in
+// game."
+type curatorStatScope string
+
+const (
+	statScopeLifetime    curatorStatScope = "lifetime"
+	statScopeCurrentLife curatorStatScope = "current_life"
+)
+
+// statMetricKeywords is checked in order -- first match wins. "alcohol"
+// is checked before the drink/drank/drunk group so "how much alcohol
+// have i had" resolves to the alcohol metric rather than the drink-count
+// metric; the two groups don't otherwise overlap.
+var statMetricKeywords = []struct {
+	metric   curatorStatMetric
+	keywords []string
+}{
+	{statMetricKills, []string{"kill", "zombie"}},
+	{statMetricDeaths, []string{"death", "died", "die "}},
+	{statMetricInjuries, []string{"injur", "hurt", "wound"}},
+	{statMetricWalkDistance, []string{"walk"}},
+	{statMetricDriveDistance, []string{"driv", "drove"}},
+	{statMetricAlcohol, []string{"alcohol"}},
+	{statMetricDrinks, []string{"drink", "drank", "drunk"}},
+	{statMetricPills, []string{"pill", "medicat", "medicine"}},
+	{statMetricBooks, []string{"book", "read"}},
+	{statMetricIndoorTime, []string{"indoor", "inside"}},
+	{statMetricOutdoorTime, []string{"outdoor", "outside"}},
+}
+
+// curatorFirstPersonPattern requires the message to actually be about the
+// speaker -- CURATOR-AGG-LIVE-1's "deterministic self-stat recognition
+// around first-person stat/action vocabulary": a stat keyword alone
+// (e.g. a message that merely mentions "books") isn't enough on its own
+// to justify a SELF_STATS classification.
+var curatorFirstPersonPattern = regexp.MustCompile(`(?i)\b(i|i've|ive|i'm|im|my)\b`)
+
+// curatorCurrentLifeScopePattern recognizes the natural phrasings for
+// "this life" scope (CURATOR-AGG-LIVE-4); anything else defaults to
+// lifetime.
+var curatorCurrentLifeScopePattern = regexp.MustCompile(`(?i)\bthis life\b|\bcurrent life\b|\bright now\b`)
+
+// classifySelfStatsMetric determines which specific aggregate (if any)
+// and which scope a message is asking about. metric == statMetricGeneral
+// means no specific recognized stat vocabulary was found -- the caller
+// should fall back to the existing general Known Facts / canned pool
+// rather than trying to answer a specific number.
+func classifySelfStatsMetric(msg string) (metric curatorStatMetric, scope curatorStatScope) {
+	scope = statScopeLifetime
+	if curatorCurrentLifeScopePattern.MatchString(msg) {
+		scope = statScopeCurrentLife
+	}
+	normalized := strings.ToLower(msg)
+	for _, m := range statMetricKeywords {
+		for _, kw := range m.keywords {
+			if strings.Contains(normalized, kw) {
+				return m.metric, scope
+			}
+		}
+	}
+	return statMetricGeneral, scope
+}
+
+// isCuratorSelfStatsQuestion broadens SELF_STATS recognition beyond
+// curatorSelfStatsPattern's original short exact-phrase list --
+// CURATOR-AGG-LIVE-1's live-test finding: "how far have i walked?" fell
+// through to GENERIC_CURATOR because nothing recognized it. Requires
+// BOTH a first-person marker and a specific recognized stat metric, so
+// this doesn't over-match ordinary sentences that merely contain a stat
+// word.
+func isCuratorSelfStatsQuestion(msg string) bool {
+	if !curatorFirstPersonPattern.MatchString(msg) {
+		return false
+	}
+	metric, _ := classifySelfStatsMetric(msg)
+	return metric != statMetricGeneral
+}
+
 // curatorLoreMysteryPattern matches questions about hidden lore/the Knox
 // Event/whether an experiment is occurring -- the pre-prompt spoiler rule
 // stays absolute regardless of intent (only unlocked facts ever reach the
@@ -313,7 +418,7 @@ func classifyCuratorIntent(msg string) curatorIntent {
 		return intentIdentity
 	case curatorActivityPurposePattern.MatchString(msg):
 		return intentActivityPurpose
-	case curatorSelfStatsPattern.MatchString(msg):
+	case curatorSelfStatsPattern.MatchString(msg) || isCuratorSelfStatsQuestion(msg):
 		return intentSelfStats
 	case curatorLoreMysteryPattern.MatchString(msg):
 		return intentLoreMystery

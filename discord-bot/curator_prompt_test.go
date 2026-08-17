@@ -189,3 +189,65 @@ func TestCuratorCanonicalExamples_NoRealLookingPlayerNames(t *testing.T) {
 		}
 	}
 }
+
+// --- curator-aggregate-stats-live-test-review.md's CURATOR-STAT-3: broad
+// natural self-stat wording must classify as SELF_STATS, not GENERIC ------
+
+func TestClassifyCuratorIntent_BroadSelfStatsWording(t *testing.T) {
+	cases := []string{
+		"have i killed any zombies?",
+		"how far have i walked?",
+		"how far have i driven?",
+		"how many injuries have i had?",
+		"how many pills have i taken?",
+		"how many books have i read?",
+		"how long have i been outside?",
+		"how long have i been indoors?",
+	}
+	for _, msg := range cases {
+		if got := classifyCuratorIntent(msg); got != intentSelfStats {
+			t.Errorf("classifyCuratorIntent(%q) = %v, want %v (CURATOR-STAT-3)", msg, got, intentSelfStats)
+		}
+	}
+}
+
+func TestClassifySelfStatsMetric(t *testing.T) {
+	cases := []struct {
+		msg    string
+		metric curatorStatMetric
+		scope  curatorStatScope
+	}{
+		{"have i killed any zombies?", statMetricKills, statScopeLifetime},
+		{"how far have i walked curator?", statMetricWalkDistance, statScopeLifetime},
+		{"how far have i walked this life curator?", statMetricWalkDistance, statScopeCurrentLife},
+		{"how far have i driven?", statMetricDriveDistance, statScopeLifetime},
+		{"how many injuries have i had?", statMetricInjuries, statScopeLifetime},
+		{"how many pills have i taken?", statMetricPills, statScopeLifetime},
+		{"how many books have i read?", statMetricBooks, statScopeLifetime},
+		{"how long have i been outside?", statMetricOutdoorTime, statScopeLifetime},
+		{"how long have i been indoors?", statMetricIndoorTime, statScopeLifetime},
+		{"how much alcohol have i had?", statMetricAlcohol, statScopeLifetime},
+		{"how many drinks have i had?", statMetricDrinks, statScopeLifetime},
+		{"nice base you've got there", statMetricGeneral, statScopeLifetime},
+	}
+	for _, tc := range cases {
+		metric, scope := classifySelfStatsMetric(tc.msg)
+		if metric != tc.metric {
+			t.Errorf("classifySelfStatsMetric(%q) metric = %v, want %v", tc.msg, metric, tc.metric)
+		}
+		if scope != tc.scope {
+			t.Errorf("classifySelfStatsMetric(%q) scope = %v, want %v", tc.msg, scope, tc.scope)
+		}
+	}
+}
+
+func TestIsCuratorSelfStatsQuestion_RequiresFirstPerson(t *testing.T) {
+	// A stat keyword alone, with no first-person marker, must not
+	// classify as a self-stat question.
+	if isCuratorSelfStatsQuestion("walking is good exercise") {
+		t.Error("expected no first-person marker to prevent a SELF_STATS classification")
+	}
+	if !isCuratorSelfStatsQuestion("how far have i walked") {
+		t.Error("expected a first-person stat question to classify as SELF_STATS")
+	}
+}

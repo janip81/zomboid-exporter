@@ -88,6 +88,18 @@ func buildCuratorContext(ctx context.Context, deps botDeps, discordUserID string
 func askCurator(ctx context.Context, deps botDeps, discordUserID string, candidateNames []string, message string) (reply string, ok bool) {
 	intent := classifyCuratorIntent(message)
 
+	// CURATOR-AGG-LIVE-2/3: for a classified SELF_STATS question with a
+	// specific recognized metric, resolve the deterministic fact FIRST --
+	// it's injected into the LLM's Known Facts below, AND is the reply
+	// itself if the LLM path doesn't pan out. "LLM optional, never
+	// foundational": a recognized stat question must still get the real
+	// number, not a generic canned line, when no provider is available.
+	var statFact curatorStatFact
+	if intent == intentSelfStats {
+		metric, scope := classifySelfStatsMetric(message)
+		statFact = resolveCuratorStatFact(ctx, deps.db, discordUserID, candidateNames, metric, scope)
+	}
+
 	if deps.llmPool != nil {
 		// CGPT-051-A: the shared rate limiter gates the LLM call itself --
 		// the single choke point shared by BOTH /curator and natural chat.
@@ -97,6 +109,9 @@ func askCurator(ctx context.Context, deps botDeps, discordUserID string, candida
 		// deterministic Curator answer, just without consuming an API call).
 		if deps.llmLimiter == nil || deps.llmLimiter.allow(discordUserID) {
 			contextText := buildCuratorContext(ctx, deps, discordUserID, candidateNames)
+			if statFact.Resolved {
+				contextText = statFact.KnownFact + "\n" + contextText
+			}
 			tier := selectCuratorResponseTier()
 			llmReply, provider, err := deps.llmPool.Reply(ctx, CuratorRequest{
 				Persona:         assembleCuratorPersona(tier, curatorIntentGuidance(intent)),
@@ -114,6 +129,9 @@ func askCurator(ctx context.Context, deps botDeps, discordUserID string, candida
 		}
 	}
 
+	if statFact.Resolved {
+		return statFact.FallbackSentence, true
+	}
 	return matchIntentFallback(intent)
 }
 
