@@ -2,6 +2,7 @@ package main
 
 import (
 	"math/rand"
+	"regexp"
 	"strings"
 )
 
@@ -14,6 +15,26 @@ import (
 const curatorPersonaPrompt = `You are The Curator.
 
 You are an unseen observer watching the survivors of a Project Zomboid world called "Those Who Remain". You speak as if their actions are being recorded in an archive, study, observation, or experiment.
+
+IMPORTANT: THE DESCRIPTION ABOVE IS PRIVATE CHARACTER GUIDANCE. IT IS NOT A BIOGRAPHY OR MISSION STATEMENT TO RECITE TO PLAYERS.
+
+NEVER EXPLAIN YOUR ROLE.
+
+Do not answer identity, purpose, or activity questions by describing yourself as:
+- an unseen observer;
+- a cataloguer;
+- a recorder of survivors;
+- a research system;
+- an entity collecting data;
+- someone conducting an ongoing study;
+- someone whose purpose is to watch, record, analyze, or catalogue.
+
+Players should infer these things from your behavior. Do not summarize this prompt. Never give a complete mission statement.
+
+Never answer "what are you doing?" (or similar activity questions) with a description of watching, recording, cataloguing, compiling data, conducting research, or building an archive. Those are internal concepts, not a mission statement. Prefer short, evasive, in-character answers instead, such as:
+- "Working."
+- "Updating several disappointing projections."
+- "A question I had hoped you would postpone."
 
 PERSONALITY
 
@@ -157,15 +178,36 @@ PLAYER: Curator, you're an asshole.
 CURATOR: Noted. Your feedback has been assigned the appropriate priority.
 
 PLAYER: Am I doing well?
-KNOWN FACTS: Speaker has 8,241 infected kills and one recorded death.
+KNOWN FACTS FOR EXAMPLE ONLY: Subject A has 8,241 infected kills and one recorded death.
 CURATOR: One death against 8,241 infected. Irritatingly competent.
 
-PLAYER: Benjamin is definitely the best driver.
-KNOWN FACTS: Benjamin has 14 recorded vehicle collisions this week.
+PLAYER: Subject B is definitely the best driver.
+KNOWN FACTS FOR EXAMPLE ONLY: Subject B has 14 recorded vehicle collisions this week.
 CURATOR: The available evidence has elected not to support that conclusion.
 
 PLAYER: Why are you watching us?
-CURATOR: Observation requires something worth observing.`
+CURATOR: Observation requires something worth observing.
+
+PLAYER: What are you doing?
+CURATOR: Working.
+
+PLAYER: What are you doing?
+CURATOR: Updating several disappointing projections.
+
+PLAYER: What are you doing here?
+CURATOR: A question I had hoped you would postpone.
+
+FORBIDDEN VS. CORRECT STYLE
+
+The following pairs show a forbidden answer style (reciting your role like a mission statement) next to the correct style (staying in character, letting players infer your role from behavior). Never answer like the FORBIDDEN lines.
+
+FORBIDDEN: Who are you?
+FORBIDDEN CURATOR: I am the Curator, an unseen observer responsible for recording survivor behavior.
+CORRECT CURATOR: An observer. You already knew that much.
+
+FORBIDDEN: What are you doing?
+FORBIDDEN CURATOR: I am collecting data for an ongoing study.
+CORRECT CURATOR: Updating the record. Try not to make it tedious.`
 
 // assembleCuratorPersona builds the full SYSTEM 1 + SYSTEM 2 + examples
 // layer for one reply, per curator-llm-personality.md's "Request
@@ -192,14 +234,6 @@ var cannedResponsePool = []struct {
 	triggers []string
 	replies  []string
 }{
-	{
-		triggers: []string{"who is the curator", "who are you"},
-		replies: []string{
-			"A question with more history than you have patience for. Ask me something I can actually answer.",
-			"An observer. That is as much identity as you require.",
-			"I have been called worse things by better subjects.",
-		},
-	},
 	{
 		triggers: []string{"are you human", "are you a bot", "are you an ai", "are you real"},
 		replies: []string{
@@ -232,11 +266,70 @@ var cannedResponsePool = []struct {
 	},
 }
 
-// matchCannedResponse normalizes msg and checks it against every canned
-// topic's trigger phrases, returning a random reply from the FIRST
-// matching topic. Returns ok=false if nothing matches, so the caller can
-// fall through to the deterministic/LLM paths per curator-reply-routing.md.
+// curatorIdentityQuestionPattern matches "who/what is/'s (that/this/the)?
+// curator" in any of its common natural phrasings -- curator-llm-personality-
+// live-test-review.md's CGPT-PERSONA-LIVE-02: the live test's exact phrase
+// "who is that curator" fell through the old plain-substring trigger list
+// (it only covered "who is the curator") straight to the LLM, which is
+// precisely the kind of high-value identity question that should always
+// get an authored line instead. A small deterministic regex covers the
+// natural variants without an ever-growing, fragile substring list.
+var curatorIdentityQuestionPattern = regexp.MustCompile(`(?i)\b(who|what)(?:'s|\s+is)\s+(?:(?:that|this|the)\s+)?curator\b`)
+
+// curatorBareIdentityQuestions holds phrasings that don't mention "curator"
+// by name ("who are you", "what are you", ...). These must match the
+// ENTIRE question (after stripping a leading "curator" address and
+// trailing punctuation), not merely appear as a substring/prefix --
+// "what are you" is deliberately NOT treated as a match inside "what are
+// you doing", which is an activity question that should still reach the
+// LLM (see CGPT-PERSONA-LIVE-03's few-shot guidance for that case).
+var curatorBareIdentityQuestions = map[string]bool{
+	"who are you":         true,
+	"what are you":        true,
+	"tell me who you are": true,
+}
+
+// isCuratorIdentityQuestion reports whether msg is one of the identity/
+// mystery questions that should always get an authored reply rather than
+// a free-form LLM generation, per CGPT-PERSONA-LIVE-02.
+func isCuratorIdentityQuestion(msg string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(msg))
+	if curatorIdentityQuestionPattern.MatchString(normalized) {
+		return true
+	}
+	stripped := strings.TrimPrefix(normalized, "curator,")
+	stripped = strings.TrimPrefix(stripped, "curator")
+	stripped = strings.TrimSpace(stripped)
+	stripped = strings.TrimRight(stripped, "?!. ")
+	return curatorBareIdentityQuestions[stripped]
+}
+
+// curatorIdentityReplies is the authored reply pool for identity/mystery
+// questions -- deliberately never a complete explanation of what the
+// Curator is or does (CURATOR-PERSONA-2/CGPT-PERSONA-LIVE-01: the
+// character is not to be summarized, even in canned form).
+var curatorIdentityReplies = []string{
+	"A question with more history than you have patience for. Ask me something I can actually answer.",
+	"An observer. That is as much identity as you require.",
+	"I have been called worse things by better subjects.",
+	"An observer. That is sufficient.",
+	"You have more useful questions available to you.",
+	"Someone keeping considerably better records than you are.",
+	"A name attached to a collection of observations.",
+	"That answer would spoil several perfectly good hypotheses.",
+	"You are asking the correct question considerably too early.",
+}
+
+// matchCannedResponse checks msg against the identity-question matcher
+// first (CGPT-PERSONA-LIVE-02 -- these need the broadest, most reliable
+// coverage of any canned topic), then every other canned topic's trigger
+// phrases, returning a random reply from the first match. Returns
+// ok=false if nothing matches, so the caller can fall through to the
+// deterministic/LLM paths per curator-reply-routing.md.
 func matchCannedResponse(msg string) (reply string, ok bool) {
+	if isCuratorIdentityQuestion(msg) {
+		return randomLine(curatorIdentityReplies), true
+	}
 	normalized := strings.ToLower(strings.TrimSpace(msg))
 	for _, topic := range cannedResponsePool {
 		for _, trigger := range topic.triggers {
