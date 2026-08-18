@@ -413,6 +413,38 @@ local function runRecipeNote(p)
     print("TWR.Debug: runRecipeNote -- gave ThoseWhoRemain.RecipeNote to inventory " .. (okAdd and "SUCCEEDED -- right-click it and choose Read" or "FAILED"))
 end
 
+-- Flyer presentation-profile debug test -- gives a dummy DB-shaped
+-- flyer directly to inventory (see server/TWR/Mechanics/Flyer.lua and
+-- antagonist/tests/vanilla-flyer-source-trace.md). Right-click -> the
+-- literal vanilla "Inspect" option should appear (printMedia modData
+-- is set), and the reveal-on-map button should center on the real
+-- verified-via-PZmap "The McCoy Logging Corp." location (x=10317,
+-- y=9290, cross-checked against vanilla's own
+-- PrintMediaDefinitions.MiscDetails.mccoyloggingcorp rectangle -- not
+-- an invented coordinate).
+local function runFlyer(p)
+    local okInv, inventory = safeCall(p, "getInventory")
+    if not okInv or not inventory then return end
+
+    local item, err = TWR.Mechanics.Flyer.buildItem({
+        contentId = "dummy.flyer.001",
+        displayName = "Missing Cat",
+        text = "Have you seen Whiskers? Last seen near the logging corp. Reward if found.",
+        discoveryKey = "dummy_flyer_001",
+        locationRef = { x1 = 10260, y1 = 9220, x2 = 10419, y2 = 9479 },
+    })
+    if not item then
+        print("TWR.Debug: runFlyer -- buildItem FAILED: " .. tostring(err))
+        return
+    end
+
+    local okAdd = safeCall(inventory, "AddItem", item)
+    if okAdd then
+        pcall(function() sendAddItemToContainer(inventory, item) end)
+    end
+    print("TWR.Debug: runFlyer -- gave dummy flyer item " .. (okAdd and "SUCCEEDED -- right-click it, should say Inspect" or "FAILED"))
+end
+
 -- P1 (readable content) debug test -- gives a dummy DB-shaped readable
 -- item directly to inventory. Uses the just-confirmed
 -- sendAddItemToContainer() MP-sync fix (antagonist/DONE.md,
@@ -747,6 +779,7 @@ local MECHANICS = {
     recipe = runRecipe,
     recipe_forget = runRecipeForget,
     recipe_note = runRecipeNote,
+    flyer = runFlyer,
     readable = runReadable,
     recorded_media = runRecordedMedia,
     controlled_key = runControlledKey,
