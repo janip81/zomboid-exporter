@@ -48,6 +48,8 @@ local MECHANIC_LABELS = {
     { key = "recipe_note", label = "Give lootable recipe note (read it)" },
     { key = "readable", label = "Give dummy readable note (P1 test)" },
     { key = "flyer", label = "Give dummy flyer (vanilla-parity Inspect test)" },
+    { key = "calendar_recipe_note", label = "Give Paper Calendar recipe note (read it)" },
+    { key = "calendar_craft_materials", label = "Give Paper Calendar craft materials" },
     { key = "recorded_media", label = "Give dummy VHS tape (P2 test)" },
     { key = "controlled_key", label = "Give dummy controlled key (P3 test)" },
     { key = "fixture_kvls", label = "Spawn key+VHS fixture (P4 KVLS-1/2 test)" },

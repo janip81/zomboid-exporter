@@ -16,4 +16,43 @@ module Base
 			item 1 Base.Plank,
 		}
 	}
+
+	-- "Make Paper Calendar" -- antagonist/recipes/calendar.md's design,
+	-- first real production recipe learned from a readable clue.
+	-- Ingredient IDs SOURCE-CONFIRMED against installed B42.20.3
+	-- (buildid 24775771), not the doc's own unverified candidates:
+	--   Base.Notebook   -- media/scripts/generated/items/literature.txt
+	--   Base.Scotchtape -- media/scripts/generated/items/normal.txt
+	--   Base.Pen        -- media/scripts/generated/items/weapon.txt,
+	--                      Tags include base:pen (confirmed)
+	--   Base.Scissors   -- media/scripts/generated/items/weapon.txt
+	-- Syntax modeled on the real vanilla MakeBlankID recipe
+	-- (media/scripts/generated/recipes/recipes.txt) -- the closest real
+	-- precedent combining a consumed tape item with a mode:keep tool
+	-- referenced by tag. category = Carpentry matches this project's
+	-- own already-confirmed-live fix for AntagonistProbeTestRecipe
+	-- above (a missing category was the real root cause of recipes not
+	-- appearing in the crafting menu, see server/TWR/Mechanics/
+	-- Recipe.lua's header) -- MakeBlankID itself has no category field,
+	-- but trusting our own live-verified precedent over one vanilla
+	-- example that may rely on something else we haven't traced.
+	craftRecipe MakePaperCalendar
+	{
+		time = 400,
+		NeedToBeLearn = true,
+		Tags = AnySurfaceCraft,
+		category = Carpentry,
+		timedAction = Making,
+		inputs
+		{
+			item 1 [Base.Notebook],
+			item 1 [Base.Scotchtape],
+			item 1 tags[base:pen] mode:keep,
+			item 1 [Base.Scissors] mode:keep,
+		}
+		outputs
+		{
+			item 1 ThoseWhoRemain.Calendar,
+		}
+	}
 }

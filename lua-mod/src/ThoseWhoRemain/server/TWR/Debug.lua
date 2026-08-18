@@ -413,6 +413,35 @@ local function runRecipeNote(p)
     print("TWR.Debug: runRecipeNote -- gave ThoseWhoRemain.RecipeNote to inventory " .. (okAdd and "SUCCEEDED -- right-click it and choose Read" or "FAILED"))
 end
 
+-- antagonist/recipes/calendar.md's production chain, section 4 of the
+-- Flyer/Calendar/Recipe presentation-layer work: real recipe clue ->
+-- read -> MakePaperCalendar known -> appears in vanilla crafting UI.
+-- Do NOT use TWR.Mechanics.Recipe.teach() (runRecipe above) for this --
+-- the design doc explicitly requires proving the readable-clue path.
+local function runCalendarRecipeNote(p)
+    local okInv, inventory = safeCall(p, "getInventory")
+    if not okInv or not inventory then return end
+
+    local okAdd, item = safeCall(inventory, "AddItem", "ThoseWhoRemain.CalendarRecipeNote")
+    print("TWR.Debug: runCalendarRecipeNote -- gave ThoseWhoRemain.CalendarRecipeNote to inventory " .. (okAdd and "SUCCEEDED -- right-click it and choose Read" or "FAILED"))
+end
+
+-- Testing convenience only -- gives the exact MakePaperCalendar
+-- ingredients/tools (twr_recipes.txt) directly to inventory so the
+-- crafting step can be tested without a materials scavenger hunt.
+local function runCalendarCraftMaterials(p)
+    local okInv, inventory = safeCall(p, "getInventory")
+    if not okInv or not inventory then return end
+
+    local items = { "Base.Notebook", "Base.Scotchtape", "Base.Pen", "Base.Scissors" }
+    local results = {}
+    for _, itemType in ipairs(items) do
+        local okAdd = safeCall(inventory, "AddItem", itemType)
+        table.insert(results, itemType .. "=" .. (okAdd and "OK" or "FAILED"))
+    end
+    print("TWR.Debug: runCalendarCraftMaterials -- " .. table.concat(results, ", "))
+end
+
 -- Flyer presentation-profile debug test -- gives a dummy DB-shaped
 -- flyer directly to inventory (see server/TWR/Mechanics/Flyer.lua and
 -- antagonist/tests/vanilla-flyer-source-trace.md). Right-click -> the
@@ -779,6 +808,8 @@ local MECHANICS = {
     recipe = runRecipe,
     recipe_forget = runRecipeForget,
     recipe_note = runRecipeNote,
+    calendar_recipe_note = runCalendarRecipeNote,
+    calendar_craft_materials = runCalendarCraftMaterials,
     flyer = runFlyer,
     readable = runReadable,
     recorded_media = runRecordedMedia,
