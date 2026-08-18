@@ -227,10 +227,27 @@ func main() {
 // --mqtt-broker be tested without a channel configured yet. world_stats is
 // deliberately never posted: it's periodic housekeeping telemetry with no
 // player attached, not a notable live event.
+var curatorMQTTSkipEventTypes = map[string]bool{
+	// High-frequency telemetry from characterstats.go's aggregate
+	// tracking (movement/driving flush every 0.1km, streak heartbeats
+	// every in-game hour, max_speed on every new high) -- none of these
+	// have a bespoke formatEvent case, so without this skip they'd spam
+	// the channel with raw JSON dumps (formatEvent's fallback) at a rate
+	// that drowns out genuinely notable events like kills/deaths. Still
+	// fully captured in Postgres via the exporter's own ingestion path --
+	// this only affects the live Discord announcement feed.
+	"movement_distance": true,
+	"driving_distance":  true,
+	"max_speed":         true,
+	"indoor_streak":     true,
+	"outdoor_streak":    true,
+	"vehicle_streak":    true,
+}
+
 func newMQTTHandler(session *discordgo.Session, channelID string, deps botDeps) mqtt.MessageHandler {
 	return func(client mqtt.Client, msg mqtt.Message) {
 		eventType := eventTypeFromTopic(msg.Topic())
-		if eventType == "world_stats" {
+		if eventType == "world_stats" || curatorMQTTSkipEventTypes[eventType] {
 			return
 		}
 
