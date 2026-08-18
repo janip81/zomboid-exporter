@@ -700,6 +700,11 @@ func (s *sqliteStore) handleExporterEvent(ctx context.Context, ev *exporterEvent
 		s.enqueuePendingExporterEvent(ev)
 		return
 	}
+	// Mutate ev in place -- see pgStore.handleExporterEvent's comment for
+	// the full rationale (runExporterLogPipeline's pub.publish(ev) must
+	// see the same canonical steamId this DB write uses).
+	ev.SteamID = steamID
+	ev.Fields = canonicalizeExporterFields(ev.Fields, steamID)
 	s.ingestExporterEvent(ctx, ev, steamID)
 }
 

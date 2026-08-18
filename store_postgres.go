@@ -597,6 +597,17 @@ func (s *pgStore) handleExporterEvent(ctx context.Context, ev *exporterEvent) {
 		s.enqueuePendingExporterEvent(ev)
 		return
 	}
+	// Mutate ev in place (ev is a *exporterEvent shared with the caller,
+	// runExporterLogPipeline) so the pub.publish(ev) that follows right
+	// after this call carries the same canonical steamId this DB write
+	// uses, not the raw Lua-derived value -- MQTT/Discord consumers get
+	// the same identity guarantee steamid64-canonicalization-and-lua-
+	// precision.md established for the DB, instead of occasionally
+	// showing an imprecise steamId that never made it into Postgres.
+	// ingestExporterEvent's own canonicalizeExporterFields call becomes a
+	// no-op once this has already run (its equality check short-circuits).
+	ev.SteamID = steamID
+	ev.Fields = canonicalizeExporterFields(ev.Fields, steamID)
 	s.ingestExporterEvent(ctx, ev, steamID)
 }
 
