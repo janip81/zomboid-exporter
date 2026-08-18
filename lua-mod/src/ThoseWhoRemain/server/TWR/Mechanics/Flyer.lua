@@ -109,11 +109,26 @@ function Flyer.buildItem(payload)
     -- available, falling back to a per-item unique id otherwise.
     local mediaId = "twr_" .. tostring(payload.contentId or payload.discoveryKey or item:getID())
 
+    -- DIAGNOSTIC 2026-08-18: live test reported "random flyer every
+    -- time" with no sign of this module's own dummy content -- logging
+    -- exactly what buildItem() writes/returns to tell apart a server-
+    -- side bug (this table never getting set/kept) from a client-side
+    -- one (native OnCreate/ItemCodeOnCreate.onCreateFlier re-picking
+    -- vanilla's own random ambient flyer content after this runs, or a
+    -- getText() rendering issue). Remove once root-caused.
+    local okFullType, fullType = safeCall(item, "getFullType")
+    local okPreMD, preExistingPrintMedia = safeCall(item, "getModData")
+    print("TWR.Mechanics.Flyer: buildItem -- instanced item fullType=" .. tostring(okFullType and fullType or "?")
+        .. " preExistingPrintMedia=" .. tostring(okPreMD and preExistingPrintMedia and preExistingPrintMedia.printMedia ~= nil))
+
     modData.printMedia = {
         id = mediaId,
         title = payload.displayName or "Flyer",
         text = payload.text or "",
     }
+    print("TWR.Mechanics.Flyer: buildItem -- wrote printMedia id=" .. mediaId
+        .. " title=" .. tostring(modData.printMedia.title)
+        .. " text=" .. tostring(modData.printMedia.text))
 
     if payload.contentId then modData.TWR_contentId = payload.contentId end
     if payload.discoveryKey then modData.TWR_discoveryKey = payload.discoveryKey end

@@ -49,6 +49,14 @@ local function registerFlyerLocationIfNeeded(item)
     local modData = item:getModData()
     local printMedia = modData.printMedia
     local locationRef = modData.TWR_locationRef
+    -- DIAGNOSTIC 2026-08-18: live test reported wrong/random content on
+    -- read -- logging exactly what the CLIENT sees in this item's
+    -- modData at read-time, to tell apart a replication/sync issue
+    -- from a server-side or getText()-rendering one. Remove once
+    -- root-caused.
+    print("TWR: Context.Flyer -- displayPrintMedia hook fired -- printMedia="
+        .. tostring(printMedia and ("id=" .. tostring(printMedia.id) .. " title=" .. tostring(printMedia.title) .. " text=" .. tostring(printMedia.text)) or "nil")
+        .. " locationRef=" .. tostring(locationRef and (locationRef.x1 .. "," .. locationRef.y1 .. "-" .. locationRef.x2 .. "," .. locationRef.y2) or "nil"))
     if not printMedia or not printMedia.id or not locationRef then return end
     if PrintMediaDefinitions.MiscDetails[printMedia.id] then return end -- already registered (idempotent, matches re-reads)
 

@@ -17,16 +17,16 @@ module ThoseWhoRemain
 		LearnedRecipes = AntagonistProbeTestRecipe,
 	}
 
-	-- Real production recipe-note carrier (antagonist/recipes/
-	-- calendar.md) -- teaches MakePaperCalendar (twr_recipes.txt)
-	-- through the same proven vanilla LearnedRecipes/ReadLiterature
-	-- path as RecipeNote above, kept as a separate item type so the
-	-- debug-menu's still-useful AntagonistProbeTestRecipe fixture stays
-	-- untouched. No DisplayName field here -- already confirmed silently
-	-- ignored by B42 (see Calendar item's own note in antagonist/
-	-- DONE.md) -- the real name comes from translate/EN/ItemName.json,
-	-- a natural in-world phrase per item-presentation-parity.md's
-	-- naming guidance, no "TWR"/"Quest" labeling.
+	// Real production recipe-note carrier (antagonist/recipes/
+	// calendar.md) -- teaches MakePaperCalendar (twr_recipes.txt)
+	// through the same proven vanilla LearnedRecipes/ReadLiterature
+	// path as RecipeNote above, kept as a separate item type so the
+	// debug-menu's still-useful AntagonistProbeTestRecipe fixture stays
+	// untouched. No DisplayName field here -- already confirmed silently
+	// ignored by B42 (see Calendar item's own note in antagonist/
+	// DONE.md) -- the real name comes from translate/EN/ItemName.json,
+	// a natural in-world phrase per item-presentation-parity.md's
+	// naming guidance, no "TWR"/"Quest" labeling.
 	item CalendarRecipeNote
 	{
 		DisplayCategory = Literature,
