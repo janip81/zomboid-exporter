@@ -11,22 +11,25 @@
 -- ItemTag.WRITE/PEN/PENCIL/*_PEN via containsTagRecurse -- all
 -- grep-confirmed against vanilla's own ISReadABook.lua/ISMap.lua).
 --
--- NOT YET CARRIED FORWARD: an actual "select a date, write your own
--- note" UI. custom-items-to-create/calendar-manual-marking-decision.md
--- (Jani + ChatGPT, 2026-08-11) supersedes the earlier design this
--- probe tested with a fixed "Add Test Mark" button -- the real
--- interaction is the player choosing a day and typing free text, not
--- an automatic/pending mark from a lore discovery. That needs day-cell
--- click handling and a text-entry UI, NEITHER of which has been
--- verified against the installed B42 build yet. addMark()/
--- getMarksForDate() below are ready for that UI to call once built;
--- shipping the old test-button interaction here would misrepresent it
--- as the real design. See "TODO: manual note entry" below.
+-- Manual note entry (2026-08-18): click a day cell -> "day detail" view
+-- -> free-text entry via the real vanilla ISTextEntryBox
+-- (client/ISUI/ISTextEntryBox.lua, grep-confirmed constructor/getText()/
+-- setMultipleLine()), pen-gated via playerHasWritingTool() (already
+-- built), persisted via addMark() (already built) -- per
+-- custom-items-to-create/calendar-manual-marking-decision.md's design:
+-- the player chooses a day and types free text, not an automatic/
+-- pending mark from a lore discovery. Rendering is deliberately
+-- content-agnostic: this file has no idea whether a given mark's text
+-- came from the player's own typing or was DB/quest-authored via
+-- addMark() from elsewhere -- it just renders whatever strings are
+-- present in the item's own modData, per the architecture rule that
+-- Lua stays a presentation profile, not a place for quest lore.
 --
 -- No require(), no cached cross-file locals -- see TWR.Constants'
 -- header for why.
 require "ISUI/ISPanel"
 require "ISUI/ISButton"
+require "ISUI/ISTextEntryBox"
 
 TWR = TWR or {}
 TWR.UI = TWR.UI or {}
@@ -140,7 +143,18 @@ local function addMark(item, year, month, day, sourceId, text)
     safeCall(item, "syncItemFields")
     return true
 end
-TWR.UI.CalendarAddMark = addMark -- exposed for the future manual-note UI to call
+TWR.UI.CalendarAddMark = addMark -- exposed for other callers (e.g. a future DB/quest-driven annotation) to call directly
+
+-- Monotonic per-item counter so multiple player-typed notes on
+-- different (or the same) days never collide on addMark()'s
+-- sourceId-based dedup key -- deterministic, no timestamp/randomness
+-- needed since it's scoped to this one physical item's own modData.
+local function nextPlayerNoteSourceId(item)
+    local data = ensureCalendarData(item)
+    if not data then return nil end
+    data.nextNoteSeq = (data.nextNoteSeq or 0) + 1
+    return "player_note_" .. tostring(data.nextNoteSeq)
+end
 
 -- CONFIRMED real via grep, client/ISUI/Maps/ISMap.lua:canWrite() --
 -- mirrors vanilla's own exact pen-availability check (also used for
@@ -173,6 +187,11 @@ function TWRCalendarUI:new(x, y, width, height, calendarItem)
     o.calendarItem = calendarItem
     o.backgroundColor = { r = 0.88, g = 0.83, b = 0.70, a = 1.0 }
     o.borderColor = { r = 0.2, g = 0.2, b = 0.2, a = 1.0 }
+
+    -- "grid" (month view, default) or "dayDetail" (a single day's notes
+    -- + free-text entry, per calendar-manual-marking-decision.md).
+    o.viewMode = "grid"
+    o.selectedDay = nil
 
     local today = getCurrentWorldDate()
     if today then
@@ -220,15 +239,6 @@ function TWRCalendarUI:initialise()
         self.nextButton = nextBtn
     end
 
-    -- TODO: manual note entry. Per calendar-manual-marking-decision.md,
-    -- the player should be able to select a day and write their own
-    -- free-text note (pen-gated via playerHasWritingTool() above,
-    -- persisted via addMark() above) -- needs day-cell click handling
-    -- and a verified B42 text-entry UI, neither built yet. Until then
-    -- this panel is read/browse-only; addMark() is only reachable
-    -- programmatically (e.g. from a future lore-item interaction), not
-    -- from this UI.
-
     self:updateNavigationState()
 end
 
@@ -239,6 +249,7 @@ function TWRCalendarUI:updateNavigationState()
 end
 
 function TWRCalendarUI:onPreviousMonth()
+    self:exitDayDetail()
     local year, month = previousMonth(self.viewYear, self.viewMonth)
     if isBeforeJuly1993(year, month) then return end
     self.viewYear = year
@@ -247,6 +258,7 @@ function TWRCalendarUI:onPreviousMonth()
 end
 
 function TWRCalendarUI:onNextMonth()
+    self:exitDayDetail()
     self.viewYear, self.viewMonth = nextMonth(self.viewYear, self.viewMonth)
     self:updateNavigationState()
 end
@@ -257,33 +269,143 @@ end
 
 local DAY_NAMES = { "MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN" }
 
+-- Shared grid geometry -- used by both prerender() (drawing) and
+-- dayAtPosition() (click hit-testing) so the two can never drift apart.
+function TWRCalendarUI:dayGridGeometry()
+    local left, top = 20, 50
+    local cellW = (self.width - 40) / 7
+    local cellH = 26
+    local count = daysInMonth(self.viewYear, self.viewMonth)
+    -- Sakamoto's algorithm is Sunday-first (0=Sun); the grid here is
+    -- Monday-first (column 0 = Monday), so shift by 6 mod 7.
+    local firstWeekday = weekdayForDate(self.viewYear, self.viewMonth, 1)
+    local mondayIndex = (firstWeekday + 6) % 7
+    return left, top, cellW, cellH, mondayIndex, count
+end
+
+function TWRCalendarUI:dayCellRect(day)
+    local left, top, cellW, cellH, mondayIndex = self:dayGridGeometry()
+    local cellIndex = mondayIndex + (day - 1)
+    local col = cellIndex % 7
+    local row = math.floor(cellIndex / 7)
+    return left + col * cellW, top + 22 + row * cellH, cellW, cellH
+end
+
+function TWRCalendarUI:dayAtPosition(mx, my)
+    local left, top, cellW, cellH, mondayIndex, count = self:dayGridGeometry()
+    if my < top + 22 then return nil end -- above the grid (day-name header row)
+    for day = 1, count do
+        local x, y = self:dayCellRect(day)
+        if mx >= x and mx < x + cellW and my >= y and my < y + cellH then
+            return day
+        end
+    end
+    return nil
+end
+
+function TWRCalendarUI:onMouseDown(x, y)
+    if self.viewMode == "grid" then
+        local day = self:dayAtPosition(x, y)
+        if day then
+            self:enterDayDetail(day)
+            return
+        end
+    end
+    -- Not a day-cell click (or already in day-detail view) -- fall back
+    -- to the normal ISPanel drag-the-window behavior.
+    ISPanel.onMouseDown(self, x, y)
+end
+
+-- Builds the day-detail sub-view: existing marks for that day (rendered
+-- as-is, content-agnostic per this file's header) plus a free-text
+-- entry box and Save button, pen-gated exactly like the rest of this
+-- mechanic already is.
+function TWRCalendarUI:enterDayDetail(day)
+    self.viewMode = "dayDetail"
+    self.selectedDay = day
+
+    local canWrite = playerHasWritingTool()
+
+    local entryY = self.height - 96
+    local okEntry, entry = pcall(function()
+        return ISTextEntryBox:new("", 20, entryY, self.width - 40, 44)
+    end)
+    if okEntry and entry then
+        entry:initialise()
+        entry:instantiate()
+        safeCall(entry, "setMultipleLine", true)
+        safeCall(entry, "setEditable", canWrite)
+        self:addChild(entry)
+        self.noteEntry = entry
+    end
+
+    local okSave, saveBtn = pcall(function()
+        return ISButton:new(20, self.height - 46, 90, 24, canWrite and "Save" or "Need a pen", self, TWRCalendarUI.onSaveNote)
+    end)
+    if okSave and saveBtn then
+        saveBtn:initialise()
+        safeCall(saveBtn, "setEnable", canWrite)
+        self:addChild(saveBtn)
+        self.saveButton = saveBtn
+    end
+
+    local okBack, backBtn = pcall(function()
+        return ISButton:new(self.width - 90, self.height - 46, 70, 24, "Back", self, TWRCalendarUI.exitDayDetail)
+    end)
+    if okBack and backBtn then
+        backBtn:initialise()
+        self:addChild(backBtn)
+        self.backButton = backBtn
+    end
+end
+
+function TWRCalendarUI:exitDayDetail()
+    if self.viewMode ~= "dayDetail" then return end
+    if self.noteEntry then safeCall(self, "removeChild", self.noteEntry); self.noteEntry = nil end
+    if self.saveButton then safeCall(self, "removeChild", self.saveButton); self.saveButton = nil end
+    if self.backButton then safeCall(self, "removeChild", self.backButton); self.backButton = nil end
+    self.viewMode = "grid"
+    self.selectedDay = nil
+end
+
+function TWRCalendarUI:onSaveNote()
+    if not self.calendarItem or not self.selectedDay or not self.noteEntry then return end
+    if not playerHasWritingTool() then return end -- re-checked at save time, not just at panel-open time
+
+    local okText, text = safeCall(self.noteEntry, "getText")
+    if not okText or not text or text == "" then return end
+
+    local sourceId = nextPlayerNoteSourceId(self.calendarItem)
+    if not sourceId then return end
+
+    addMark(self.calendarItem, self.viewYear, self.viewMonth, self.selectedDay, sourceId, text)
+    -- Return to the grid view -- updateNavigationState-style refresh
+    -- happens implicitly since prerender() re-reads getMarksForDate()
+    -- every frame.
+    self:exitDayDetail()
+end
+
 function TWRCalendarUI:prerender()
     ISPanel.prerender(self)
+
+    if self.viewMode == "dayDetail" then
+        self:prerenderDayDetail()
+        return
+    end
 
     local title = TWR.Constants.MONTH_NAMES[self.viewMonth] .. " " .. tostring(self.viewYear)
     self:drawTextCentre(title, self.width / 2, 14, 0.15, 0.14, 0.12, 1.0, UIFont.Medium)
 
-    local left, top = 20, 50
-    local cellW = (self.width - 40) / 7
-    local cellH = 26
+    local left, top, cellW, cellH, mondayIndex, count = self:dayGridGeometry()
 
     for i, name in ipairs(DAY_NAMES) do
         self:drawTextCentre(name, left + (i - 1) * cellW + cellW / 2, top, 0.25, 0.22, 0.18, 1.0, UIFont.Small)
     end
 
     local today = getCurrentWorldDate()
-    local count = daysInMonth(self.viewYear, self.viewMonth)
-    -- Sakamoto's algorithm is Sunday-first (0=Sun); the grid here is
-    -- Monday-first (column 0 = Monday), so shift by 6 mod 7.
-    local firstWeekday = weekdayForDate(self.viewYear, self.viewMonth, 1)
-    local mondayIndex = (firstWeekday + 6) % 7
 
     for day = 1, count do
-        local cellIndex = mondayIndex + (day - 1)
-        local col = cellIndex % 7
-        local row = math.floor(cellIndex / 7)
-        local x = left + col * cellW
-        local y = top + 22 + row * cellH
+        local x, y = self:dayCellRect(day)
 
         local thisDate = { year = self.viewYear, month = self.viewMonth, day = day }
         local isPast = today and compareDates(thisDate, today) < 0
@@ -304,6 +426,22 @@ function TWRCalendarUI:prerender()
             if marks and #marks > 0 then
                 self:drawText("*", x + cellW - 14, y + 2, 0.16, 0.24, 0.55, 1.0, UIFont.Small)
             end
+        end
+    end
+end
+
+function TWRCalendarUI:prerenderDayDetail()
+    local title = TWR.Constants.MONTH_NAMES[self.viewMonth] .. " " .. tostring(self.selectedDay) .. ", " .. tostring(self.viewYear)
+    self:drawTextCentre(title, self.width / 2, 14, 0.15, 0.14, 0.12, 1.0, UIFont.Medium)
+
+    local marks = self.calendarItem and getMarksForDate(self.calendarItem, self.viewYear, self.viewMonth, self.selectedDay) or {}
+    local y = 40
+    if #marks == 0 then
+        self:drawText("(no notes yet)", 20, y, 0.35, 0.32, 0.28, 1.0, UIFont.Small)
+    else
+        for _, mark in ipairs(marks) do
+            self:drawText(tostring(mark.text), 20, y, 0.1, 0.1, 0.1, 1.0, UIFont.Small)
+            y = y + 18
         end
     end
 end
