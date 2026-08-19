@@ -422,8 +422,36 @@ local function runCalendarRecipeNote(p)
     local okInv, inventory = safeCall(p, "getInventory")
     if not okInv or not inventory then return end
 
+    -- DIAGNOSTIC 2026-08-19: item still not found via AddItem despite
+    -- the twr_items.txt "//" comment fix (confirmed correct on-disk,
+    -- no boot-time parse errors) -- checking ScriptManager directly to
+    -- see whether the item type genuinely never registered, or AddItem
+    -- itself has a separate lookup quirk. safeCall previously reported
+    -- "SUCCEEDED" even on failure since AddItem prints a native error
+    -- but doesn't raise a catchable Lua exception -- fixed to check the
+    -- returned item too, not just whether the pcall itself succeeded.
+    local okSM, scriptManager = pcall(function() return ScriptManager.instance end)
+    if okSM and scriptManager then
+        local okLookup, scriptItem = pcall(function() return scriptManager:getItem("ThoseWhoRemain.CalendarRecipeNote") end)
+        print("TWR.Debug: runCalendarRecipeNote -- ScriptManager:getItem lookup " .. (okLookup and (scriptItem and "FOUND" or "NIL/NOT FOUND") or "CALL FAILED: " .. tostring(scriptItem)))
+        local okAllItems, allItems = pcall(function() return scriptManager:getAllItems() end)
+        if okAllItems and allItems then
+            local matchCount = 0
+            for i = 0, allItems:size() - 1 do
+                local okName, fullName = pcall(function() return allItems:get(i):getFullName() end)
+                if okName and fullName and tostring(fullName):find("Calendar") then
+                    matchCount = matchCount + 1
+                    print("TWR.Debug: runCalendarRecipeNote -- ScriptManager item scan match: " .. tostring(fullName))
+                end
+            end
+            print("TWR.Debug: runCalendarRecipeNote -- ScriptManager item scan matches containing 'Calendar': " .. matchCount)
+        end
+    else
+        print("TWR.Debug: runCalendarRecipeNote -- ScriptManager.instance not accessible: " .. tostring(scriptManager))
+    end
+
     local okAdd, item = safeCall(inventory, "AddItem", "ThoseWhoRemain.CalendarRecipeNote")
-    print("TWR.Debug: runCalendarRecipeNote -- gave ThoseWhoRemain.CalendarRecipeNote to inventory " .. (okAdd and "SUCCEEDED -- right-click it and choose Read" or "FAILED"))
+    print("TWR.Debug: runCalendarRecipeNote -- gave ThoseWhoRemain.CalendarRecipeNote to inventory " .. (okAdd and item and "SUCCEEDED -- right-click it and choose Read" or "FAILED (okAdd=" .. tostring(okAdd) .. " item=" .. tostring(item) .. ")"))
 end
 
 -- Testing convenience only -- gives the exact MakePaperCalendar
