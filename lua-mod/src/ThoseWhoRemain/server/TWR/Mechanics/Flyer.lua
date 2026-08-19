@@ -137,6 +137,20 @@ function Flyer.buildItem(payload)
         text = payload.text or "",
     }
 
+    -- FOUND 2026-08-19: live test showed the item's actual in-world/
+    -- inventory NAME still displaying native content ("Flier: Mccoy
+    -- Loggin Co") even after the printMedia content-reassertion fix --
+    -- item:getName() is a completely separate field from
+    -- modData.printMedia.title (one is the inventory/tooltip label
+    -- native OnCreate sets via setName()/setCustomName(), the other is
+    -- the read-window's header), and this module never touched it.
+    -- Matches Readable.buildItem's existing setName/setCustomName
+    -- pattern exactly.
+    if payload.displayName then
+        safeCall(item, "setName", payload.displayName)
+        safeCall(item, "setCustomName", true)
+    end
+
     if payload.contentId then modData.TWR_contentId = payload.contentId end
     if payload.discoveryKey then modData.TWR_discoveryKey = payload.discoveryKey end
 
