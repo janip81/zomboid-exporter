@@ -220,34 +220,34 @@ func main() {
 	time.Sleep(200 * time.Millisecond) // let deferred Discord/MQTT/Postgres cleanup finish
 }
 
-// newMQTTHandler returns an MQTT message handler that posts each event to
-// channelID as a Discord message, then checks it against milestones (see
-// milestones.go) and posts any newly-hit ones as a separate, distinct
-// message. If channelID is empty, events are only logged -- lets
-// --mqtt-broker be tested without a channel configured yet. world_stats is
-// deliberately never posted: it's periodic housekeeping telemetry with no
-// player attached, not a notable live event.
-var curatorMQTTSkipEventTypes = map[string]bool{
-	// High-frequency telemetry from characterstats.go's aggregate
-	// tracking (movement/driving flush every 0.1km, streak heartbeats
-	// every in-game hour, max_speed on every new high) -- none of these
-	// have a bespoke formatEvent case, so without this skip they'd spam
-	// the channel with raw JSON dumps (formatEvent's fallback) at a rate
-	// that drowns out genuinely notable events like kills/deaths. Still
-	// fully captured in Postgres via the exporter's own ingestion path --
-	// this only affects the live Discord announcement feed.
-	"movement_distance": true,
-	"driving_distance":  true,
-	"max_speed":         true,
-	"indoor_streak":     true,
-	"outdoor_streak":    true,
-	"vehicle_streak":    true,
+// newMQTTHandler returns an MQTT message handler that checks every non-
+// world_stats event against milestones (see milestones.go), posting any
+// newly-hit ones as their own message, and separately posts a raw
+// per-event announcement ONLY for event types in
+// curatorMQTTAnnounceEventTypes. If channelID is empty, events are only
+// logged -- lets --mqtt-broker be tested without a channel configured
+// yet. world_stats is deliberately never posted or milestone-checked:
+// it's periodic housekeeping telemetry with no player attached, not a
+// notable live event.
+//
+// Deliberately an ALLOWLIST, not a skip-list (2026-08-19 restructure,
+// Jani's explicit "deaths is ok... and milestones, but not everytime we
+// sleep/read/walk/kill a zombie etc" framing) -- an allowlist means any
+// future event type defaults to silent-but-still-milestone-tracked
+// instead of defaulting to spamming a raw JSON dump the moment someone
+// adds a new event without remembering to skip-list it (exactly what
+// happened to `injury`/`pill`: no bespoke formatEvent case AND never
+// added to the old skip-list, so they were still hitting formatEvent's
+// raw-JSON fallback despite the movement/streak cleanup earlier this
+// session).
+var curatorMQTTAnnounceEventTypes = map[string]bool{
+	"death": true,
 }
 
 func newMQTTHandler(session *discordgo.Session, channelID string, deps botDeps) mqtt.MessageHandler {
 	return func(client mqtt.Client, msg mqtt.Message) {
 		eventType := eventTypeFromTopic(msg.Topic())
-		if eventType == "world_stats" || curatorMQTTSkipEventTypes[eventType] {
+		if eventType == "world_stats" {
 			return
 		}
 
@@ -257,12 +257,19 @@ func newMQTTHandler(session *discordgo.Session, channelID string, deps botDeps) 
 			return
 		}
 
-		text := formatEvent(eventType, fields)
-		slog.Info("mqtt event received", "topic", msg.Topic(), "text", text)
-
-		if channelID != "" {
-			if _, err := session.ChannelMessageSend(channelID, text); err != nil {
-				slog.Error("failed to post event to Discord", "channelID", channelID, "err", err)
+		// Milestones are tracked for EVERY event type regardless of
+		// whether the raw per-event announcement below is shown --
+		// previously the skip-list `return`ed before this ran at all,
+		// silently breaking movement/driving/streak milestones (Walk 10
+		// Miles, Drive 100 km, 6h Outdoors Straight, etc.) for any event
+		// type that was skip-listed.
+		if curatorMQTTAnnounceEventTypes[eventType] {
+			text := formatEvent(eventType, fields)
+			slog.Info("mqtt event received", "topic", msg.Topic(), "text", text)
+			if channelID != "" {
+				if _, err := session.ChannelMessageSend(channelID, text); err != nil {
+					slog.Error("failed to post event to Discord", "channelID", channelID, "err", err)
+				}
 			}
 		}
 
