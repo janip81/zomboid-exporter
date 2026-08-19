@@ -1,24 +1,38 @@
--- TWR.Context.Flyer -- client-side hook that lets a TWR flyer's
--- optional location_ref use vanilla's own, completely unmodified
--- reveal-on-map button (client/PZAPI/ui/organisms/PrintMedia.lua),
--- instead of building any custom UI.
+-- TWR.Context.Flyer -- client-side hook wrapping
+-- shared/TimedActions/ISReadABook.lua's displayPrintMedia() (the single
+-- call site that opens the vanilla read window), for two purposes:
 --
--- SOURCE-CONFIRMED (antagonist/tests/vanilla-flyer-source-trace.md):
--- PrintMedia's init() only wires up a reveal button when
--- PrintMediaDefinitions.MiscDetails[self.media_id] exists (real vanilla
--- table, shared/PrintMedia/PrintMediaDefinitions.lua, normally only
--- populated with vanilla's own hardcoded lore locations). There is no
--- Events.* hook that fires before that window is constructed, so the
--- only way to register a DB-authored TWR flyer's location there is to
--- wrap shared/TimedActions/ISReadABook.lua's own displayPrintMedia() --
--- the single call site that opens the window -- and populate the entry
--- from the flyer item's own (server-validated, see
--- server/TWR/Mechanics/Flyer.lua) TWR_locationRef modData right before
--- calling through to the real, unmodified original function. Vanilla's
--- own button code then runs completely untouched: same
--- WorldMapVisited.getInstance():setKnownInSquares() + sendClientCommand
--- call TWR.Mechanics.MapReveal already uses, same map-centering/zoom
--- behavior, same UI.
+-- 1. CONTENT RE-ASSERTION -- ROOT-CAUSED 2026-08-18. Live test showed a
+--    TWR dummy flyer displaying real vanilla ambient flyer content
+--    ("Lowry Court", a real PrintMediaDefinitions.MiscDetails entry)
+--    instead of the authored dummy text, confirmed via the Discord
+--    read-feed announcement. Something native re-assigns real flyer
+--    content at READ time (not just at instanceItem() time), clobbering
+--    whatever server/TWR/Mechanics/Flyer.lua wrote to modData.printMedia
+--    before the window opens. Fix: buildItem() also stashes the
+--    authored title/text into TWR_flyerContent, a field name no native
+--    code has any reason to touch; this hook force-writes
+--    modData.printMedia.title/.text from TWR_flyerContent immediately
+--    before calling the real, unmodified displayPrintMedia(), so our
+--    content always wins regardless of when/how the native
+--    reassignment happens.
+--
+-- 2. LOCATION-REVEAL WIRING -- lets a TWR flyer's optional location_ref
+--    use vanilla's own, completely unmodified reveal-on-map button
+--    (client/PZAPI/ui/organisms/PrintMedia.lua) instead of building any
+--    custom UI. SOURCE-CONFIRMED (antagonist/tests/
+--    vanilla-flyer-source-trace.md): PrintMedia's init() only wires up
+--    a reveal button when PrintMediaDefinitions.MiscDetails[self.media_id]
+--    exists (real vanilla table, shared/PrintMedia/
+--    PrintMediaDefinitions.lua, normally only populated with vanilla's
+--    own hardcoded lore locations) -- there is no Events.* hook that
+--    fires before that window is constructed, so this same
+--    displayPrintMedia() wrap is also the only place to populate that
+--    entry from the flyer item's own (server-validated) TWR_locationRef
+--    modData. Vanilla's own button code then runs completely untouched:
+--    same WorldMapVisited.getInstance():setKnownInSquares() +
+--    sendClientCommand call TWR.Mechanics.MapReveal already uses, same
+--    map-centering/zoom behavior, same UI.
 --
 -- No require(), no cached cross-file locals -- see TWR.Constants'
 -- header for why.
@@ -44,19 +58,22 @@ local function validateRect(loc)
     return x1, y1, x2, y2
 end
 
-local function registerFlyerLocationIfNeeded(item)
-    if not item or not item.hasModData or not item:hasModData() then return end
-    local modData = item:getModData()
+-- Overwrites modData.printMedia.title/.text from TWR_flyerContent if
+-- present, so whatever native content-reassignment happens between
+-- buildItem() and this read is discarded in favor of our authored
+-- content. Idempotent -- safe to call on every read.
+local function reassertFlyerContent(modData)
+    local flyerContent = modData.TWR_flyerContent
+    if not flyerContent then return end
+    modData.printMedia = modData.printMedia or {}
+    modData.printMedia.id = modData.printMedia.id or ("twr_fallback_" .. tostring(ZombRand and ZombRand(1000000) or 0))
+    modData.printMedia.title = flyerContent.title
+    modData.printMedia.text = flyerContent.text
+end
+
+local function registerFlyerLocationIfNeeded(modData)
     local printMedia = modData.printMedia
     local locationRef = modData.TWR_locationRef
-    -- DIAGNOSTIC 2026-08-18: live test reported wrong/random content on
-    -- read -- logging exactly what the CLIENT sees in this item's
-    -- modData at read-time, to tell apart a replication/sync issue
-    -- from a server-side or getText()-rendering one. Remove once
-    -- root-caused.
-    print("TWR: Context.Flyer -- displayPrintMedia hook fired -- printMedia="
-        .. tostring(printMedia and ("id=" .. tostring(printMedia.id) .. " title=" .. tostring(printMedia.title) .. " text=" .. tostring(printMedia.text)) or "nil")
-        .. " locationRef=" .. tostring(locationRef and (locationRef.x1 .. "," .. locationRef.y1 .. "-" .. locationRef.x2 .. "," .. locationRef.y2) or "nil"))
     if not printMedia or not printMedia.id or not locationRef then return end
     if PrintMediaDefinitions.MiscDetails[printMedia.id] then return end -- already registered (idempotent, matches re-reads)
 
@@ -71,14 +88,21 @@ local function registerFlyerLocationIfNeeded(item)
     }
 end
 
+local function onDisplayPrintMedia(item)
+    if not item or not item.hasModData or not item:hasModData() then return end
+    local modData = item:getModData()
+    reassertFlyerContent(modData)
+    registerFlyerLocationIfNeeded(modData)
+end
+
 local function init()
     if TWR.Context.flyerHookInstalled then return end -- guards against double-wrap on an F11 reload
 
     local originalDisplayPrintMedia = ISReadABook.displayPrintMedia
     ISReadABook.displayPrintMedia = function(self)
-        local ok, err = pcall(registerFlyerLocationIfNeeded, self.item)
+        local ok, err = pcall(onDisplayPrintMedia, self.item)
         if not ok then
-            print("TWR: Context.Flyer -- registerFlyerLocationIfNeeded failed: " .. tostring(err))
+            print("TWR: Context.Flyer -- onDisplayPrintMedia failed: " .. tostring(err))
         end
         return originalDisplayPrintMedia(self)
     end

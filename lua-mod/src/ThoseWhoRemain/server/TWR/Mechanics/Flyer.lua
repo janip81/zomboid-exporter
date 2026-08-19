@@ -109,26 +109,33 @@ function Flyer.buildItem(payload)
     -- available, falling back to a per-item unique id otherwise.
     local mediaId = "twr_" .. tostring(payload.contentId or payload.discoveryKey or item:getID())
 
-    -- DIAGNOSTIC 2026-08-18: live test reported "random flyer every
-    -- time" with no sign of this module's own dummy content -- logging
-    -- exactly what buildItem() writes/returns to tell apart a server-
-    -- side bug (this table never getting set/kept) from a client-side
-    -- one (native OnCreate/ItemCodeOnCreate.onCreateFlier re-picking
-    -- vanilla's own random ambient flyer content after this runs, or a
-    -- getText() rendering issue). Remove once root-caused.
-    local okFullType, fullType = safeCall(item, "getFullType")
-    local okPreMD, preExistingPrintMedia = safeCall(item, "getModData")
-    print("TWR.Mechanics.Flyer: buildItem -- instanced item fullType=" .. tostring(okFullType and fullType or "?")
-        .. " preExistingPrintMedia=" .. tostring(okPreMD and preExistingPrintMedia and preExistingPrintMedia.printMedia ~= nil))
-
+    -- ROOT-CAUSED 2026-08-18: live test confirmed via the Discord read-
+    -- feed announcement ("read Flier: Lowry Court") that the item ends
+    -- up showing one of VANILLA's own real, pre-authored ambient flyer
+    -- entries (PrintMediaDefinitions.MiscDetails.lowrycourt) instead of
+    -- this module's dummy content -- something native re-assigns real
+    -- flyer content at READ time (not just at instanceItem() time),
+    -- clobbering whatever this function writes to modData.printMedia
+    -- before the player ever gets to Inspect it. Writing the authored
+    -- content into a second, TWR-only-namespaced field
+    -- (TWR_flyerContent) that no native code has any reason to touch,
+    -- separate from modData.printMedia -- the client-side hook
+    -- (client/TWR/Context/Flyer.lua) re-asserts modData.printMedia from
+    -- this field immediately before the vanilla read window opens,
+    -- guaranteeing our content wins regardless of when/how the native
+    -- reassignment happens. modData.printMedia is still set here too --
+    -- still required at context-menu-build time (before any read
+    -- action starts) for doPrintMediaMenu's tests.isPrintMedia gate to
+    -- produce the literal "Inspect" option in the first place.
     modData.printMedia = {
         id = mediaId,
         title = payload.displayName or "Flyer",
         text = payload.text or "",
     }
-    print("TWR.Mechanics.Flyer: buildItem -- wrote printMedia id=" .. mediaId
-        .. " title=" .. tostring(modData.printMedia.title)
-        .. " text=" .. tostring(modData.printMedia.text))
+    modData.TWR_flyerContent = {
+        title = payload.displayName or "Flyer",
+        text = payload.text or "",
+    }
 
     if payload.contentId then modData.TWR_contentId = payload.contentId end
     if payload.discoveryKey then modData.TWR_discoveryKey = payload.discoveryKey end
