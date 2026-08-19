@@ -58,16 +58,20 @@ local function validateRect(loc)
     return x1, y1, x2, y2
 end
 
--- Overwrites modData.printMedia.title/.text from TWR_flyerContent if
--- present, so whatever native content-reassignment happens between
+-- Overwrites modData.printMedia.title/.info/.text from TWR_flyerContent
+-- if present, so whatever native content-reassignment happens between
 -- buildItem() and this read is discarded in favor of our authored
--- content. Idempotent -- safe to call on every read.
+-- content. .info is the rich main-window body (win.data) -- a separate
+-- field from .text (the plain-text fallback panel, win.textData) that
+-- an earlier round of this fix missed, leaving the main window blank.
+-- Idempotent -- safe to call on every read.
 local function reassertFlyerContent(modData)
     local flyerContent = modData.TWR_flyerContent
     if not flyerContent then return end
     modData.printMedia = modData.printMedia or {}
     modData.printMedia.id = modData.printMedia.id or ("twr_fallback_" .. tostring(ZombRand and ZombRand(1000000) or 0))
     modData.printMedia.title = flyerContent.title
+    modData.printMedia.info = flyerContent.info
     modData.printMedia.text = flyerContent.text
 end
 

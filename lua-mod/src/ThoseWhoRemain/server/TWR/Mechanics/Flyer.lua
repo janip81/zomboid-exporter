@@ -127,13 +127,27 @@ function Flyer.buildItem(payload)
     -- still required at context-menu-build time (before any read
     -- action starts) for doPrintMediaMenu's tests.isPrintMedia gate to
     -- produce the literal "Inspect" option in the first place.
+    -- FOUND 2026-08-19: live test showed the Inspect window opening but
+    -- with an empty main body -- displayPrintMedia() actually reads TWO
+    -- separate content fields: win.data (from printMedia.info, the rich
+    -- main-window body, texture-directive-parsed) and win.textData
+    -- (from printMedia.text, a plain-text fallback reachable via its
+    -- own button). This module only ever set .text, leaving .info nil
+    -- -> getText(nil) -> empty main body, while the fallback button
+    -- correctly showed our text. Setting .info to the same plain body
+    -- text fixes the main window -- a plain string with no "<...>"
+    -- texture-directive syntax renders as literal text per
+    -- startLoadingPrintMediaTextures()'s own parsing (directives are
+    -- opt-in, not required).
     modData.printMedia = {
         id = mediaId,
         title = payload.displayName or "Flyer",
+        info = payload.text or "",
         text = payload.text or "",
     }
     modData.TWR_flyerContent = {
         title = payload.displayName or "Flyer",
+        info = payload.text or "",
         text = payload.text or "",
     }
 
