@@ -17,25 +17,25 @@ module Base
 		}
 	}
 
-	// "Make Paper Calendar" -- antagonist/recipes/calendar.md's design,
-	// first real production recipe learned from a readable clue.
-	// Ingredient IDs SOURCE-CONFIRMED against installed B42.20.3
-	// (buildid 24775771), not the doc's own unverified candidates:
-	//   Base.Notebook   -- media/scripts/generated/items/literature.txt
-	//   Base.Scotchtape -- media/scripts/generated/items/normal.txt
-	//   Base.Pen        -- media/scripts/generated/items/weapon.txt,
-	//                      Tags include base:pen (confirmed)
-	//   Base.Scissors   -- media/scripts/generated/items/weapon.txt
-	// Syntax modeled on the real vanilla MakeBlankID recipe
-	// (media/scripts/generated/recipes/recipes.txt) -- the closest real
-	// precedent combining a consumed tape item with a mode:keep tool
-	// referenced by tag. category = Carpentry matches this project's
-	// own already-confirmed-live fix for AntagonistProbeTestRecipe
-	// above (a missing category was the real root cause of recipes not
-	// appearing in the crafting menu, see server/TWR/Mechanics/
-	// Recipe.lua's header) -- MakeBlankID itself has no category field,
-	// but trusting our own live-verified precedent over one vanilla
-	// example that may rely on something else we haven't traced.
+}
+
+// ROOT-CAUSED 2026-08-19: MakePaperCalendar never registered at all
+// (confirmed via /home/steam/Zomboid/Crafting/AllRecipes.txt on the
+// live pod -- AntagonistProbeTestRecipe appears there, MakePaperCalendar
+// never did, in every attempt including after renaming/re-commenting
+// the ITEM that references it -- proving the recipe itself was the
+// broken half, not the item). The one remaining structural difference
+// from the proven-working AntagonistProbeTestRecipe/vanilla MakeBlankID
+// precedent: this recipe's `outputs` references ThoseWhoRemain.Calendar
+// while the recipe itself lived under `module Base` -- moved to
+// `module ThoseWhoRemain` (matching where its output item is actually
+// defined) as the fix. Ingredient IDs SOURCE-CONFIRMED against installed
+// B42.20.3 (buildid 24775771): Base.Notebook (literature.txt),
+// Base.Scotchtape (normal.txt), Base.Pen (weapon.txt, Tags include
+// base:pen), Base.Scissors (weapon.txt). Syntax modeled on the real
+// vanilla MakeBlankID recipe (media/scripts/generated/recipes/recipes.txt).
+module ThoseWhoRemain
+{
 	craftRecipe MakePaperCalendar
 	{
 		time = 400,

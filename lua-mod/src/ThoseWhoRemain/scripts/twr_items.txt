@@ -18,7 +18,8 @@ module ThoseWhoRemain
 	}
 
 	// Production recipe-note carrier for MakePaperCalendar (see
-	// twr_recipes.txt and antagonist/recipes/calendar.md).
+	// twr_recipes.txt, module ThoseWhoRemain, and antagonist/recipes/
+	// calendar.md).
 	item PaperCalendarNote
 	{
 		DisplayCategory = Literature,
