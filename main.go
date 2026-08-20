@@ -104,12 +104,27 @@ func (c *collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.statusAge
 }
 
+// readBridgeFile reads a PanelBridge output file, preferring the
+// ".txt"-suffixed path. PanelBridge.WRITE_SUFFIX (PanelBridge.lua) forces
+// every non-panel-owned write through a ".txt" suffix -- Build 42's Lua
+// sandbox only allows getFileWriter on .txt paths. status.json/startup.json
+// are never actually written at their plain names by any current
+// PanelBridge version; falling back to the plain name only covers a
+// hypothetically older mod build that predates the .txt restriction.
+func readBridgeFile(dataPath, serverName, filename string) ([]byte, error) {
+	base := filepath.Join(dataPath, "Lua", "panelbridge", serverName)
+	raw, err := os.ReadFile(filepath.Join(base, filename+".txt"))
+	if err == nil {
+		return raw, nil
+	}
+	return os.ReadFile(filepath.Join(base, filename))
+}
+
 func (c *collector) Collect(ch chan<- prometheus.Metric) {
 	sn := c.serverName
 	statusPath := filepath.Join(c.dataPath, "Lua", "panelbridge", sn, "status.json")
-	startupPath := filepath.Join(c.dataPath, "Lua", "panelbridge", sn, "startup.json")
 
-	raw, err := os.ReadFile(statusPath)
+	raw, err := readBridgeFile(c.dataPath, sn, "status.json")
 	if err != nil {
 		slog.Warn("cannot read status file", "path", statusPath, "err", err)
 		ch <- prometheus.MustNewConstMetric(c.up, prometheus.GaugeValue, 0, sn)
@@ -154,7 +169,7 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.playerInfo, prometheus.GaugeValue, 1, sn, p)
 	}
 
-	raw, err = os.ReadFile(startupPath)
+	raw, err = readBridgeFile(c.dataPath, sn, "startup.json")
 	if err == nil {
 		var su startupFile
 		if json.Unmarshal(raw, &su) == nil && su.StartTime > 0 {
