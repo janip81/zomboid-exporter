@@ -412,6 +412,20 @@ local function runRecipeNote(p)
     local okAdd, item = safeCall(inventory, "AddItem", "ThoseWhoRemain.RecipeNote")
     if okAdd and item then
         pcall(function() sendAddItemToContainer(inventory, item) end)
+        -- ROOT-CAUSED 2026-08-19: the item's script-level `LearnedRecipes`
+        -- field does NOT teach anything on read -- SOURCE-CONFIRMED,
+        -- shared/TimedActions/ISReadABook.lua:complete() only reads that
+        -- list to special-case the Herbalist trait (line ~333); the real
+        -- grant path a few lines later is
+        -- `self.character:learnRecipe(self.item:getModData().learnedRecipe)`
+        -- -- a single-recipe MODDATA field, completely separate from the
+        -- script property. Vanilla's complete() already does its own
+        -- sendSyncPlayerFields(0x00000007) right after, so no extra sync
+        -- call is needed here once modData.learnedRecipe is set.
+        local okData, modData = safeCall(item, "getModData")
+        if okData and modData then
+            modData.learnedRecipe = "AntagonistProbeTestRecipe"
+        end
     end
     print("TWR.Debug: runRecipeNote -- gave ThoseWhoRemain.RecipeNote to inventory " .. (okAdd and item and "SUCCEEDED -- right-click it and choose Read" or "FAILED"))
 end
@@ -425,18 +439,32 @@ local function runCalendarRecipeNote(p)
     local okInv, inventory = safeCall(p, "getInventory")
     if not okInv or not inventory then return end
 
-    -- ROOT-CAUSED 2026-08-19: ThoseWhoRemain.CalendarRecipeNote never
-    -- registered as an item type at all (confirmed via a ScriptManager
-    -- full item-list scan finding zero matches, despite syntactically
-    -- correct, on-disk, no-parse-error content identical in structure
-    -- to the known-working RecipeNote item) -- root cause undetermined,
-    -- but renaming to PaperCalendarNote + dropping the long multi-line
-    -- "//" doc-comment immediately above the item block (replaced with
-    -- one short line) as a two-pronged empirical fix. If this works we
-    -- won't know for certain which of the two changes mattered.
+    -- ROOT-CAUSED 2026-08-19 (item never found): two separate module
+    -- blocks in one .txt file only registered the first -- split
+    -- MakePaperCalendar into its own twr_recipes_calendar.txt. THEN
+    -- found a second, unrelated bug: a "//" comment immediately inside
+    -- a module body (between two item{} blocks) is not safely parsed
+    -- ("unknown script object '//'" WARN) and eats the next item
+    -- declaration -- removed the in-block comment above this item in
+    -- twr_items.txt. Both real bugs, both fixed.
+    --
+    -- ROOT-CAUSED 2026-08-19 (item found, but reading it taught
+    -- nothing): the item's script-level `LearnedRecipes` field does NOT
+    -- grant anything on read -- SOURCE-CONFIRMED,
+    -- shared/TimedActions/ISReadABook.lua:complete() only reads that
+    -- list to special-case the Herbalist trait; the real grant path is
+    -- `self.character:learnRecipe(self.item:getModData().learnedRecipe)`,
+    -- a single-recipe MODDATA field entirely separate from the script
+    -- property. Vanilla's complete() already calls
+    -- sendSyncPlayerFields(0x00000007) right after, so no extra sync
+    -- call is needed here once modData.learnedRecipe is set.
     local okAdd, item = safeCall(inventory, "AddItem", "ThoseWhoRemain.PaperCalendarNote")
     if okAdd and item then
         pcall(function() sendAddItemToContainer(inventory, item) end)
+        local okData, modData = safeCall(item, "getModData")
+        if okData and modData then
+            modData.learnedRecipe = "MakePaperCalendar"
+        end
     end
     print("TWR.Debug: runCalendarRecipeNote -- gave ThoseWhoRemain.PaperCalendarNote to inventory " .. (okAdd and item and "SUCCEEDED -- right-click it and choose Read" or "FAILED (okAdd=" .. tostring(okAdd) .. " item=" .. tostring(item) .. ")"))
 end

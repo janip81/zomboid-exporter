@@ -38,3 +38,12 @@ def build_package(root):
         translate_dest.mkdir(parents=True, exist_ok=True)
         for f in lang_dir.glob("*.json"):
             shutil.copy2(f, translate_dest / f.name)
+
+    textures_src = SRC / "textures"
+    if textures_src.exists():
+        textures_dest = root / "42" / "media" / "textures"
+        for f in textures_src.rglob("*.png"):
+            rel = f.relative_to(textures_src)
+            dest = textures_dest / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dest)

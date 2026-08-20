@@ -17,9 +17,6 @@ module ThoseWhoRemain
 		LearnedRecipes = AntagonistProbeTestRecipe,
 	}
 
-	// Production recipe-note carrier for MakePaperCalendar (see
-	// twr_recipes.txt, module ThoseWhoRemain, and antagonist/recipes/
-	// calendar.md).
 	item PaperCalendarNote
 	{
 		DisplayCategory = Literature,

@@ -145,6 +145,49 @@ local function addMark(item, year, month, day, sourceId, text)
 end
 TWR.UI.CalendarAddMark = addMark -- exposed for other callers (e.g. a future DB/quest-driven annotation) to call directly
 
+-- Overwrites an existing mark's text in place (editing, as opposed to
+-- addMark's create-only/dedup-by-sourceId behavior).
+local function setMarkText(item, year, month, day, sourceId, text)
+    local data = ensureCalendarData(item)
+    if not data then return false end
+    local key = dateKey(year, month, day)
+    local marks = data.marks[key]
+    if not marks then return false end
+    for _, existing in ipairs(marks) do
+        if existing.sourceId == sourceId then
+            existing.text = text
+            safeCall(item, "syncItemFields")
+            return true
+        end
+    end
+    return false
+end
+
+local function removeMark(item, year, month, day, sourceId)
+    local data = ensureCalendarData(item)
+    if not data then return false end
+    local key = dateKey(year, month, day)
+    local marks = data.marks[key]
+    if not marks then return false end
+    for i, existing in ipairs(marks) do
+        if existing.sourceId == sourceId then
+            table.remove(marks, i)
+            safeCall(item, "syncItemFields")
+            return true
+        end
+    end
+    return false
+end
+
+-- Only player-typed notes (this UI's own addMark() calls) are
+-- editable/deletable -- a future DB/quest-authored mark (any other
+-- sourceId prefix) stays a permanent record, matching this file's own
+-- "content-agnostic rendering" design note above.
+local PLAYER_NOTE_PREFIX = "player_note_"
+local function isPlayerNote(sourceId)
+    return type(sourceId) == "string" and sourceId:sub(1, #PLAYER_NOTE_PREFIX) == PLAYER_NOTE_PREFIX
+end
+
 -- Monotonic per-item counter so multiple player-typed notes on
 -- different (or the same) days never collide on addMark()'s
 -- sourceId-based dedup key -- deterministic, no timestamp/randomness
@@ -177,6 +220,20 @@ local function playerHasWritingTool()
 end
 TWR.UI.CalendarPlayerHasWritingTool = playerHasWritingTool -- exposed for the future manual-note UI to call
 
+-- Loaded once at file-load time. Aged-paper background art, cropped
+-- from ChatGPT-generated concept art per
+-- antagonist/tests/calendar-flyer-art-asset-request.md (see that
+-- file's history for the source sheet -- this is a hand-cropped clean
+-- region, not the full mockup, since the mockup's own baked-in grid/
+-- nav-arrow chrome would conflict with the grid/text this file draws
+-- itself). Falls back to the flat backgroundColor fill below if the
+-- texture is ever missing (e.g. a stripped test build).
+local CALENDAR_BG_TEXTURE = nil
+do
+    local ok, tex = pcall(function() return getTexture("media/textures/TWR/calendar_bg.png") end)
+    if ok and tex then CALENDAR_BG_TEXTURE = tex end
+end
+
 TWRCalendarUI = ISPanel:derive("TWRCalendarUI")
 
 function TWRCalendarUI:new(x, y, width, height, calendarItem)
@@ -185,8 +242,8 @@ function TWRCalendarUI:new(x, y, width, height, calendarItem)
     self.__index = self
     o.moveWithMouse = true
     o.calendarItem = calendarItem
-    o.backgroundColor = { r = 0.88, g = 0.83, b = 0.70, a = 1.0 }
-    o.borderColor = { r = 0.2, g = 0.2, b = 0.2, a = 1.0 }
+    o.backgroundColor = { r = 0.93, g = 0.88, b = 0.74, a = 1.0 }
+    o.borderColor = { r = 0.35, g = 0.26, b = 0.16, a = 1.0 }
 
     -- "grid" (month view, default) or "dayDetail" (a single day's notes
     -- + free-text entry, per calendar-manual-marking-decision.md).
@@ -267,7 +324,20 @@ function TWRCalendarUI:onClose()
     self:removeFromUIManager()
 end
 
-local DAY_NAMES = { "MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN" }
+-- Sunday-first, matching the printed weekday header baked into
+-- media/textures/TWR/calendar_bg.png (cropped from ChatGPT-generated
+-- art, antagonist/tests/calendar-flyer-art-asset-request.md) -- was
+-- Monday-first before that texture existed. Grid position/cell size
+-- below are also hand-calibrated against that same image so our
+-- dynamically-drawn grid lines land close to the printed ones for the
+-- common 5-row-month case; months needing 6 rows (Sakamoto math, a
+-- 31-day month starting on Saturday) will draw slightly past the
+-- printed grid's bottom edge, into the printed "NOTES" area -- a known
+-- cosmetic gap the fixed-row artwork can't avoid, not a functional bug.
+-- Documents calendar_bg.png's baked-in header order (not drawn by this
+-- file -- see prerender()); kept in sync with startIndex's Sunday-
+-- first math in dayGridGeometry() below.
+local DAY_NAMES = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" }
 
 -- Shared grid geometry -- used by both prerender() (drawing) and
 -- dayAtPosition() (click hit-testing) so the two can never drift apart.
@@ -276,23 +346,22 @@ function TWRCalendarUI:dayGridGeometry()
     local cellW = (self.width - 40) / 7
     local cellH = 26
     local count = daysInMonth(self.viewYear, self.viewMonth)
-    -- Sakamoto's algorithm is Sunday-first (0=Sun); the grid here is
-    -- Monday-first (column 0 = Monday), so shift by 6 mod 7.
-    local firstWeekday = weekdayForDate(self.viewYear, self.viewMonth, 1)
-    local mondayIndex = (firstWeekday + 6) % 7
-    return left, top, cellW, cellH, mondayIndex, count
+    -- weekdayForDate() is already Sunday-first (0=Sun), matching the
+    -- grid's own column 0 = Sunday -- no shift needed.
+    local startIndex = weekdayForDate(self.viewYear, self.viewMonth, 1)
+    return left, top, cellW, cellH, startIndex, count
 end
 
 function TWRCalendarUI:dayCellRect(day)
-    local left, top, cellW, cellH, mondayIndex = self:dayGridGeometry()
-    local cellIndex = mondayIndex + (day - 1)
+    local left, top, cellW, cellH, startIndex = self:dayGridGeometry()
+    local cellIndex = startIndex + (day - 1)
     local col = cellIndex % 7
     local row = math.floor(cellIndex / 7)
     return left + col * cellW, top + 22 + row * cellH, cellW, cellH
 end
 
 function TWRCalendarUI:dayAtPosition(mx, my)
-    local left, top, cellW, cellH, mondayIndex, count = self:dayGridGeometry()
+    local left, top, cellW, cellH, startIndex, count = self:dayGridGeometry()
     if my < top + 22 then return nil end -- above the grid (day-name header row)
     for day = 1, count do
         local x, y = self:dayCellRect(day)
@@ -310,10 +379,50 @@ function TWRCalendarUI:onMouseDown(x, y)
             self:enterDayDetail(day)
             return
         end
+    elseif self.viewMode == "dayDetail" then
+        local mark = self:dayDetailMarkAtPosition(x, y)
+        if mark then
+            self:beginEditMark(mark)
+            return
+        end
     end
-    -- Not a day-cell click (or already in day-detail view) -- fall back
-    -- to the normal ISPanel drag-the-window behavior.
+    -- Not a day-cell/note-row click -- fall back to the normal ISPanel
+    -- drag-the-window behavior.
     ISPanel.onMouseDown(self, x, y)
+end
+
+-- Shared geometry for day-detail note rows -- mirrors dayCellRect's
+-- "one function, used by both drawing and hit-testing" pattern so they
+-- can never drift apart. Row order/spacing must match
+-- prerenderDayDetail()'s own drawing loop exactly.
+function TWRCalendarUI:dayDetailMarkRect(index)
+    return 20, 40 + (index - 1) * 18, self.width - 40, 16
+end
+
+function TWRCalendarUI:dayDetailMarkAtPosition(mx, my)
+    if not self.calendarItem or not self.selectedDay then return nil end
+    local marks = getMarksForDate(self.calendarItem, self.viewYear, self.viewMonth, self.selectedDay)
+    for i, mark in ipairs(marks) do
+        if isPlayerNote(mark.sourceId) then
+            local x, y, w, h = self:dayDetailMarkRect(i)
+            if mx >= x and mx < x + w and my >= y and my < y + h then
+                return mark
+            end
+        end
+    end
+    return nil
+end
+
+function TWRCalendarUI:beginEditMark(mark)
+    if not playerHasWritingTool() then return end
+    self.editingMarkSourceId = mark.sourceId
+    if self.noteEntry then safeCall(self.noteEntry, "setText", mark.text) end
+    self:updateDeleteButtonState()
+end
+
+function TWRCalendarUI:updateDeleteButtonState()
+    if not self.deleteButton then return end
+    safeCall(self.deleteButton, "setEnable", playerHasWritingTool() and self.editingMarkSourceId ~= nil)
 end
 
 -- Builds the day-detail sub-view: existing marks for that day (rendered
@@ -323,6 +432,13 @@ end
 function TWRCalendarUI:enterDayDetail(day)
     self.viewMode = "dayDetail"
     self.selectedDay = day
+    self.editingMarkSourceId = nil
+
+    -- FIX: the panel-level Close button (bottom-center) sat almost
+    -- exactly on top of the day-detail action row (Save/Delete/Back),
+    -- both being anchored near self.height -- hide it while in this
+    -- view; Back already returns to the grid where Close reappears.
+    safeCall(self.closeButton, "setVisible", false)
 
     local canWrite = playerHasWritingTool()
 
@@ -349,6 +465,16 @@ function TWRCalendarUI:enterDayDetail(day)
         self.saveButton = saveBtn
     end
 
+    local okDelete, deleteBtn = pcall(function()
+        return ISButton:new(120, self.height - 46, 90, 24, "Delete", self, TWRCalendarUI.onDeleteNote)
+    end)
+    if okDelete and deleteBtn then
+        deleteBtn:initialise()
+        safeCall(deleteBtn, "setEnable", false) -- only enabled once an existing note is selected via beginEditMark()
+        self:addChild(deleteBtn)
+        self.deleteButton = deleteBtn
+    end
+
     local okBack, backBtn = pcall(function()
         return ISButton:new(self.width - 90, self.height - 46, 70, 24, "Back", self, TWRCalendarUI.exitDayDetail)
     end)
@@ -364,6 +490,9 @@ function TWRCalendarUI:exitDayDetail()
     if self.noteEntry then safeCall(self, "removeChild", self.noteEntry); self.noteEntry = nil end
     if self.saveButton then safeCall(self, "removeChild", self.saveButton); self.saveButton = nil end
     if self.backButton then safeCall(self, "removeChild", self.backButton); self.backButton = nil end
+    if self.deleteButton then safeCall(self, "removeChild", self.deleteButton); self.deleteButton = nil end
+    safeCall(self.closeButton, "setVisible", true)
+    self.editingMarkSourceId = nil
     self.viewMode = "grid"
     self.selectedDay = nil
 end
@@ -375,18 +504,32 @@ function TWRCalendarUI:onSaveNote()
     local okText, text = safeCall(self.noteEntry, "getText")
     if not okText or not text or text == "" then return end
 
-    local sourceId = nextPlayerNoteSourceId(self.calendarItem)
-    if not sourceId then return end
-
-    addMark(self.calendarItem, self.viewYear, self.viewMonth, self.selectedDay, sourceId, text)
+    if self.editingMarkSourceId then
+        setMarkText(self.calendarItem, self.viewYear, self.viewMonth, self.selectedDay, self.editingMarkSourceId, text)
+    else
+        local sourceId = nextPlayerNoteSourceId(self.calendarItem)
+        if not sourceId then return end
+        addMark(self.calendarItem, self.viewYear, self.viewMonth, self.selectedDay, sourceId, text)
+    end
     -- Return to the grid view -- updateNavigationState-style refresh
     -- happens implicitly since prerender() re-reads getMarksForDate()
     -- every frame.
     self:exitDayDetail()
 end
 
+function TWRCalendarUI:onDeleteNote()
+    if not self.calendarItem or not self.selectedDay or not self.editingMarkSourceId then return end
+    if not playerHasWritingTool() then return end
+    removeMark(self.calendarItem, self.viewYear, self.viewMonth, self.selectedDay, self.editingMarkSourceId)
+    self:exitDayDetail()
+end
+
 function TWRCalendarUI:prerender()
     ISPanel.prerender(self)
+
+    if CALENDAR_BG_TEXTURE then
+        self:drawTextureScaled(CALENDAR_BG_TEXTURE, 0, 0, self.width, self.height, 1.0, 1.0, 1.0, 1.0)
+    end
 
     if self.viewMode == "dayDetail" then
         self:prerenderDayDetail()
@@ -396,11 +539,12 @@ function TWRCalendarUI:prerender()
     local title = TWR.Constants.MONTH_NAMES[self.viewMonth] .. " " .. tostring(self.viewYear)
     self:drawTextCentre(title, self.width / 2, 14, 0.15, 0.14, 0.12, 1.0, UIFont.Medium)
 
-    local left, top, cellW, cellH, mondayIndex, count = self:dayGridGeometry()
+    local left, top, cellW, cellH, startIndex, count = self:dayGridGeometry()
 
-    for i, name in ipairs(DAY_NAMES) do
-        self:drawTextCentre(name, left + (i - 1) * cellW + cellW / 2, top, 0.25, 0.22, 0.18, 1.0, UIFont.Small)
-    end
+    -- Weekday header text ("SUN"..."SAT") and its divider line are both
+    -- already printed into calendar_bg.png -- drawing our own copy on
+    -- top would ghost/double-print slightly out of alignment with the
+    -- baked text.
 
     local today = getCurrentWorldDate()
 
@@ -415,7 +559,8 @@ function TWRCalendarUI:prerender()
             self:drawText(tostring(day), x + 6, y + 4, 0.45, 0.45, 0.45, 1.0, UIFont.Small)
             self:drawLine2(x + 4, y + 3, x + cellW - 8, y + 18, 1.0, 0.45, 0.20, 0.18)
         elseif isToday then
-            self:drawRectBorder(x + 2, y, cellW - 6, 22, 1.0, 0.75, 0.15, 0.12)
+            self:drawRect(x + 2, y, cellW - 6, 22, 0.35, 0.85, 0.55, 0.20)
+            self:drawRectBorder(x + 2, y, cellW - 6, 22, 1.0, 0.65, 0.10, 0.08)
             self:drawText(tostring(day), x + 6, y + 4, 0.1, 0.1, 0.1, 1.0, UIFont.Small)
         else
             self:drawText(tostring(day), x + 6, y + 4, 0.1, 0.1, 0.1, 1.0, UIFont.Small)
@@ -433,15 +578,27 @@ end
 function TWRCalendarUI:prerenderDayDetail()
     local title = TWR.Constants.MONTH_NAMES[self.viewMonth] .. " " .. tostring(self.selectedDay) .. ", " .. tostring(self.viewYear)
     self:drawTextCentre(title, self.width / 2, 14, 0.15, 0.14, 0.12, 1.0, UIFont.Medium)
+    self:drawLine2(50, 38, self.width - 50, 38, 1.0, 0.35, 0.26, 0.16)
 
     local marks = self.calendarItem and getMarksForDate(self.calendarItem, self.viewYear, self.viewMonth, self.selectedDay) or {}
-    local y = 40
     if #marks == 0 then
-        self:drawText("(no notes yet)", 20, y, 0.35, 0.32, 0.28, 1.0, UIFont.Small)
+        self:drawText("(no notes yet)", 20, 46, 0.35, 0.32, 0.28, 1.0, UIFont.Small)
     else
-        for _, mark in ipairs(marks) do
-            self:drawText(tostring(mark.text), 20, y, 0.1, 0.1, 0.1, 1.0, UIFont.Small)
-            y = y + 18
+        for i, mark in ipairs(marks) do
+            local x, y = self:dayDetailMarkRect(i)
+            -- Faint ruled-paper line under each entry, matching the
+            -- ruled-notebook look rather than a flat list.
+            self:drawLine2(x, y + 15, self.width - 20, y + 15, 0.5, 0.55, 0.45, 0.32)
+            local editable = isPlayerNote(mark.sourceId)
+            local selected = editable and self.editingMarkSourceId == mark.sourceId
+            local prefix = selected and "> " or (editable and "  " or "")
+            if selected then
+                self:drawText(prefix .. tostring(mark.text), x, y, 0.55, 0.15, 0.15, 1.0, UIFont.Small)
+            elseif editable then
+                self:drawText(prefix .. tostring(mark.text), x, y, 0.1, 0.1, 0.1, 1.0, UIFont.Small)
+            else
+                self:drawText(tostring(mark.text), x, y, 0.16, 0.24, 0.55, 1.0, UIFont.Small)
+            end
         end
     end
 end
