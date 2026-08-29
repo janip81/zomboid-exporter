@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -224,6 +225,7 @@ type curatorPlayerStats struct {
 	BooksRead        int
 	IndoorHours      float64
 	OutdoorHours     float64
+	SleepHours       float64
 }
 
 // fetchCuratorPlayerStats reads LIFETIME totals (summed across every
@@ -255,10 +257,10 @@ func fetchCuratorPlayerStats(ctx context.Context, db *pgxpool.Pool, steamID stri
 		       COALESCE(SUM(distance_walked_km), 0), COALESCE(SUM(distance_driven_km), 0),
 		       COALESCE(SUM(drinks), 0), COALESCE(SUM(alcohol_ml), 0),
 		       COALESCE(SUM(pills_taken), 0), COALESCE(SUM(books_read), 0),
-		       COALESCE(SUM(indoor_hours), 0), COALESCE(SUM(outdoor_hours), 0)
+		       COALESCE(SUM(indoor_hours), 0), COALESCE(SUM(outdoor_hours), 0), COALESCE(SUM(sleep_hours), 0)
 		FROM characters WHERE steam_id = $1
 	`, steamID).Scan(&stats.ZombieKills, &stats.Injuries, &stats.DistanceWalkedKm, &stats.DistanceDrivenKm,
-		&stats.Drinks, &stats.AlcoholMl, &stats.PillsTaken, &stats.BooksRead, &stats.IndoorHours, &stats.OutdoorHours)
+		&stats.Drinks, &stats.AlcoholMl, &stats.PillsTaken, &stats.BooksRead, &stats.IndoorHours, &stats.OutdoorHours, &stats.SleepHours)
 	if err != nil {
 		return curatorPlayerStats{}, err
 	}
@@ -290,6 +292,7 @@ type curatorCharacterStats struct {
 	BooksRead        int
 	IndoorHours      float64
 	OutdoorHours     float64
+	SleepHours       float64
 }
 
 // fetchCuratorLatestCharacterStats returns the aggregate stats for
@@ -302,11 +305,11 @@ type curatorCharacterStats struct {
 func fetchCuratorLatestCharacterStats(ctx context.Context, db *pgxpool.Pool, steamID string) (stats curatorCharacterStats, ok bool, err error) {
 	err = db.QueryRow(ctx, `
 		SELECT zombie_kills, injuries, distance_walked_km, distance_driven_km,
-		       drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours
+		       drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours, sleep_hours
 		FROM characters WHERE steam_id = $1
 		ORDER BY character_number DESC LIMIT 1
 	`, steamID).Scan(&stats.ZombieKills, &stats.Injuries, &stats.DistanceWalkedKm, &stats.DistanceDrivenKm,
-		&stats.Drinks, &stats.AlcoholMl, &stats.PillsTaken, &stats.BooksRead, &stats.IndoorHours, &stats.OutdoorHours)
+		&stats.Drinks, &stats.AlcoholMl, &stats.PillsTaken, &stats.BooksRead, &stats.IndoorHours, &stats.OutdoorHours, &stats.SleepHours)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return curatorCharacterStats{}, false, nil
 	}
@@ -327,13 +330,23 @@ func fetchCuratorLatestCharacterStats(ctx context.Context, db *pgxpool.Pool, ste
 type curatorStatFact struct {
 	KnownFact        string
 	FallbackSentence string
-	Resolved         bool
+	// Username/SteamID identify the ONE player the fact is about (self,
+	// for resolveCuratorStatFact; a leaderboard winner, for
+	// resolveCuratorLeaderboardFact) -- server-side only, used solely for
+	// the post-generation Discord-mention swap in applyCuratorMention.
+	// Never folded into KnownFact/FallbackSentence text: those stay
+	// exactly what the LLM/Discord message already showed before mentions
+	// existed, per AUTO-LINK-8/CGPT-050's "no raw IDs to the LLM" rule --
+	// SteamID here never leaves the server process.
+	Username string
+	SteamID  string
+	Resolved bool
 }
 
 // statMetricValue extracts the one number/unit a given metric asks for
 // from an aggregate row -- shared by the lifetime and current-life paths
 // so the two can't drift in which field maps to which metric.
-func statMetricValue(metric curatorStatMetric, kills, injuries, drinks, pills, books int, distanceWalkedKm, distanceDrivenKm, alcoholMl, indoorHours, outdoorHours float64) (label, formatted string, ok bool) {
+func statMetricValue(metric curatorStatMetric, kills, injuries, drinks, pills, books int, distanceWalkedKm, distanceDrivenKm, alcoholMl, indoorHours, outdoorHours, sleepHours float64) (label, formatted string, ok bool) {
 	switch metric {
 	case statMetricKills:
 		return "Zombies eliminated", fmt.Sprintf("%d", kills), true
@@ -357,6 +370,8 @@ func statMetricValue(metric curatorStatMetric, kills, injuries, drinks, pills, b
 		return "Time spent indoors", fmt.Sprintf("%.2f hours", indoorHours), true
 	case statMetricOutdoorTime:
 		return "Time spent outdoors", fmt.Sprintf("%.2f hours", outdoorHours), true
+	case statMetricSleep:
+		return "Time spent sleeping", fmt.Sprintf("%.2f hours", sleepHours), true
 	default:
 		return "", "", false
 	}
@@ -404,7 +419,7 @@ func resolveCuratorStatFact(ctx context.Context, db *pgxpool.Pool, discordUserID
 			return curatorStatFact{}
 		}
 		label, formatted, ok = statMetricValue(metric, cs.ZombieKills, cs.Injuries, cs.Drinks, cs.PillsTaken, cs.BooksRead,
-			cs.DistanceWalkedKm, cs.DistanceDrivenKm, cs.AlcoholMl, cs.IndoorHours, cs.OutdoorHours)
+			cs.DistanceWalkedKm, cs.DistanceDrivenKm, cs.AlcoholMl, cs.IndoorHours, cs.OutdoorHours, cs.SleepHours)
 	default:
 		ps, err := fetchCuratorPlayerStats(ctx, db, identity.SteamID)
 		if err != nil {
@@ -412,7 +427,7 @@ func resolveCuratorStatFact(ctx context.Context, db *pgxpool.Pool, discordUserID
 			return curatorStatFact{}
 		}
 		label, formatted, ok = statMetricValue(metric, ps.ZombieKills, ps.Injuries, ps.Drinks, ps.PillsTaken, ps.BooksRead,
-			ps.DistanceWalkedKm, ps.DistanceDrivenKm, ps.AlcoholMl, ps.IndoorHours, ps.OutdoorHours)
+			ps.DistanceWalkedKm, ps.DistanceDrivenKm, ps.AlcoholMl, ps.IndoorHours, ps.OutdoorHours, ps.SleepHours)
 	}
 	if !ok {
 		return curatorStatFact{}
@@ -421,8 +436,56 @@ func resolveCuratorStatFact(ctx context.Context, db *pgxpool.Pool, discordUserID
 	return curatorStatFact{
 		KnownFact:        fmt.Sprintf("%s (%s): %s.", label, scopeLabel, formatted),
 		FallbackSentence: fmt.Sprintf("%s (%s): %s.", label, scopeLabel, formatted),
+		Username:         identity.Username,
+		SteamID:          identity.SteamID,
 		Resolved:         true,
 	}
+}
+
+// lookupDiscordUserIDBySteamID is the reverse of resolveCuratorIdentity's
+// discord_user_id -> steam_id lookup -- discordbot_player_links_steam_id_uq
+// guarantees at most one Discord account per SteamID, so this is a
+// deterministic 0-or-1 result. Returns ("", nil) when the player has no
+// linked Discord account, which is the normal/expected case for most
+// players, not an error.
+func lookupDiscordUserIDBySteamID(ctx context.Context, db *pgxpool.Pool, steamID string) (string, error) {
+	var discordUserID string
+	err := db.QueryRow(ctx, "SELECT discord_user_id FROM discordbot_player_links WHERE steam_id = $1", steamID).Scan(&discordUserID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return discordUserID, err
+}
+
+// applyCuratorMention deterministically swaps the exact, already-resolved
+// player name in a Curator reply for a live Discord mention -- per this
+// project's rule that raw Discord IDs never pass through the LLM (an
+// 18-digit snowflake is exactly the kind of exact-token output models are
+// unreliable at reproducing), the model only ever sees/writes the plain
+// username; the mention substitution happens here in code, after
+// generation, and only once a real discordbot_player_links row proves the
+// named player actually has a linked Discord account. Word-boundary,
+// case-insensitive match: the LLM may re-case the name in prose ("edd1e360"
+// vs "Edd1e360") but must not have it swapped mid-word inside an unrelated
+// token.
+func applyCuratorMention(ctx context.Context, db *pgxpool.Pool, reply string, fact curatorStatFact) string {
+	if db == nil || !fact.Resolved || fact.Username == "" || fact.SteamID == "" {
+		return reply
+	}
+	discordUserID, err := lookupDiscordUserIDBySteamID(ctx, db, fact.SteamID)
+	if err != nil {
+		slog.Error("curator: mention lookup failed", "err", err)
+		return reply
+	}
+	if discordUserID == "" {
+		return reply
+	}
+	re, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(fact.Username) + `\b`)
+	if err != nil {
+		slog.Error("curator: mention pattern compile failed", "username", fact.Username, "err", err)
+		return reply
+	}
+	return re.ReplaceAllString(reply, "<@"+discordUserID+">")
 }
 
 // renderCuratorContext turns bounded stats into plain-text facts for the

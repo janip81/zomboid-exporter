@@ -52,6 +52,7 @@ type characterStatDelta struct {
 	BooksRead        int64
 	IndoorHours      float64
 	OutdoorHours     float64
+	SleepHours       float64
 	Breakdown        []statBreakdownDelta
 }
 
@@ -209,6 +210,19 @@ func aggregateDeltaForEvent(eventType string, fields map[string]any) characterSt
 			}
 		}
 
+	case "sleep":
+		// Sleeping.lua emits exactly one "sleep" event per COMPLETED
+		// sleep session (the asleep->awake transition), with hours
+		// already being that one session's duration -- a per-event
+		// delta like movement_distance's km, not a running total, so
+		// this SUMs.
+		if hours, ok := fieldFloat(fields, "hours"); ok {
+			d.SleepHours = hours
+			if location := fieldString(fields, "location"); location != "" {
+				d.Breakdown = append(d.Breakdown, statBreakdownDelta{"sleep_location", location, hours})
+			}
+		}
+
 	// vehicle_collisions has no source event -- no crash-detection
 	// tracker exists in the Lua mod (see the ROADMAP/milestones.go's own
 	// "explicitly flagged future-only" note). Nothing to switch on here
@@ -241,7 +255,8 @@ func statAggregatesEqual(a, b characterStatDelta) bool {
 		closeEnough(a.DistanceDrivenKm, b.DistanceDrivenKm) &&
 		closeEnough(a.AlcoholMl, b.AlcoholMl) &&
 		closeEnough(a.IndoorHours, b.IndoorHours) &&
-		closeEnough(a.OutdoorHours, b.OutdoorHours)
+		closeEnough(a.OutdoorHours, b.OutdoorHours) &&
+		closeEnough(a.SleepHours, b.SleepHours)
 }
 
 // runCharacterFinalizationPipeline periodically closes out dead

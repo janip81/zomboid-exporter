@@ -165,7 +165,7 @@ func askCurator(ctx context.Context, deps botDeps, discordUserID string, candida
 		})
 		if err == nil {
 			slog.Info("curator: LLM reply generated", "provider", provider, "tier", tier, "intent", intent)
-			return llmReply, true
+			return applyCuratorMention(ctx, deps.db, llmReply, statFact), true
 		}
 		if err != ErrLLMUnavailable {
 			slog.Error("curator: LLM pool returned unexpected error", "err", err)
@@ -173,7 +173,7 @@ func askCurator(ctx context.Context, deps botDeps, discordUserID string, candida
 	}
 
 	if statFact.Resolved {
-		return statFact.FallbackSentence, true
+		return applyCuratorMention(ctx, deps.db, statFact.FallbackSentence, statFact), true
 	}
 	return matchIntentFallback(intent)
 }

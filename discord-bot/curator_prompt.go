@@ -305,6 +305,7 @@ const (
 	statMetricBooks         curatorStatMetric = "books"
 	statMetricIndoorTime    curatorStatMetric = "indoor_time"
 	statMetricOutdoorTime   curatorStatMetric = "outdoor_time"
+	statMetricSleep         curatorStatMetric = "sleep"
 	statMetricGeneral       curatorStatMetric = "general"
 )
 
@@ -341,6 +342,7 @@ var statMetricKeywords = []struct {
 	{statMetricBooks, []string{"book", "read"}},
 	{statMetricIndoorTime, []string{"indoor", "inside"}},
 	{statMetricOutdoorTime, []string{"outdoor", "outside"}},
+	{statMetricSleep, []string{"sleep", "slept"}},
 }
 
 // curatorFirstPersonPattern requires the message to actually be about the

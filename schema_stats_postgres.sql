@@ -63,6 +63,7 @@ ALTER TABLE characters ADD COLUMN IF NOT EXISTS books_read BIGINT NOT NULL DEFAU
 ALTER TABLE characters ADD COLUMN IF NOT EXISTS vehicle_collisions BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE characters ADD COLUMN IF NOT EXISTS indoor_hours DOUBLE PRECISION NOT NULL DEFAULT 0;
 ALTER TABLE characters ADD COLUMN IF NOT EXISTS outdoor_hours DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS sleep_hours DOUBLE PRECISION NOT NULL DEFAULT 0;
 ALTER TABLE characters ADD COLUMN IF NOT EXISTS last_event_at TIMESTAMPTZ;
 -- stats_finalized=false is the live-aggregation lock (character-aggregate-
 -- stats.md: "Do not use is_alive=false itself as the aggregation lock:
