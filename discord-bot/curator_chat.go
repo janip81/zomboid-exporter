@@ -124,6 +124,19 @@ func askCurator(ctx context.Context, deps botDeps, discordUserID string, candida
 		statFact = resolveCuratorSemanticStatFact(ctx, deps, message)
 	}
 
+	// Live-test finding: an ambient/storytelling question ("tell me
+	// something creepy/stupid about the server") that doesn't look
+	// stat-like above got NO grounding at all once the asker's own stats
+	// stopped being injected -- the model then invented a fully
+	// fictional, unnamed "a survivor" anecdote with nothing real behind
+	// it. Reusing the same real, already-safe leaderboard query (a
+	// random metric instead of a message-derived one) gives these
+	// answers one genuine named fact to dramatize instead of inventing
+	// one from nothing.
+	if llmAllowed && intent == intentGenericCurator && !statFact.Resolved {
+		statFact = resolveCuratorLeaderboardFact(ctx, deps.db, deps.serverName, randomCuratorLeaderboardMetric())
+	}
+
 	if llmAllowed {
 		// Live-test finding: the asker's own identity/stats were being
 		// injected into Context for EVERY intent, so a general question

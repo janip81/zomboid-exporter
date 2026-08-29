@@ -474,7 +474,8 @@ Remain ambiguous and mysterious. Never invent lore or a definitive explanation.`
 	intentGenericCurator: `CURRENT CONVERSATION INTENT: GENERIC_CURATOR
 
 Respond naturally in character to the message.
-This is NOT a question about the speaker personally -- do not describe or reference the speaker's own kills, deaths, or other individual statistics unless they explicitly asked about themselves. Speak about the server, the world, or survivors in general instead.`,
+This is NOT a question about the speaker personally -- do not describe or reference the speaker's own kills, deaths, or other individual statistics unless they explicitly asked about themselves. Speak about the server, the world, or survivors in general instead.
+If a named fact is supplied in Known Facts, that survivor and number are REAL -- name them and weave the real number into an in-character, dramatized answer matching whatever tone was asked for (creepy, impressive, absurd, etc). Never invent a different name, a different number, or a second, unnamed survivor instead. If no fact is supplied, keep the answer vague rather than naming someone or inventing specifics.`,
 }
 
 // curatorIntentGuidance returns the guidance block for intent, falling

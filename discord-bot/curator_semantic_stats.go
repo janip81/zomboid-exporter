@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"regexp"
 	"strings"
 
@@ -47,6 +48,26 @@ var curatorLeaderboardMetrics = map[string]bool{
 	"drinks": true, "alcohol": true, "alcoholic_drinks": true,
 	"pills": true, "books": true,
 	"indoor_time": true, "outdoor_time": true,
+}
+
+// curatorLeaderboardMetricList is curatorLeaderboardMetrics' keys as a
+// slice, built once at package init for randomCuratorLeaderboardMetric --
+// map iteration order is randomized per-run by Go itself, but not
+// suitable for repeated random sampling within a single run.
+var curatorLeaderboardMetricList = func() []string {
+	list := make([]string, 0, len(curatorLeaderboardMetrics))
+	for m := range curatorLeaderboardMetrics {
+		list = append(list, m)
+	}
+	return list
+}()
+
+// randomCuratorLeaderboardMetric picks one metric at random from the same
+// validated allowlist the semantic resolver uses -- for grounding an
+// ambient/storytelling question in one real, named fact rather than
+// nothing at all (see askCurator's GENERIC_CURATOR fallback).
+func randomCuratorLeaderboardMetric() string {
+	return curatorLeaderboardMetricList[rand.Intn(len(curatorLeaderboardMetricList))]
 }
 
 // validateCuratorStatQueryPlan is the untrusted-output gate
