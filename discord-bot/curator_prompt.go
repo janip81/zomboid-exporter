@@ -334,7 +334,7 @@ var statMetricKeywords = []struct {
 	{statMetricKills, []string{"kill", "zombie"}},
 	{statMetricDeaths, []string{"death", "died", "die "}},
 	{statMetricInjuries, []string{"injur", "hurt", "wound"}},
-	{statMetricWalkDistance, []string{"walk"}},
+	{statMetricWalkDistance, []string{"walk", "ran", "run", "sprint", "furthest"}},
 	{statMetricDriveDistance, []string{"driv", "drove"}},
 	{statMetricAlcohol, []string{"alcohol"}},
 	{statMetricDrinks, []string{"drink", "drank", "drunk"}},

@@ -107,6 +107,7 @@ If the message does not CLEARLY ask who holds a server-wide record for one of th
 Specific mapping guidance:
 - "who is the drunk" / "who drinks the most" / "who gets drunk the most" -> metric "alcoholic_drinks" (a count of alcoholic drinks), NOT "alcohol". These questions describe HISTORICAL cumulative consumption, never present/current intoxication -- there is no tracked "currently drunk" state.
 - "who consumed the most alcohol by volume" -> metric "alcohol".
+- "who has walked/run/sprinted the furthest" / "who has covered the most distance on foot" -> metric "walk_distance". This ONE metric covers walking, running, AND sprinting combined into a single total distance -- there is no separate running-only or sprinting-only metric, so never reject a "run"/"ran"/"sprint" phrasing just because the metric name itself says "walk".
 - "who drives the most" / "who has driven the most" / "who has driven the furthest/most distance/most km" -> metric "drive_distance" (a measure of DISTANCE, not skill). Only reject when the question is about driving SKILL or incidents instead of distance: there is NO metric for driving skill, crashes, or collisions -- never map "worst driver" / "best driver" / "who crashes the most" / "who is the best/worst at driving" to "drive_distance" or any other metric, output {"intent": "generic"} for those instead.
 - "who sleeps the most" / "who has slept the most" / "who spends the most time sleeping" -> metric "sleep".
 - Never invent a metric that is not in the allowed list above, even if the message clearly wants a ranking of something else.
@@ -124,7 +125,7 @@ const curatorSemanticResolverMaxTokens = 60
 // deliberately broad and cheap (the doc: "this heuristic should be broad
 // and cheap; the point is not to recreate the full semantic parser in
 // regex").
-var curatorRankingWordPattern = regexp.MustCompile(`(?i)\b(most|best|worst|longest|highest|least|drunk|worse|better)\b`)
+var curatorRankingWordPattern = regexp.MustCompile(`(?i)\b(most|best|worst|longest|highest|furthest|farthest|least|drunk|worse|better)\b`)
 
 // looksCuratorStatLike is the quota gate before ever spending an LLM call
 // on semantic resolution (curator-llm-semantic-stat-resolution.md's
