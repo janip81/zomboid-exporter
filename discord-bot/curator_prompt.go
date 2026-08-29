@@ -473,7 +473,8 @@ Remain ambiguous and mysterious. Never invent lore or a definitive explanation.`
 
 	intentGenericCurator: `CURRENT CONVERSATION INTENT: GENERIC_CURATOR
 
-Respond naturally in character to the message.`,
+Respond naturally in character to the message.
+This is NOT a question about the speaker personally -- do not describe or reference the speaker's own kills, deaths, or other individual statistics unless they explicitly asked about themselves. Speak about the server, the world, or survivors in general instead.`,
 }
 
 // curatorIntentGuidance returns the guidance block for intent, falling

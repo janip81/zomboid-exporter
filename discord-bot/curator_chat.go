@@ -125,7 +125,21 @@ func askCurator(ctx context.Context, deps botDeps, discordUserID string, candida
 	}
 
 	if llmAllowed {
-		contextText := buildCuratorContext(ctx, deps, discordUserID, candidateNames)
+		// Live-test finding: the asker's own identity/stats were being
+		// injected into Context for EVERY intent, so a general question
+		// like "tell me something creepy about the server" still handed
+		// the model the speaker's personal kill/death numbers as the only
+		// concrete facts available -- the model then anchored its answer
+		// to the asker specifically instead of the server/all players.
+		// Only SELF_STATS is actually a question about the speaker; every
+		// other intent gets a neutral placeholder unless a statFact about
+		// someone else was already resolved above.
+		var contextText string
+		if intent == intentSelfStats {
+			contextText = buildCuratorContext(ctx, deps, discordUserID, candidateNames)
+		} else {
+			contextText = "No specific survivor's identity or personal statistics are the focus of this question."
+		}
 		if statFact.Resolved {
 			contextText = statFact.KnownFact + "\n" + contextText
 		}
