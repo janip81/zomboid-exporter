@@ -332,17 +332,27 @@ func fetchCuratorLatestCharacterStats(ctx context.Context, db *pgxpool.Pool, ste
 type curatorStatFact struct {
 	KnownFact        string
 	FallbackSentence string
-	// Username/SteamID identify the ONE player the fact is about (self,
-	// for resolveCuratorStatFact; a leaderboard winner, for
-	// resolveCuratorLeaderboardFact) -- server-side only, used solely for
-	// the post-generation Discord-mention swap in applyCuratorMention.
-	// Never folded into KnownFact/FallbackSentence text: those stay
-	// exactly what the LLM/Discord message already showed before mentions
-	// existed, per AUTO-LINK-8/CGPT-050's "no raw IDs to the LLM" rule --
-	// SteamID here never leaves the server process.
-	Username string
-	SteamID  string
+	// Entries identifies every player the fact names (exactly one for
+	// resolveCuratorStatFact's self-stats path; up to curatorLeaderboardTopN
+	// for a leaderboard fact) -- server-side only, used solely for the
+	// post-generation Discord-mention swap in applyCuratorMention. Never
+	// folded into KnownFact/FallbackSentence beyond the plain username
+	// text already there: those stay exactly what the LLM/Discord message
+	// already showed before mentions existed, per AUTO-LINK-8/CGPT-050's
+	// "no raw IDs to the LLM" rule -- SteamID here never leaves the server
+	// process.
+	Entries  []curatorLeaderboardEntry
 	Resolved bool
+}
+
+// curatorLeaderboardEntry is one ranked leaderboard row (or the single
+// speaker, for a self-stats fact) -- Username/SteamID for the mention
+// swap, Formatted the already-unit-rendered value text ("108", "195.23
+// km") used to build the ranked sentence.
+type curatorLeaderboardEntry struct {
+	Username  string
+	SteamID   string
+	Formatted string
 }
 
 // statMetricValue extracts the one number/unit a given metric asks for
@@ -442,8 +452,7 @@ func resolveCuratorStatFact(ctx context.Context, db *pgxpool.Pool, discordUserID
 	return curatorStatFact{
 		KnownFact:        fmt.Sprintf("%s (%s): %s.", label, scopeLabel, formatted),
 		FallbackSentence: fmt.Sprintf("%s (%s): %s.", label, scopeLabel, formatted),
-		Username:         identity.Username,
-		SteamID:          identity.SteamID,
+		Entries:          []curatorLeaderboardEntry{{Username: identity.Username, SteamID: identity.SteamID, Formatted: formatted}},
 		Resolved:         true,
 	}
 }
@@ -464,34 +473,42 @@ func lookupDiscordUserIDBySteamID(ctx context.Context, db *pgxpool.Pool, steamID
 }
 
 // applyCuratorMention deterministically swaps the exact, already-resolved
-// player name in a Curator reply for a live Discord mention -- per this
+// player name(s) in a Curator reply for live Discord mentions -- per this
 // project's rule that raw Discord IDs never pass through the LLM (an
 // 18-digit snowflake is exactly the kind of exact-token output models are
 // unreliable at reproducing), the model only ever sees/writes the plain
-// username; the mention substitution happens here in code, after
+// username(s); the mention substitution happens here in code, after
 // generation, and only once a real discordbot_player_links row proves the
 // named player actually has a linked Discord account. Word-boundary,
-// case-insensitive match: the LLM may re-case the name in prose ("edd1e360"
+// case-insensitive match: the LLM may re-case a name in prose ("edd1e360"
 // vs "Edd1e360") but must not have it swapped mid-word inside an unrelated
-// token.
+// token. Iterates every entry (a top-3 leaderboard fact names up to 3
+// players) -- each is looked up and swapped independently, so a mix of
+// linked/unlinked players in the same reply is handled correctly.
 func applyCuratorMention(ctx context.Context, db *pgxpool.Pool, reply string, fact curatorStatFact) string {
-	if db == nil || !fact.Resolved || fact.Username == "" || fact.SteamID == "" {
+	if db == nil || !fact.Resolved {
 		return reply
 	}
-	discordUserID, err := lookupDiscordUserIDBySteamID(ctx, db, fact.SteamID)
-	if err != nil {
-		slog.Error("curator: mention lookup failed", "err", err)
-		return reply
+	for _, entry := range fact.Entries {
+		if entry.Username == "" || entry.SteamID == "" {
+			continue
+		}
+		discordUserID, err := lookupDiscordUserIDBySteamID(ctx, db, entry.SteamID)
+		if err != nil {
+			slog.Error("curator: mention lookup failed", "err", err)
+			continue
+		}
+		if discordUserID == "" {
+			continue
+		}
+		re, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(entry.Username) + `\b`)
+		if err != nil {
+			slog.Error("curator: mention pattern compile failed", "username", entry.Username, "err", err)
+			continue
+		}
+		reply = re.ReplaceAllString(reply, "<@"+discordUserID+">")
 	}
-	if discordUserID == "" {
-		return reply
-	}
-	re, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(fact.Username) + `\b`)
-	if err != nil {
-		slog.Error("curator: mention pattern compile failed", "username", fact.Username, "err", err)
-		return reply
-	}
-	return re.ReplaceAllString(reply, "<@"+discordUserID+">")
+	return reply
 }
 
 // renderCuratorContext turns bounded stats into plain-text facts for the

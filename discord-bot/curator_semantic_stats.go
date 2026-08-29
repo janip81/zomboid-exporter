@@ -3,14 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
 	"regexp"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -268,12 +266,36 @@ func formatLeaderboardValue(unit string, total float64) string {
 	}
 }
 
+// curatorLeaderboardTopN is how many ranked entries a leaderboard fact
+// returns -- a real ranked list (not just a single #1 record), per
+// live-test feedback asking for a top-3 rather than one winner.
+const curatorLeaderboardTopN = 3
+
+// formatLeaderboardSentence renders 1-3 ranked entries as one sentence
+// Curator's Known Facts / fallback text can use directly. Never pads to
+// N entries: HAVING ... > 0 means fewer than N players may legitimately
+// qualify, and Curator must not imply ranks that don't exist.
+func formatLeaderboardSentence(label string, entries []curatorLeaderboardEntry) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s (lifetime, server-wide): ", label)
+	for i, e := range entries {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%d) %s -- %s", i+1, e.Username, e.Formatted)
+	}
+	b.WriteString(".")
+	return b.String()
+}
+
 // resolveCuratorLeaderboardFact runs the ONE hard-coded, prepared query
 // a validated plan's metric maps to -- never anything the LLM
 // constructed. Only p.last_username and the aggregate total ever leave
 // this function; no SteamID or internal character ID reaches the
-// caller, matching AUTO-LINK-8/CGPT-050's "minimize data sent to free
-// third-party providers" rule.
+// LLM-facing sentence, matching AUTO-LINK-8/CGPT-050's "minimize data
+// sent to free third-party providers" rule -- SteamID is carried in
+// curatorStatFact.Entries for the server-side-only mention swap
+// (applyCuratorMention) and never appears in KnownFact/FallbackSentence.
 //
 // serverName scopes the query to this bot's own server
 // (characters.server = $1) -- the schema deliberately supports several
@@ -296,9 +318,7 @@ func resolveCuratorLeaderboardFact(ctx context.Context, db *pgxpool.Pool, server
 		return curatorStatFact{}
 	}
 
-	var steamID, username string
-	var total float64
-	err := db.QueryRow(ctx, fmt.Sprintf(`
+	rows, err := db.Query(ctx, fmt.Sprintf(`
 		SELECT p.steam_id, p.last_username, agg.total
 		FROM (
 			SELECT steam_id, SUM(%s) AS total
@@ -307,21 +327,37 @@ func resolveCuratorLeaderboardFact(ctx context.Context, db *pgxpool.Pool, server
 			GROUP BY steam_id
 			HAVING SUM(%s) > 0
 			ORDER BY total DESC
-			LIMIT 1
+			LIMIT %d
 		) agg
 		JOIN players p ON p.steam_id = agg.steam_id
-	`, m.column, m.column), serverName).Scan(&steamID, &username, &total)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return curatorStatFact{}
-	}
+		ORDER BY agg.total DESC
+	`, m.column, m.column, curatorLeaderboardTopN), serverName)
 	if err != nil {
 		slog.Error("curator: leaderboard query failed", "metric", metric, "err", err)
 		return curatorStatFact{}
 	}
+	defer rows.Close()
 
-	formatted := formatLeaderboardValue(m.unit, total)
-	sentence := fmt.Sprintf("%s (lifetime, server-wide): %s -- %s.", m.label, username, formatted)
-	return curatorStatFact{KnownFact: sentence, FallbackSentence: sentence, Username: username, SteamID: steamID, Resolved: true}
+	var entries []curatorLeaderboardEntry
+	for rows.Next() {
+		var steamID, username string
+		var total float64
+		if err := rows.Scan(&steamID, &username, &total); err != nil {
+			slog.Error("curator: leaderboard row scan failed", "metric", metric, "err", err)
+			return curatorStatFact{}
+		}
+		entries = append(entries, curatorLeaderboardEntry{Username: username, SteamID: steamID, Formatted: formatLeaderboardValue(m.unit, total)})
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("curator: leaderboard rows failed", "metric", metric, "err", err)
+		return curatorStatFact{}
+	}
+	if len(entries) == 0 {
+		return curatorStatFact{}
+	}
+
+	sentence := formatLeaderboardSentence(m.label, entries)
+	return curatorStatFact{KnownFact: sentence, FallbackSentence: sentence, Entries: entries, Resolved: true}
 }
 
 // resolveCuratorDeathsLeaderboardFact is deaths' own query shape --
@@ -331,9 +367,7 @@ func resolveCuratorLeaderboardFact(ctx context.Context, db *pgxpool.Pool, server
 // zero deaths contributes no row to COUNT at all), so no separate HAVING
 // is needed here the way the SUM-based metrics need one.
 func resolveCuratorDeathsLeaderboardFact(ctx context.Context, db *pgxpool.Pool, serverName string) curatorStatFact {
-	var steamID, username string
-	var total int
-	err := db.QueryRow(ctx, `
+	rows, err := db.Query(ctx, fmt.Sprintf(`
 		SELECT p.steam_id, p.last_username, agg.total
 		FROM (
 			SELECT steam_id, COUNT(*) AS total
@@ -341,20 +375,37 @@ func resolveCuratorDeathsLeaderboardFact(ctx context.Context, db *pgxpool.Pool, 
 			WHERE server = $1 AND died_at IS NOT NULL
 			GROUP BY steam_id
 			ORDER BY total DESC
-			LIMIT 1
+			LIMIT %d
 		) agg
 		JOIN players p ON p.steam_id = agg.steam_id
-	`, serverName).Scan(&steamID, &username, &total)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return curatorStatFact{}
-	}
+		ORDER BY agg.total DESC
+	`, curatorLeaderboardTopN), serverName)
 	if err != nil {
 		slog.Error("curator: leaderboard query failed", "metric", "deaths", "err", err)
 		return curatorStatFact{}
 	}
+	defer rows.Close()
 
-	sentence := fmt.Sprintf("Most deaths recorded (lifetime, server-wide): %s -- %d.", username, total)
-	return curatorStatFact{KnownFact: sentence, FallbackSentence: sentence, Username: username, SteamID: steamID, Resolved: true}
+	var entries []curatorLeaderboardEntry
+	for rows.Next() {
+		var steamID, username string
+		var total int
+		if err := rows.Scan(&steamID, &username, &total); err != nil {
+			slog.Error("curator: leaderboard row scan failed", "metric", "deaths", "err", err)
+			return curatorStatFact{}
+		}
+		entries = append(entries, curatorLeaderboardEntry{Username: username, SteamID: steamID, Formatted: fmt.Sprintf("%d", total)})
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("curator: leaderboard rows failed", "metric", "deaths", "err", err)
+		return curatorStatFact{}
+	}
+	if len(entries) == 0 {
+		return curatorStatFact{}
+	}
+
+	sentence := formatLeaderboardSentence("Most deaths recorded", entries)
+	return curatorStatFact{KnownFact: sentence, FallbackSentence: sentence, Entries: entries, Resolved: true}
 }
 
 // resolveCuratorSemanticStatFact is askCurator's single entry point for
