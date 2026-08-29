@@ -671,10 +671,11 @@ func (s *pgStore) applyCharacterStatDelta(ctx context.Context, charID int64, d c
 		    indoor_hours = indoor_hours + $11,
 		    outdoor_hours = outdoor_hours + $12,
 		    sleep_hours = sleep_hours + $13,
-		    last_event_at = GREATEST(last_event_at, $14)
+		    skill_books_read = skill_books_read + $14,
+		    last_event_at = GREATEST(last_event_at, $15)
 		WHERE id = $1 AND stats_finalized = false
 	`, charID, d.ZombieKills, d.Injuries, d.DistanceWalkedKm, d.DistanceDrivenKm,
-		d.Drinks, d.AlcoholicDrinks, d.AlcoholMl, d.PillsTaken, d.BooksRead, d.IndoorHours, d.OutdoorHours, d.SleepHours, at)
+		d.Drinks, d.AlcoholicDrinks, d.AlcoholMl, d.PillsTaken, d.BooksRead, d.IndoorHours, d.OutdoorHours, d.SleepHours, d.SkillBooksRead, at)
 	if err != nil {
 		return err
 	}
@@ -807,6 +808,7 @@ func (s *pgStore) reconcileCharacterStats(ctx context.Context, characterID int64
 		total.IndoorHours += d.IndoorHours
 		total.OutdoorHours += d.OutdoorHours
 		total.SleepHours += d.SleepHours
+		total.SkillBooksRead += d.SkillBooksRead
 		for _, b := range d.Breakdown {
 			breakdown[[2]string{b.Category, b.ValueKey}] += b.Value
 		}
@@ -821,10 +823,10 @@ func (s *pgStore) reconcileCharacterStats(ctx context.Context, characterID int64
 	var storedLastEventAt *time.Time
 	if err := s.pool.QueryRow(ctx, `
 		SELECT zombie_kills, injuries, distance_walked_km, distance_driven_km,
-		       drinks, alcoholic_drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours, sleep_hours, last_event_at
+		       drinks, alcoholic_drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours, sleep_hours, skill_books_read, last_event_at
 		FROM characters WHERE id = $1
 	`, characterID).Scan(&stored.ZombieKills, &stored.Injuries, &stored.DistanceWalkedKm, &stored.DistanceDrivenKm,
-		&stored.Drinks, &stored.AlcoholicDrinks, &stored.AlcoholMl, &stored.PillsTaken, &stored.BooksRead, &stored.IndoorHours, &stored.OutdoorHours, &stored.SleepHours, &storedLastEventAt); err != nil {
+		&stored.Drinks, &stored.AlcoholicDrinks, &stored.AlcoholMl, &stored.PillsTaken, &stored.BooksRead, &stored.IndoorHours, &stored.OutdoorHours, &stored.SleepHours, &stored.SkillBooksRead, &storedLastEventAt); err != nil {
 		return false, err
 	}
 
@@ -850,11 +852,11 @@ func (s *pgStore) reconcileCharacterStats(ctx context.Context, characterID int64
 		UPDATE characters
 		SET zombie_kills = $2, injuries = $3, distance_walked_km = $4, distance_driven_km = $5,
 		    drinks = $6, alcoholic_drinks = $7, alcohol_ml = $8, pills_taken = $9, books_read = $10,
-		    indoor_hours = $11, outdoor_hours = $12, sleep_hours = $13, stats_revision = $14,
-		    last_event_at = GREATEST(last_event_at, $15::timestamptz)
+		    indoor_hours = $11, outdoor_hours = $12, sleep_hours = $13, skill_books_read = $14, stats_revision = $15,
+		    last_event_at = GREATEST(last_event_at, $16::timestamptz)
 		WHERE id = $1
 	`, characterID, total.ZombieKills, total.Injuries, total.DistanceWalkedKm, total.DistanceDrivenKm,
-		total.Drinks, total.AlcoholicDrinks, total.AlcoholMl, total.PillsTaken, total.BooksRead, total.IndoorHours, total.OutdoorHours, total.SleepHours,
+		total.Drinks, total.AlcoholicDrinks, total.AlcoholMl, total.PillsTaken, total.BooksRead, total.IndoorHours, total.OutdoorHours, total.SleepHours, total.SkillBooksRead,
 		currentStatsRevision, lastEventParam); err != nil {
 		return false, err
 	}

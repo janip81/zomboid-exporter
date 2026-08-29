@@ -46,7 +46,7 @@ var curatorLeaderboardMetrics = map[string]bool{
 	"kills": true, "deaths": true, "injuries": true,
 	"walk_distance": true, "drive_distance": true,
 	"drinks": true, "alcohol": true, "alcoholic_drinks": true,
-	"pills": true, "books": true,
+	"pills": true, "books": true, "skill_books": true, "literature_books": true,
 	"indoor_time": true, "outdoor_time": true, "sleep": true,
 }
 
@@ -97,7 +97,7 @@ Read ONE Discord message and output ONLY a single JSON object matching exactly t
 
 Allowed values (nothing else is ever valid):
 intent: "leaderboard" or "generic"
-metric: "kills", "deaths", "injuries", "walk_distance", "drive_distance", "drinks", "alcohol", "alcoholic_drinks", "pills", "books", "indoor_time", "outdoor_time", "sleep"
+metric: "kills", "deaths", "injuries", "walk_distance", "drive_distance", "drinks", "alcohol", "alcoholic_drinks", "pills", "books", "skill_books", "literature_books", "indoor_time", "outdoor_time", "sleep"
 operation: "max"
 target: "server"
 scope: "lifetime"
@@ -110,6 +110,7 @@ Specific mapping guidance:
 - "who has walked/run/sprinted the furthest" / "who has covered the most distance on foot" -> metric "walk_distance". This ONE metric covers walking, running, AND sprinting combined into a single total distance -- there is no separate running-only or sprinting-only metric, so never reject a "run"/"ran"/"sprint" phrasing just because the metric name itself says "walk".
 - "who drives the most" / "who has driven the most" / "who has driven the furthest/most distance/most km" -> metric "drive_distance" (a measure of DISTANCE, not skill). Only reject when the question is about driving SKILL or incidents instead of distance: there is NO metric for driving skill, crashes, or collisions -- never map "worst driver" / "best driver" / "who crashes the most" / "who is the best/worst at driving" to "drive_distance" or any other metric, output {"intent": "generic"} for those instead.
 - "who sleeps the most" / "who has slept the most" / "who spends the most time sleeping" -> metric "sleep".
+- Books have THREE separate metrics -- pick the most specific one that matches: "who has read the most skill books" / "most books completed for skill training" -> metric "skill_books". "who has read the most novels/literature" -> metric "literature_books". An unqualified "who has read the most books" (no skill/novel distinction mentioned) -> metric "books" (the combined total of both kinds).
 - We only ever have a SINGLE #1 record per metric, never a ranked list of multiple players. If the message asks for a "top N" list, "top 2", "top 3", the "leaderboard", or otherwise names more than one player position, but is CLEARLY about one of the listed metrics, still output the normal leaderboard plan for that metric (intent "leaderboard", operation "max") rather than rejecting the whole request as generic -- answering with the real #1 record for the right metric is always better than falling back to an unrelated one.
 - Never invent a metric that is not in the allowed list above, even if the message clearly wants a ranking of something else.
 
@@ -235,6 +236,8 @@ var leaderboardMetricColumns = map[string]leaderboardMetricColumn{
 	"alcoholic_drinks": {"alcoholic_drinks", "Most alcoholic drinks consumed", ""},
 	"pills":            {"pills_taken", "Most pills taken", ""},
 	"books":            {"books_read", "Most books read", ""},
+	"skill_books":      {"skill_books_read", "Most skill books completed", ""},
+	"literature_books": {"(books_read - skill_books_read)", "Most literature/novels read", ""},
 	"indoor_time":      {"indoor_hours", "Most time spent indoors", "hours"},
 	"outdoor_time":     {"outdoor_hours", "Most time spent outdoors", "hours"},
 	"sleep":            {"sleep_hours", "Most time spent sleeping", "hours"},

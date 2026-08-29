@@ -219,6 +219,7 @@ func (s *sqliteStore) migrateCharacterStatsColumns(ctx context.Context) error {
 		{"alcohol_ml", `ALTER TABLE characters ADD COLUMN alcohol_ml REAL NOT NULL DEFAULT 0`},
 		{"pills_taken", `ALTER TABLE characters ADD COLUMN pills_taken INTEGER NOT NULL DEFAULT 0`},
 		{"books_read", `ALTER TABLE characters ADD COLUMN books_read INTEGER NOT NULL DEFAULT 0`},
+		{"skill_books_read", `ALTER TABLE characters ADD COLUMN skill_books_read INTEGER NOT NULL DEFAULT 0`},
 		{"vehicle_collisions", `ALTER TABLE characters ADD COLUMN vehicle_collisions INTEGER NOT NULL DEFAULT 0`},
 		{"indoor_hours", `ALTER TABLE characters ADD COLUMN indoor_hours REAL NOT NULL DEFAULT 0`},
 		{"outdoor_hours", `ALTER TABLE characters ADD COLUMN outdoor_hours REAL NOT NULL DEFAULT 0`},
@@ -756,10 +757,11 @@ func (s *sqliteStore) applyCharacterStatDelta(ctx context.Context, charID int64,
 		    indoor_hours = indoor_hours + ?,
 		    outdoor_hours = outdoor_hours + ?,
 		    sleep_hours = sleep_hours + ?,
+		    skill_books_read = skill_books_read + ?,
 		    last_event_at = CASE WHEN last_event_at IS NULL OR ? > last_event_at THEN ? ELSE last_event_at END
 		WHERE id = ? AND stats_finalized = 0
 	`, d.ZombieKills, d.Injuries, d.DistanceWalkedKm, d.DistanceDrivenKm,
-		d.Drinks, d.AlcoholicDrinks, d.AlcoholMl, d.PillsTaken, d.BooksRead, d.IndoorHours, d.OutdoorHours, d.SleepHours,
+		d.Drinks, d.AlcoholicDrinks, d.AlcoholMl, d.PillsTaken, d.BooksRead, d.IndoorHours, d.OutdoorHours, d.SleepHours, d.SkillBooksRead,
 		iso(at), iso(at), charID)
 	if err != nil {
 		return err
@@ -881,6 +883,7 @@ func (s *sqliteStore) reconcileCharacterStats(ctx context.Context, characterID i
 		total.IndoorHours += d.IndoorHours
 		total.OutdoorHours += d.OutdoorHours
 		total.SleepHours += d.SleepHours
+		total.SkillBooksRead += d.SkillBooksRead
 		for _, b := range d.Breakdown {
 			breakdown[[2]string{b.Category, b.ValueKey}] += b.Value
 		}
@@ -895,10 +898,10 @@ func (s *sqliteStore) reconcileCharacterStats(ctx context.Context, characterID i
 	var storedLastEventAt *string
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT zombie_kills, injuries, distance_walked_km, distance_driven_km,
-		       drinks, alcoholic_drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours, sleep_hours, last_event_at
+		       drinks, alcoholic_drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours, sleep_hours, skill_books_read, last_event_at
 		FROM characters WHERE id = ?
 	`, characterID).Scan(&stored.ZombieKills, &stored.Injuries, &stored.DistanceWalkedKm, &stored.DistanceDrivenKm,
-		&stored.Drinks, &stored.AlcoholicDrinks, &stored.AlcoholMl, &stored.PillsTaken, &stored.BooksRead, &stored.IndoorHours, &stored.OutdoorHours, &stored.SleepHours, &storedLastEventAt); err != nil {
+		&stored.Drinks, &stored.AlcoholicDrinks, &stored.AlcoholMl, &stored.PillsTaken, &stored.BooksRead, &stored.IndoorHours, &stored.OutdoorHours, &stored.SleepHours, &stored.SkillBooksRead, &storedLastEventAt); err != nil {
 		return false, err
 	}
 
@@ -927,10 +930,10 @@ func (s *sqliteStore) reconcileCharacterStats(ctx context.Context, characterID i
 		UPDATE characters
 		SET zombie_kills = ?, injuries = ?, distance_walked_km = ?, distance_driven_km = ?,
 		    drinks = ?, alcoholic_drinks = ?, alcohol_ml = ?, pills_taken = ?, books_read = ?,
-		    indoor_hours = ?, outdoor_hours = ?, sleep_hours = ?, stats_revision = ?, last_event_at = ?
+		    indoor_hours = ?, outdoor_hours = ?, sleep_hours = ?, skill_books_read = ?, stats_revision = ?, last_event_at = ?
 		WHERE id = ?
 	`, total.ZombieKills, total.Injuries, total.DistanceWalkedKm, total.DistanceDrivenKm,
-		total.Drinks, total.AlcoholicDrinks, total.AlcoholMl, total.PillsTaken, total.BooksRead, total.IndoorHours, total.OutdoorHours, total.SleepHours,
+		total.Drinks, total.AlcoholicDrinks, total.AlcoholMl, total.PillsTaken, total.BooksRead, total.IndoorHours, total.OutdoorHours, total.SleepHours, total.SkillBooksRead,
 		currentStatsRevision, lastEventParam, characterID); err != nil {
 		return false, err
 	}

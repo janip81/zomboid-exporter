@@ -294,19 +294,21 @@ var curatorSelfStatsPattern = regexp.MustCompile(`(?i)\bam i doing (well|good|ok
 type curatorStatMetric string
 
 const (
-	statMetricKills         curatorStatMetric = "kills"
-	statMetricDeaths        curatorStatMetric = "deaths"
-	statMetricInjuries      curatorStatMetric = "injuries"
-	statMetricWalkDistance  curatorStatMetric = "walk_distance"
-	statMetricDriveDistance curatorStatMetric = "drive_distance"
-	statMetricDrinks        curatorStatMetric = "drinks"
-	statMetricAlcohol       curatorStatMetric = "alcohol"
-	statMetricPills         curatorStatMetric = "pills"
-	statMetricBooks         curatorStatMetric = "books"
-	statMetricIndoorTime    curatorStatMetric = "indoor_time"
-	statMetricOutdoorTime   curatorStatMetric = "outdoor_time"
-	statMetricSleep         curatorStatMetric = "sleep"
-	statMetricGeneral       curatorStatMetric = "general"
+	statMetricKills           curatorStatMetric = "kills"
+	statMetricDeaths          curatorStatMetric = "deaths"
+	statMetricInjuries        curatorStatMetric = "injuries"
+	statMetricWalkDistance    curatorStatMetric = "walk_distance"
+	statMetricDriveDistance   curatorStatMetric = "drive_distance"
+	statMetricDrinks          curatorStatMetric = "drinks"
+	statMetricAlcohol         curatorStatMetric = "alcohol"
+	statMetricPills           curatorStatMetric = "pills"
+	statMetricBooks           curatorStatMetric = "books"
+	statMetricSkillBooks      curatorStatMetric = "skill_books"
+	statMetricLiteratureBooks curatorStatMetric = "literature_books"
+	statMetricIndoorTime      curatorStatMetric = "indoor_time"
+	statMetricOutdoorTime     curatorStatMetric = "outdoor_time"
+	statMetricSleep           curatorStatMetric = "sleep"
+	statMetricGeneral         curatorStatMetric = "general"
 )
 
 // curatorStatScope is lifetime (sum across every recorded character) or
@@ -339,6 +341,8 @@ var statMetricKeywords = []struct {
 	{statMetricAlcohol, []string{"alcohol"}},
 	{statMetricDrinks, []string{"drink", "drank", "drunk"}},
 	{statMetricPills, []string{"pill", "medicat", "medicine"}},
+	{statMetricSkillBooks, []string{"skill book", "skillbook", "skill-book"}},
+	{statMetricLiteratureBooks, []string{"novel", "literature"}},
 	{statMetricBooks, []string{"book", "read"}},
 	{statMetricIndoorTime, []string{"indoor", "inside"}},
 	{statMetricOutdoorTime, []string{"outdoor", "outside"}},

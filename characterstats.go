@@ -50,6 +50,7 @@ type characterStatDelta struct {
 	AlcoholMl        float64
 	PillsTaken       int64
 	BooksRead        int64
+	SkillBooksRead   int64
 	IndoorHours      float64
 	OutdoorHours     float64
 	SleepHours       float64
@@ -181,10 +182,18 @@ func aggregateDeltaForEvent(eventType string, fields map[string]any) characterSt
 		// read). Counting every skill-book session would over-count;
 		// only a session that actually finished the book (completed)
 		// or a literature read (amount present) counts as one book.
+		// BooksRead is the combined total of both kinds (unchanged);
+		// SkillBooksRead is the skill-book subset -- same "total column
+		// + specific subset column" shape as Drinks/AlcoholicDrinks
+		// above. Literature-only count is BooksRead - SkillBooksRead,
+		// not its own stored column.
 		completed := fieldBool(fields, "completed")
 		_, hasAmount := fields["amount"]
 		if completed || hasAmount {
 			d.BooksRead = 1
+			if completed {
+				d.SkillBooksRead = 1
+			}
 			if item := fieldString(fields, "item"); item != "" {
 				d.Breakdown = append(d.Breakdown, statBreakdownDelta{"read_item", item, 1})
 			}
@@ -251,6 +260,7 @@ func statAggregatesEqual(a, b characterStatDelta) bool {
 		a.AlcoholicDrinks == b.AlcoholicDrinks &&
 		a.PillsTaken == b.PillsTaken &&
 		a.BooksRead == b.BooksRead &&
+		a.SkillBooksRead == b.SkillBooksRead &&
 		closeEnough(a.DistanceWalkedKm, b.DistanceWalkedKm) &&
 		closeEnough(a.DistanceDrivenKm, b.DistanceDrivenKm) &&
 		closeEnough(a.AlcoholMl, b.AlcoholMl) &&

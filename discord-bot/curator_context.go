@@ -223,6 +223,7 @@ type curatorPlayerStats struct {
 	AlcoholMl        float64
 	PillsTaken       int
 	BooksRead        int
+	SkillBooksRead   int
 	IndoorHours      float64
 	OutdoorHours     float64
 	SleepHours       float64
@@ -257,10 +258,10 @@ func fetchCuratorPlayerStats(ctx context.Context, db *pgxpool.Pool, steamID stri
 		       COALESCE(SUM(distance_walked_km), 0), COALESCE(SUM(distance_driven_km), 0),
 		       COALESCE(SUM(drinks), 0), COALESCE(SUM(alcohol_ml), 0),
 		       COALESCE(SUM(pills_taken), 0), COALESCE(SUM(books_read), 0),
-		       COALESCE(SUM(indoor_hours), 0), COALESCE(SUM(outdoor_hours), 0), COALESCE(SUM(sleep_hours), 0)
+		       COALESCE(SUM(indoor_hours), 0), COALESCE(SUM(outdoor_hours), 0), COALESCE(SUM(sleep_hours), 0), COALESCE(SUM(skill_books_read), 0)
 		FROM characters WHERE steam_id = $1
 	`, steamID).Scan(&stats.ZombieKills, &stats.Injuries, &stats.DistanceWalkedKm, &stats.DistanceDrivenKm,
-		&stats.Drinks, &stats.AlcoholMl, &stats.PillsTaken, &stats.BooksRead, &stats.IndoorHours, &stats.OutdoorHours, &stats.SleepHours)
+		&stats.Drinks, &stats.AlcoholMl, &stats.PillsTaken, &stats.BooksRead, &stats.IndoorHours, &stats.OutdoorHours, &stats.SleepHours, &stats.SkillBooksRead)
 	if err != nil {
 		return curatorPlayerStats{}, err
 	}
@@ -290,6 +291,7 @@ type curatorCharacterStats struct {
 	AlcoholMl        float64
 	PillsTaken       int
 	BooksRead        int
+	SkillBooksRead   int
 	IndoorHours      float64
 	OutdoorHours     float64
 	SleepHours       float64
@@ -305,11 +307,11 @@ type curatorCharacterStats struct {
 func fetchCuratorLatestCharacterStats(ctx context.Context, db *pgxpool.Pool, steamID string) (stats curatorCharacterStats, ok bool, err error) {
 	err = db.QueryRow(ctx, `
 		SELECT zombie_kills, injuries, distance_walked_km, distance_driven_km,
-		       drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours, sleep_hours
+		       drinks, alcohol_ml, pills_taken, books_read, indoor_hours, outdoor_hours, sleep_hours, skill_books_read
 		FROM characters WHERE steam_id = $1
 		ORDER BY character_number DESC LIMIT 1
 	`, steamID).Scan(&stats.ZombieKills, &stats.Injuries, &stats.DistanceWalkedKm, &stats.DistanceDrivenKm,
-		&stats.Drinks, &stats.AlcoholMl, &stats.PillsTaken, &stats.BooksRead, &stats.IndoorHours, &stats.OutdoorHours, &stats.SleepHours)
+		&stats.Drinks, &stats.AlcoholMl, &stats.PillsTaken, &stats.BooksRead, &stats.IndoorHours, &stats.OutdoorHours, &stats.SleepHours, &stats.SkillBooksRead)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return curatorCharacterStats{}, false, nil
 	}
@@ -346,7 +348,7 @@ type curatorStatFact struct {
 // statMetricValue extracts the one number/unit a given metric asks for
 // from an aggregate row -- shared by the lifetime and current-life paths
 // so the two can't drift in which field maps to which metric.
-func statMetricValue(metric curatorStatMetric, kills, injuries, drinks, pills, books int, distanceWalkedKm, distanceDrivenKm, alcoholMl, indoorHours, outdoorHours, sleepHours float64) (label, formatted string, ok bool) {
+func statMetricValue(metric curatorStatMetric, kills, injuries, drinks, pills, books, skillBooks int, distanceWalkedKm, distanceDrivenKm, alcoholMl, indoorHours, outdoorHours, sleepHours float64) (label, formatted string, ok bool) {
 	switch metric {
 	case statMetricKills:
 		return "Zombies eliminated", fmt.Sprintf("%d", kills), true
@@ -366,6 +368,10 @@ func statMetricValue(metric curatorStatMetric, kills, injuries, drinks, pills, b
 		return "Pills taken", fmt.Sprintf("%d", pills), true
 	case statMetricBooks:
 		return "Books read", fmt.Sprintf("%d", books), true
+	case statMetricSkillBooks:
+		return "Skill books completed", fmt.Sprintf("%d", skillBooks), true
+	case statMetricLiteratureBooks:
+		return "Literature/novels read", fmt.Sprintf("%d", books-skillBooks), true
 	case statMetricIndoorTime:
 		return "Time spent indoors", fmt.Sprintf("%.2f hours", indoorHours), true
 	case statMetricOutdoorTime:
@@ -418,7 +424,7 @@ func resolveCuratorStatFact(ctx context.Context, db *pgxpool.Pool, discordUserID
 		if !found {
 			return curatorStatFact{}
 		}
-		label, formatted, ok = statMetricValue(metric, cs.ZombieKills, cs.Injuries, cs.Drinks, cs.PillsTaken, cs.BooksRead,
+		label, formatted, ok = statMetricValue(metric, cs.ZombieKills, cs.Injuries, cs.Drinks, cs.PillsTaken, cs.BooksRead, cs.SkillBooksRead,
 			cs.DistanceWalkedKm, cs.DistanceDrivenKm, cs.AlcoholMl, cs.IndoorHours, cs.OutdoorHours, cs.SleepHours)
 	default:
 		ps, err := fetchCuratorPlayerStats(ctx, db, identity.SteamID)
@@ -426,7 +432,7 @@ func resolveCuratorStatFact(ctx context.Context, db *pgxpool.Pool, discordUserID
 			slog.Error("curator: fetch player stats failed (stat fact)", "err", err)
 			return curatorStatFact{}
 		}
-		label, formatted, ok = statMetricValue(metric, ps.ZombieKills, ps.Injuries, ps.Drinks, ps.PillsTaken, ps.BooksRead,
+		label, formatted, ok = statMetricValue(metric, ps.ZombieKills, ps.Injuries, ps.Drinks, ps.PillsTaken, ps.BooksRead, ps.SkillBooksRead,
 			ps.DistanceWalkedKm, ps.DistanceDrivenKm, ps.AlcoholMl, ps.IndoorHours, ps.OutdoorHours, ps.SleepHours)
 	}
 	if !ok {
