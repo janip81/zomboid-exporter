@@ -208,9 +208,18 @@ func resolveCuratorSemanticPlan(ctx context.Context, pool curatorLLMPool, messag
 		MaxOutputTokens: curatorSemanticResolverMaxTokens,
 	})
 	if err != nil {
+		slog.Info("curator: semantic resolver call failed", "err", err)
 		return curatorStatQueryPlan{}, false
 	}
-	return parseCuratorStatQueryPlan(reply)
+	plan, ok := parseCuratorStatQueryPlan(reply)
+	if !ok {
+		// Diagnostic-only: the raw model text, never anything user-supplied
+		// -- server logs only, never sent onward. Needed to tell apart
+		// "model output malformed JSON" from "model deliberately rejected
+		// as generic" from "model picked a metric we then still reject."
+		slog.Info("curator: semantic resolver plan rejected", "rawReply", reply)
+	}
+	return plan, ok
 }
 
 // leaderboardMetricColumn describes how to render one metric's
