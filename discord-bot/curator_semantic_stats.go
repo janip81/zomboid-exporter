@@ -22,23 +22,39 @@ import (
 
 // curatorStatQueryPlan is the resolver's entire output shape -- every
 // field must be validated against a closed enum before use
-// (validateCuratorStatQueryPlan). V1 deliberately supports only
-// leaderboard/max/server, with Scope restricted to "lifetime", a fixed
-// set of CALENDAR windows (curatorScopeWindows: today, yesterday,
-// this_week, last_week, this_month, last_month), or "last_n_days" with a
-// Days count bounded to [curatorMinLastNDays, curatorMaxLastNDays] --
-// deliberately not a free-form date-range parser (no arbitrary start/end
-// dates, no "since <date>"), and deliberately not "session" (no single
-// well-defined boundary exists for a SERVER-WIDE leaderboard -- each
-// player has their own session history, so "this session" is ambiguous
-// until that's designed as its own feature). Days is meaningful ONLY when
-// Scope is "last_n_days" -- validateCuratorStatQueryPlan rejects any plan
-// that sets it otherwise, so it can never silently apply to the wrong
-// scope. PlayerName exists in the schema for a future comparison/
-// named_player path but is unused and unvalidated in V1.
+// (validateCuratorStatQueryPlan). Two mutually exclusive intents can
+// resolve a fact: "leaderboard" uses Metric, one of the FIXED aggregate
+// columns in curatorLeaderboardMetrics (kills, walk_distance, sleep,
+// ...); "breakdown" uses Category (one of curatorBreakdownCategories --
+// the open-ended character_stat_breakdown categories: which weapon,
+// which vehicle, which drink, ...) plus Value, a free-text guess at the
+// SPECIFIC item mentioned ("beer", "baseball bat", "firearm") that is
+// NEVER trusted directly -- it's matched against the real distinct
+// values actually present in the database (matchBreakdownValue) before
+// ever reaching SQL, and the whole plan is rejected if nothing
+// unambiguous matches. This is what makes "ask about anything we track"
+// possible without hardcoding a metric per weapon/vehicle/drink/item:
+// the vocabulary is exactly whatever the Lua trackers have ever actually
+// recorded, discovered at query time.
+//
+// Scope is restricted to "lifetime", a fixed set of CALENDAR windows
+// (curatorScopeWindows: today, yesterday, this_week, last_week,
+// this_month, last_month), or "last_n_days" with a Days count bounded to
+// [curatorMinLastNDays, curatorMaxLastNDays] -- deliberately not a
+// free-form date-range parser (no arbitrary start/end dates, no "since
+// <date>"), and deliberately not "session" (no single well-defined
+// boundary exists for a SERVER-WIDE leaderboard -- each player has their
+// own session history, so "this session" is ambiguous until that's
+// designed as its own feature). Days is meaningful ONLY when Scope is
+// "last_n_days" -- validateCuratorStatQueryPlan rejects any plan that
+// sets it otherwise, so it can never silently apply to the wrong scope.
+// PlayerName exists in the schema for a future comparison/named_player
+// path but is unused and unvalidated in V1.
 type curatorStatQueryPlan struct {
 	Intent     string `json:"intent"`
-	Metric     string `json:"metric"`
+	Metric     string `json:"metric,omitempty"`
+	Category   string `json:"category,omitempty"`
+	Value      string `json:"value,omitempty"`
 	Operation  string `json:"operation"`
 	Target     string `json:"target"`
 	Scope      string `json:"scope"`
@@ -91,30 +107,44 @@ func randomCuratorLeaderboardMetric() string {
 	return curatorLeaderboardMetricList[rand.Intn(len(curatorLeaderboardMetricList))]
 }
 
+// validCuratorScopeAndDays is the Scope/Days half of the untrusted-output
+// gate, shared by both the "leaderboard" and "breakdown" intents so the
+// two can never drift on what counts as a valid time window.
+func validCuratorScopeAndDays(scope string, days int) bool {
+	if scope == "last_n_days" {
+		return days >= curatorMinLastNDays && days <= curatorMaxLastNDays
+	}
+	if days != 0 {
+		return false
+	}
+	_, validWindow := curatorScopeWindows[scope]
+	return scope == "lifetime" || validWindow
+}
+
 // validateCuratorStatQueryPlan is the untrusted-output gate
 // (SEM-3/SEM-6): every field must land in a closed enum or the whole
-// plan is rejected outright, no partial/"best guess" acceptance. V1 only
-// accepts leaderboard/max/server, with Scope restricted to "lifetime",
-// one of curatorScopeWindows' keys, or "last_n_days" with an in-range
-// Days -- any other scope string (a model inventing "session"/"tonight"
-// because a user asked for one) fails closed instead of silently falling
-// back to lifetime and answering the wrong question. Days must be zero
-// for every scope OTHER than "last_n_days": a plan that smuggles a Days
-// value in alongside e.g. scope="today" is rejected outright rather than
-// silently ignored, keeping "which fields this plan shape actually uses"
-// unambiguous.
+// plan is rejected outright, no partial/"best guess" acceptance. The two
+// intents are mutually exclusive by construction: "leaderboard" requires
+// a valid Metric and forbids Category/Value; "breakdown" requires a
+// valid Category and a non-empty Value (itself re-validated against real
+// data later by matchBreakdownValue -- this function only checks that
+// Category is one of the allowed open-ended categories, not that Value
+// resolves to anything real) and forbids Metric. A plan that sets fields
+// from both shapes, or neither, is rejected outright rather than
+// guessing which one was meant.
 func validateCuratorStatQueryPlan(p curatorStatQueryPlan) bool {
-	if p.Intent != "leaderboard" || p.Operation != "max" || p.Target != "server" || !curatorLeaderboardMetrics[p.Metric] {
+	if p.Operation != "max" || p.Target != "server" || !validCuratorScopeAndDays(p.Scope, p.Days) {
 		return false
 	}
-	if p.Scope == "last_n_days" {
-		return p.Days >= curatorMinLastNDays && p.Days <= curatorMaxLastNDays
-	}
-	if p.Days != 0 {
+	switch p.Intent {
+	case "leaderboard":
+		return curatorLeaderboardMetrics[p.Metric] && p.Category == "" && p.Value == ""
+	case "breakdown":
+		_, validCategory := curatorBreakdownCategories[p.Category]
+		return validCategory && p.Value != "" && p.Metric == ""
+	default:
 		return false
 	}
-	_, validWindow := curatorScopeWindows[p.Scope]
-	return p.Scope == "lifetime" || validWindow
 }
 
 // curatorSemanticResolverPrompt is the resolver's ENTIRE persona --
@@ -127,19 +157,26 @@ const curatorSemanticResolverPrompt = `You are a strict classifier for a Discord
 
 Read ONE Discord message and output ONLY a single JSON object matching exactly this schema, with no prose, no markdown code fences, and no explanation before or after it:
 
-{"intent": "...", "metric": "...", "operation": "...", "target": "...", "scope": "...", "days": 0}
+{"intent": "...", "metric": "...", "category": "...", "value": "...", "operation": "...", "target": "...", "scope": "...", "days": 0}
 
 "days" is only ever meaningful when scope is "last_n_days" -- omit it (or use 0) for every other scope.
 
+There are TWO different ways a message can resolve -- pick exactly one, never both:
+
+1. intent "leaderboard" -- the message asks about one of the FIXED metrics below (a whole-category total, e.g. "most kills", "most books read"). Set "metric" to one of the allowed metric values. Leave "category" and "value" empty.
+
+2. intent "breakdown" -- the message names a SPECIFIC thing within an open-ended category (a particular weapon, vehicle, drink, item, injury type, body part, sleep location, or movement mode -- e.g. "who's killed the most with an axe", "who's drunk the most beer", "who's driven a van the most", "gun violence statistics"). Set "category" to one of the allowed category values, and "value" to the specific thing named, in plain words taken from the message (e.g. "axe", "beer", "van", "firearm", "run"). Leave "metric" empty. The exact internal spelling of "value" does not need to be guessed correctly -- the backend matches it against real recorded data itself; just extract the plain-language term the message actually used.
+
 Allowed values (nothing else is ever valid):
-intent: "leaderboard" or "generic"
-metric: "kills", "vehicle_kills", "deaths", "injuries", "walk_distance", "drive_distance", "drinks", "alcohol", "alcoholic_drinks", "pills", "books", "skill_books", "literature_books", "indoor_time", "outdoor_time", "sleep"
+intent: "leaderboard", "breakdown", or "generic"
+metric (leaderboard only): "kills", "vehicle_kills", "deaths", "injuries", "walk_distance", "drive_distance", "drinks", "alcohol", "alcoholic_drinks", "pills", "books", "skill_books", "literature_books", "indoor_time", "outdoor_time", "sleep"
+category (breakdown only): "kill_method" (melee/firearm/vehicle/unarmed), "kill_weapon" (a specific weapon used in a kill), "kill_vehicle" (a specific vehicle used in a kill), "movement_mode" (walk/run/sprint), "drive_vehicle" (a specific vehicle driven), "drink_fluid" (a specific drink), "drink_item" (a specific drink container/item), "pill_item" (a specific pill/medicine), "read_item" (a specific book), "sleep_location" (a specific sleep location), "injury_type" (a specific injury type), "injury_bodypart" (a specific body part injured)
 operation: "max"
 target: "server"
 scope: "lifetime", "today", "yesterday", "this_week", "last_week", "this_month", "last_month", "last_n_days"
 days: a whole number from 1 to 90 (ONLY when scope is "last_n_days")
 
-If the message does not CLEARLY ask who holds a server-wide record for one of the listed metrics, output exactly {"intent": "generic"} and nothing else.
+If the message does not CLEARLY ask who holds a server-wide record for one of the listed metrics or a specific named thing in one of the listed categories, output exactly {"intent": "generic"} and nothing else.
 
 Scope mapping (all time frames are the real-world calendar, server time -- never an in-game/ingame-calendar date):
 - No time frame mentioned ("who has the most kills") -> scope "lifetime".
@@ -152,6 +189,16 @@ Scope mapping (all time frames are the real-world calendar, server time -- never
 
 Specific mapping guidance:
 - "who's killed the most zombies with a vehicle/car" / "roadkill" / "who's run over the most zombies" / "tally of zombies killed in cars" -> metric "vehicle_kills". This is a SUBSET of "kills" restricted to vehicle kills specifically -- use plain "kills" instead whenever the question is about zombie kills in general with no vehicle/car/roadkill/run-over qualifier.
+- "gun violence statistics" / "who's shot the most zombies" / "who's the best/worst with a gun" -> category "kill_method", value "firearm". "who kills with their bare hands" / "unarmed kills" -> category "kill_method", value "unarmed". "who's the best at melee" -> category "kill_method", value "melee". (Prefer plain metric "vehicle_kills" over category "kill_method" value "vehicle" when the question is specifically about vehicles -- both resolve the same underlying data, but "vehicle_kills" is the more direct match.)
+- "who's killed the most with [a specific named weapon]" (an axe, a baseball bat, a pistol, ...) -> category "kill_weapon", value "[that weapon]".
+- "who's run over the most zombies with a [specific vehicle type]" -> category "kill_vehicle", value "[that vehicle]".
+- "who's sprinted/run the most" (as distinct from a combined walk+run+sprint total) -> category "movement_mode", value "run" or "sprint" or "walk" depending on which is named. An unqualified "who's walked/covered the most distance" with no specific mode named stays metric "walk_distance" instead (the combined total).
+- "who's driven a [specific vehicle type] the most" -> category "drive_vehicle", value "[that vehicle]". An unqualified "who's driven the most" with no specific vehicle named stays metric "drive_distance" instead (the combined total).
+- "who drinks the most [a specific named drink]" (beer, whiskey, water, ...) -> category "drink_fluid", value "[that drink]".
+- "who's taken the most [a specific named pill/medicine]" -> category "pill_item", value "[that item]".
+- "who's read [a specific named book]" the most -> category "read_item", value "[that book]".
+- "who sleeps the most in/on [a specific place]" (a bed, the floor, outdoors, ...) -> category "sleep_location", value "[that place]".
+- "who's been injured/hurt the most by [a specific injury type]" (a bite, a scratch, a laceration, ...) -> category "injury_type", value "[that injury]". "who's hurt their [a specific body part] the most" -> category "injury_bodypart", value "[that body part]".
 - "who is the drunk" / "who drinks the most" / "who gets drunk the most" -> metric "alcoholic_drinks" (a count of alcoholic drinks), NOT "alcohol". These questions describe HISTORICAL cumulative consumption, never present/current intoxication -- there is no tracked "currently drunk" state.
 - "who consumed the most alcohol by volume" -> metric "alcohol".
 - "who has walked/run/sprinted the furthest" / "who has covered the most distance on foot" -> metric "walk_distance". This ONE metric covers walking, running, AND sprinting combined into a single total distance -- there is no separate running-only or sprinting-only metric, so never reject a "run"/"ran"/"sprint" phrasing just because the metric name itself says "walk".
@@ -448,6 +495,153 @@ var curatorScopeWindows = map[string]curatorScopeWindow{
 		endExpr:   stockholmTrunc("month", ""),
 		label:     "last month, server-wide",
 	},
+}
+
+// curatorBreakdownCategory describes one open-ended
+// character_stat_breakdown category -- the SPECIFIC value within it
+// (which weapon, which drink, ...) is never a fixed enum, unlike
+// leaderboardMetricColumns/scopedMetricEvents' metrics. eventType/field
+// are FIXED Go-literal strings identifying which raw event type and
+// which JSON field inside its details a value_key/value came from --
+// same Go-literal-only precedent as leaderboardMetricColumns. agg
+// selects the SQL aggregate shape via curatorBreakdownAggExpr ("count"
+// for a plain tally, "sum_km"/"sum_hours" for a summed measurement).
+// labelFmt has exactly one %s for the matched, prettified value.
+type curatorBreakdownCategory struct {
+	eventType   string
+	field       string
+	agg         string
+	extraFilter string // extra boolean SQL fragment on the same event row, "" for none
+	labelFmt    string
+}
+
+// curatorBreakdownCategories is the fixed allowlist of categories the
+// resolver may target -- mirrors every statBreakdownDelta category
+// aggregateDeltaForEvent (characterstats.go) actually populates. Adding
+// a new Lua tracker's breakdown category here is the ONLY code change
+// needed to make Curator able to answer questions about it -- no new
+// metric, no new query function, per this feature's whole point: the
+// vocabulary of "anything we track" is discovered from real recorded
+// data (matchBreakdownValue), not hand-enumerated per weapon/vehicle/
+// drink/item.
+var curatorBreakdownCategories = map[string]curatorBreakdownCategory{
+	"kill_method":   {"kill", "killMethod", "count", "", "Most zombies killed by %s"},
+	"kill_weapon":   {"kill", "weapon", "count", "", "Most kills with %s"},
+	"kill_vehicle":  {"kill", "vehicle", "count", "", "Most kills with %s"},
+	"movement_mode": {"movement_distance", "movement", "sum_km", "", "Furthest distance covered (%s)"},
+	"drive_vehicle": {"driving_distance", "vehicle", "sum_km", "", "Furthest driven in %s"},
+	"drink_fluid":   {"drink", "fluid", "count", "", "Most %s consumed"},
+	"drink_item":    {"drink", "item", "count", "", "Most %s consumed"},
+	"pill_item":     {"pill", "item", "count", "", "Most %s taken"},
+	// read_item mirrors the "books" metric's own completed-or-hasAmount
+	// gate exactly (see scopedMetricEvents' "books" entry) -- only a
+	// finished skill-book session or a literature read counts as one.
+	"read_item":       {"read", "item", "count", "(details->>'completed')::boolean = true OR details ? 'amount'", "Most times reading %s"},
+	"sleep_location":  {"sleep", "location", "sum_hours", "", "Most time spent sleeping (%s)"},
+	"injury_type":     {"injury", "injury", "count", "", "Most %s injuries"},
+	"injury_bodypart": {"injury", "bodyPart", "count", "", "Most injuries to the %s"},
+}
+
+// curatorBreakdownAggExpr maps a curatorBreakdownCategory's agg kind to
+// the SQL expression for one row's numeric contribution and the display
+// unit formatLeaderboardValue should use for the total.
+func curatorBreakdownAggExpr(agg string) (valueExpr, unit string) {
+	switch agg {
+	case "sum_km":
+		return "(details->>'km')::float8", "km"
+	case "sum_hours":
+		return "(details->>'hours')::float8", "hours"
+	default:
+		return "1", ""
+	}
+}
+
+// normalizeBreakdownToken strips exactly the kind of noise that
+// separates a natural-language guess from this game's internal naming
+// (a "Base." module prefix, underscores, spaces, case) so "baseball
+// bat" and "Base.BaseballBat_Metal" compare equal on their meaningful
+// content.
+func normalizeBreakdownToken(s string) string {
+	s = strings.ToLower(s)
+	s = strings.TrimPrefix(s, "base.")
+	s = strings.NewReplacer("_", "", " ", "", "-", "").Replace(s)
+	return s
+}
+
+// matchBreakdownValue resolves the resolver's free-text guess against
+// the REAL distinct values recorded for this category -- the guess
+// itself is untrusted (SEM-3) and never used directly in SQL regardless
+// of this function's outcome; only a value that survives this match is
+// ever passed to a query, and always as a bound parameter. Exact
+// normalized match is tried first and, if unambiguous, wins immediately
+// -- this matters because a looser substring pass alone would make
+// "axe" ambiguously match both "Base.Axe" and "Base.HandAxe". Substring
+// containment (either direction) is the fallback for a query that's a
+// deliberately partial word (e.g. "hand axe" -> "handaxe" contains, and
+// is contained by, "Base.HandAxe"'s normalized form). Both stages fail
+// closed on ambiguity (more than one candidate matches) rather than
+// guessing which one was meant.
+func matchBreakdownValue(query string, candidates []string) (string, bool) {
+	nq := normalizeBreakdownToken(query)
+	if nq == "" {
+		return "", false
+	}
+	var exact []string
+	for _, c := range candidates {
+		if normalizeBreakdownToken(c) == nq {
+			exact = append(exact, c)
+		}
+	}
+	if len(exact) == 1 {
+		return exact[0], true
+	}
+	var contains []string
+	for _, c := range candidates {
+		nc := normalizeBreakdownToken(c)
+		if strings.Contains(nc, nq) || strings.Contains(nq, nc) {
+			contains = append(contains, c)
+		}
+	}
+	if len(contains) == 1 {
+		return contains[0], true
+	}
+	return "", false
+}
+
+// prettifyBreakdownValue renders a matched internal value_key for
+// display -- best-effort only (this codebase has no item-name
+// localization table to draw a real display name from): strips the
+// "Base." module prefix and turns underscores into spaces. "melee",
+// "firearm", "vehicle", "unarmed", drink fluids, injury types, and body
+// parts are already human-readable as-is and pass through unchanged.
+func prettifyBreakdownValue(v string) string {
+	v = strings.TrimPrefix(v, "Base.")
+	return strings.ReplaceAll(v, "_", " ")
+}
+
+// fetchBreakdownDistinctValues returns every value_key ever recorded for
+// category, server-wide -- the real vocabulary matchBreakdownValue
+// matches the resolver's guess against. Not scoped to serverName: this
+// codebase's schema supports several Zomboid servers sharing one
+// Postgres database, but the SET OF POSSIBLE ITEM NAMES (weapon/vehicle/
+// drink types) is a property of the mod content, not any one server, so
+// there's no reason to narrow it -- only the leaderboard QUERY itself
+// (resolveCuratorBreakdownLifetimeFact/WindowedFact) filters by server.
+func fetchBreakdownDistinctValues(ctx context.Context, db *pgxpool.Pool, category string) ([]string, error) {
+	rows, err := db.Query(ctx, `SELECT DISTINCT value_key FROM character_stat_breakdown WHERE category = $1`, category)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var values []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		values = append(values, v)
+	}
+	return values, rows.Err()
 }
 
 func formatLeaderboardValue(unit string, total float64) string {
@@ -790,6 +984,164 @@ func resolveCuratorDeathsWindowedLeaderboardFact(ctx context.Context, db *pgxpoo
 	return curatorStatFact{KnownFact: sentence, FallbackSentence: sentence, Entries: entries, Resolved: true}
 }
 
+// resolveCuratorBreakdownFact is the "breakdown" intent's single entry
+// point, the open-vocabulary counterpart to resolveCuratorLeaderboardFact
+// -- category is already validated (validateCuratorStatQueryPlan), but
+// valueQuery is still raw, untrusted resolver output at this point.
+// Fetches the real recorded vocabulary for category and resolves
+// valueQuery against it (matchBreakdownValue) BEFORE anything reaches
+// SQL; a plan naming a weapon/vehicle/drink/item that was never actually
+// recorded (typo, hallucination, or genuinely nothing like it exists)
+// resolves to Resolved=false here, same as any other "no data" case.
+func resolveCuratorBreakdownFact(ctx context.Context, db *pgxpool.Pool, serverName, category, valueQuery, scope string, days int) curatorStatFact {
+	if db == nil {
+		return curatorStatFact{}
+	}
+	cat, ok := curatorBreakdownCategories[category]
+	if !ok {
+		return curatorStatFact{}
+	}
+	candidates, err := fetchBreakdownDistinctValues(ctx, db, category)
+	if err != nil {
+		slog.Error("curator: breakdown distinct-value fetch failed", "category", category, "err", err)
+		return curatorStatFact{}
+	}
+	matched, ok := matchBreakdownValue(valueQuery, candidates)
+	if !ok {
+		slog.Info("curator: breakdown value did not match any recorded value", "category", category, "valueQuery", valueQuery)
+		return curatorStatFact{}
+	}
+	if scope == "last_n_days" {
+		return resolveCuratorBreakdownWindowedFact(ctx, db, serverName, cat, matched, lastNDaysWindow(days))
+	}
+	if window, ok := curatorScopeWindows[scope]; ok {
+		return resolveCuratorBreakdownWindowedFact(ctx, db, serverName, cat, matched, window)
+	}
+	return resolveCuratorBreakdownLifetimeFact(ctx, db, serverName, category, cat, matched)
+}
+
+// resolveCuratorBreakdownLifetimeFact reads character_stat_breakdown --
+// the same lifetime aggregate table resolveCuratorVehicleKillsLeaderboardFact
+// uses, just parameterized by category/value_key instead of a single
+// hard-coded pair. matchedValue is already a real, validated value_key
+// (matchBreakdownValue), so it's safe to bind as a plain parameter same
+// as any other query in this file.
+func resolveCuratorBreakdownLifetimeFact(ctx context.Context, db *pgxpool.Pool, serverName, category string, cat curatorBreakdownCategory, matchedValue string) curatorStatFact {
+	rows, err := db.Query(ctx, fmt.Sprintf(`
+		SELECT p.steam_id, p.last_username, agg.total
+		FROM (
+			SELECT c.steam_id, SUM(b.value) AS total
+			FROM character_stat_breakdown b
+			JOIN characters c ON c.id = b.character_id
+			WHERE c.server = $1 AND b.category = $2 AND b.value_key = $3
+			GROUP BY c.steam_id
+			HAVING SUM(b.value) > 0
+			ORDER BY total DESC
+			LIMIT %d
+		) agg
+		JOIN players p ON p.steam_id = agg.steam_id
+		ORDER BY agg.total DESC
+	`, curatorLeaderboardTopN), serverName, category, matchedValue)
+	if err != nil {
+		slog.Error("curator: breakdown lifetime query failed", "category", category, "value", matchedValue, "err", err)
+		return curatorStatFact{}
+	}
+	defer rows.Close()
+
+	var entries []curatorLeaderboardEntry
+	for rows.Next() {
+		var steamID, username string
+		var total float64
+		if err := rows.Scan(&steamID, &username, &total); err != nil {
+			slog.Error("curator: breakdown lifetime row scan failed", "err", err)
+			return curatorStatFact{}
+		}
+		_, unit := curatorBreakdownAggExpr(cat.agg)
+		entries = append(entries, curatorLeaderboardEntry{Username: username, SteamID: steamID, Formatted: formatLeaderboardValue(unit, total)})
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("curator: breakdown lifetime rows failed", "err", err)
+		return curatorStatFact{}
+	}
+	if len(entries) == 0 {
+		return curatorStatFact{}
+	}
+
+	label := fmt.Sprintf(cat.labelFmt, prettifyBreakdownValue(matchedValue))
+	sentence := formatLeaderboardSentence(label, "lifetime, server-wide", entries)
+	return curatorStatFact{KnownFact: sentence, FallbackSentence: sentence, Entries: entries, Resolved: true}
+}
+
+// resolveCuratorBreakdownWindowedFact is the breakdown category's
+// windowed-scope shape, mirroring resolveCuratorWindowedLeaderboardFact
+// but keyed by an open-ended (category, matchedValue) pair read from
+// events.details instead of a fixed metric. matchedValue's bind
+// position shifts depending on whether window carries its own extra arg
+// (only last_n_days does, for its "days" parameter) -- computed here
+// rather than assumed, so the two shapes can never silently collide on
+// the same placeholder number.
+func resolveCuratorBreakdownWindowedFact(ctx context.Context, db *pgxpool.Pool, serverName string, cat curatorBreakdownCategory, matchedValue string, window curatorScopeWindow) curatorStatFact {
+	upperBound := ""
+	if window.endExpr != "" {
+		upperBound = fmt.Sprintf("AND occurred_at < %s", window.endExpr)
+	}
+	extraFilter := ""
+	if cat.extraFilter != "" {
+		extraFilter = "AND " + cat.extraFilter
+	}
+	valueExpr, unit := curatorBreakdownAggExpr(cat.agg)
+	valuePlaceholder := fmt.Sprintf("$%d", len(window.args)+2)
+	args := append([]any{serverName}, window.args...)
+	args = append(args, matchedValue)
+
+	rows, err := db.Query(ctx, fmt.Sprintf(`
+		SELECT p.steam_id, p.last_username, agg.total
+		FROM (
+			SELECT steam_id, SUM(%s) AS total
+			FROM events
+			WHERE server = $1 AND event_type = '%s' AND steam_id IS NOT NULL
+			  AND details->>'%s' = %s
+			  AND occurred_at >= %s
+			  %s
+			  %s
+			GROUP BY steam_id
+			HAVING SUM(%s) > 0
+			ORDER BY total DESC
+			LIMIT %d
+		) agg
+		JOIN players p ON p.steam_id = agg.steam_id
+		ORDER BY agg.total DESC
+	`, valueExpr, cat.eventType, cat.field, valuePlaceholder, window.startExpr, upperBound, extraFilter, valueExpr, curatorLeaderboardTopN),
+		args...)
+	if err != nil {
+		slog.Error("curator: breakdown windowed query failed", "category", cat.field, "value", matchedValue, "err", err)
+		return curatorStatFact{}
+	}
+	defer rows.Close()
+
+	var entries []curatorLeaderboardEntry
+	for rows.Next() {
+		var steamID, username string
+		var total float64
+		if err := rows.Scan(&steamID, &username, &total); err != nil {
+			slog.Error("curator: breakdown windowed row scan failed", "err", err)
+			return curatorStatFact{}
+		}
+		entries = append(entries, curatorLeaderboardEntry{Username: username, SteamID: steamID, Formatted: formatLeaderboardValue(unit, total)})
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("curator: breakdown windowed rows failed", "err", err)
+		return curatorStatFact{}
+	}
+	if len(entries) == 0 {
+		return curatorStatFact{}
+	}
+
+	label := fmt.Sprintf(cat.labelFmt, prettifyBreakdownValue(matchedValue))
+	sentence := formatLeaderboardSentence(label, window.label, entries)
+	return curatorStatFact{KnownFact: sentence, FallbackSentence: sentence, Entries: entries, Resolved: true}
+}
+
 // resolveCuratorSemanticStatFact is askCurator's single entry point for
 // the whole semantic-resolution feature: attempt the resolver call,
 // validate its plan, and resolve the deterministic fact -- or return
@@ -803,10 +1155,16 @@ func resolveCuratorSemanticStatFact(ctx context.Context, deps botDeps, message s
 		slog.Info("curator: semantic resolver", "resolverAttempted", true, "planAccepted", false)
 		return curatorStatFact{}
 	}
-	fact := resolveCuratorLeaderboardFact(ctx, deps.db, deps.serverName, plan.Metric, plan.Scope, plan.Days)
+	var fact curatorStatFact
+	if plan.Intent == "breakdown" {
+		fact = resolveCuratorBreakdownFact(ctx, deps.db, deps.serverName, plan.Category, plan.Value, plan.Scope, plan.Days)
+	} else {
+		fact = resolveCuratorLeaderboardFact(ctx, deps.db, deps.serverName, plan.Metric, plan.Scope, plan.Days)
+	}
 	slog.Info("curator: semantic resolver",
 		"resolverAttempted", true, "planAccepted", true,
-		"intent", plan.Intent, "metric", plan.Metric, "operation", plan.Operation,
-		"target", plan.Target, "scope", plan.Scope, "days", plan.Days, "factResolved", fact.Resolved)
+		"intent", plan.Intent, "metric", plan.Metric, "category", plan.Category, "value", plan.Value,
+		"operation", plan.Operation, "target", plan.Target, "scope", plan.Scope, "days", plan.Days,
+		"factResolved", fact.Resolved)
 	return fact
 }

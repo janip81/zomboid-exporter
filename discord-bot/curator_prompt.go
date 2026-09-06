@@ -333,7 +333,14 @@ var statMetricKeywords = []struct {
 	metric   curatorStatMetric
 	keywords []string
 }{
-	{statMetricKills, []string{"kill", "zombie"}},
+	// gun/firearm/shoot/weapon added for the breakdown resolver's
+	// kill_method/kill_weapon categories -- "gun violence statistics"
+	// has neither "kill" nor "zombie" in it, and previously fell through
+	// looksCuratorStatLike's gate entirely (never even reached the
+	// resolver). SELF_STATS has no breakdown-aware metric of its own, so
+	// these still map here for classifySelfStatsMetric's purposes too --
+	// close enough ("how many guns have I used" is kill-adjacent).
+	{statMetricKills, []string{"kill", "zombie", "gun", "firearm", "shoot", "weapon"}},
 	{statMetricDeaths, []string{"death", "died", "die "}},
 	{statMetricInjuries, []string{"injur", "hurt", "wound"}},
 	{statMetricWalkDistance, []string{"walk", "ran", "run", "sprint", "furthest"}},
