@@ -127,25 +127,45 @@ local function onZombieDead(zombie)
         local prev = lastKnownKills[username]
         local current = p:getZombieKills()
 
+        -- DELTA FIX (2026-09-06): confirmed live -- a vehicle plowing
+        -- through several zombies at once can advance p:getZombieKills()
+        -- by more than 1 between two consecutive OnZombieDead callbacks
+        -- (the engine appears to update the counter for a whole batch of
+        -- simultaneous deaths before firing each zombie's Lua event).
+        -- The OLD "current > prev" boolean check only ever emitted ONE
+        -- kill event per batch: the first callback already advanced
+        -- lastKnownKills[username] to the new total, so every subsequent
+        -- callback in the same batch saw current == prev and emitted
+        -- nothing -- silently losing every kill but the first in a
+        -- multi-kill moment, exactly the scenario a car plowing through
+        -- a crowd produces and melee/firearm combat (one kill per
+        -- attack animation) essentially never does. Emitting one event
+        -- per point of delta (not just one event total) recovers every
+        -- swallowed kill; killMethod/weapon/vehicle are resolved once
+        -- from THIS callback's zombie and reused for the others in the
+        -- same delta, since simultaneous deaths in one batch share the
+        -- same cause.
         if prev ~= nil and current > prev then
             local killMethod, weaponType, vehicleType = resolveKillMethod(zombie)
-            local fields = {
-                type = "kill",
-                steamId = ExporterLog.Utils.getPlayerSteamID(p),
-                username = username,
-                x = math.floor(p:getX()),
-                y = math.floor(p:getY()),
-                z = math.floor(p:getZ()),
-                zombieKills = current,
-                killMethod = killMethod,
-            }
-            if weaponType then
-                fields.weapon = weaponType
+            for kc = prev + 1, current do
+                local fields = {
+                    type = "kill",
+                    steamId = ExporterLog.Utils.getPlayerSteamID(p),
+                    username = username,
+                    x = math.floor(p:getX()),
+                    y = math.floor(p:getY()),
+                    z = math.floor(p:getZ()),
+                    zombieKills = kc,
+                    killMethod = killMethod,
+                }
+                if weaponType then
+                    fields.weapon = weaponType
+                end
+                if vehicleType then
+                    fields.vehicle = vehicleType
+                end
+                ExporterLog.Emit.event(fields)
             end
-            if vehicleType then
-                fields.vehicle = vehicleType
-            end
-            ExporterLog.Emit.event(fields)
         end
 
         lastKnownKills[username] = current
