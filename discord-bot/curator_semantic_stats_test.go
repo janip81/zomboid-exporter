@@ -77,6 +77,17 @@ func TestValidateCuratorStatQueryPlan_OnlyExactV1ShapeAccepted(t *testing.T) {
 		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "this_month"}, true},
 		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "last_month"}, true},
 		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "this_session"}, false},
+		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "last_n_days", Days: 8}, true},
+		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "last_n_days", Days: 1}, true},
+		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "last_n_days", Days: 90}, true},
+		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "last_n_days", Days: 91}, false},
+		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "last_n_days", Days: 0}, false},
+		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "last_n_days", Days: -1}, false},
+		// Days must be zero for any scope other than "last_n_days" -- a
+		// plan smuggling a Days value alongside e.g. "today" is rejected
+		// outright rather than silently ignored.
+		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "today", Days: 8}, false},
+		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "lifetime", Days: 8}, false},
 		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "min", Target: "server", Scope: "lifetime"}, false},
 		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "named_player", Scope: "lifetime"}, false},
 		{curatorStatQueryPlan{Intent: "comparison", Metric: "kills", Operation: "compare", Target: "named_player", Scope: "lifetime"}, false},

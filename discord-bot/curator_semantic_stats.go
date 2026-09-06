@@ -23,24 +23,40 @@ import (
 // curatorStatQueryPlan is the resolver's entire output shape -- every
 // field must be validated against a closed enum before use
 // (validateCuratorStatQueryPlan). V1 deliberately supports only
-// leaderboard/max/server, with Scope restricted to "lifetime" plus a
-// fixed set of CALENDAR windows (curatorScopeWindows: today, yesterday,
-// this_week, last_week, this_month, last_month) -- deliberately not a
-// generic date-range parser the untrusted resolver could be talked into
-// misusing, and deliberately not "session" (no single well-defined
-// boundary exists for a SERVER-WIDE leaderboard -- each player has their
-// own session history, so "this session" is ambiguous until that's
-// designed as its own feature). PlayerName exists in the schema for a
-// future comparison/named_player path but is unused and unvalidated in
-// V1.
+// leaderboard/max/server, with Scope restricted to "lifetime", a fixed
+// set of CALENDAR windows (curatorScopeWindows: today, yesterday,
+// this_week, last_week, this_month, last_month), or "last_n_days" with a
+// Days count bounded to [curatorMinLastNDays, curatorMaxLastNDays] --
+// deliberately not a free-form date-range parser (no arbitrary start/end
+// dates, no "since <date>"), and deliberately not "session" (no single
+// well-defined boundary exists for a SERVER-WIDE leaderboard -- each
+// player has their own session history, so "this session" is ambiguous
+// until that's designed as its own feature). Days is meaningful ONLY when
+// Scope is "last_n_days" -- validateCuratorStatQueryPlan rejects any plan
+// that sets it otherwise, so it can never silently apply to the wrong
+// scope. PlayerName exists in the schema for a future comparison/
+// named_player path but is unused and unvalidated in V1.
 type curatorStatQueryPlan struct {
 	Intent     string `json:"intent"`
 	Metric     string `json:"metric"`
 	Operation  string `json:"operation"`
 	Target     string `json:"target"`
 	Scope      string `json:"scope"`
+	Days       int    `json:"days,omitempty"`
 	PlayerName string `json:"player_name,omitempty"`
 }
+
+// curatorMinLastNDays/curatorMaxLastNDays bound scope="last_n_days"'
+// Days field -- an untrusted resolver output feeding directly into a
+// numeric SQL interval multiplier must be range-checked, not just
+// type-checked (SEM-3). The upper bound keeps the query answering what
+// it sounds like ("last 8 days") rather than silently becoming a
+// backdoor lifetime query with extra steps; anything longer should use a
+// calendar scope (this_month/last_month) or lifetime instead.
+const (
+	curatorMinLastNDays = 1
+	curatorMaxLastNDays = 90
+)
 
 // curatorLeaderboardMetrics is the V1-supported metric allowlist -- only
 // metrics with an actual deterministic aggregate column behind them.
@@ -78,18 +94,27 @@ func randomCuratorLeaderboardMetric() string {
 // validateCuratorStatQueryPlan is the untrusted-output gate
 // (SEM-3/SEM-6): every field must land in a closed enum or the whole
 // plan is rejected outright, no partial/"best guess" acceptance. V1 only
-// accepts leaderboard/max/server, with Scope restricted to "lifetime" or
-// one of curatorScopeWindows' keys -- any other scope string (a model
-// inventing "session"/"tonight" because a user asked for one) fails
-// closed instead of silently falling back to lifetime and answering the
-// wrong question.
+// accepts leaderboard/max/server, with Scope restricted to "lifetime",
+// one of curatorScopeWindows' keys, or "last_n_days" with an in-range
+// Days -- any other scope string (a model inventing "session"/"tonight"
+// because a user asked for one) fails closed instead of silently falling
+// back to lifetime and answering the wrong question. Days must be zero
+// for every scope OTHER than "last_n_days": a plan that smuggles a Days
+// value in alongside e.g. scope="today" is rejected outright rather than
+// silently ignored, keeping "which fields this plan shape actually uses"
+// unambiguous.
 func validateCuratorStatQueryPlan(p curatorStatQueryPlan) bool {
+	if p.Intent != "leaderboard" || p.Operation != "max" || p.Target != "server" || !curatorLeaderboardMetrics[p.Metric] {
+		return false
+	}
+	if p.Scope == "last_n_days" {
+		return p.Days >= curatorMinLastNDays && p.Days <= curatorMaxLastNDays
+	}
+	if p.Days != 0 {
+		return false
+	}
 	_, validWindow := curatorScopeWindows[p.Scope]
-	return p.Intent == "leaderboard" &&
-		p.Operation == "max" &&
-		p.Target == "server" &&
-		(p.Scope == "lifetime" || validWindow) &&
-		curatorLeaderboardMetrics[p.Metric]
+	return p.Scope == "lifetime" || validWindow
 }
 
 // curatorSemanticResolverPrompt is the resolver's ENTIRE persona --
@@ -102,14 +127,17 @@ const curatorSemanticResolverPrompt = `You are a strict classifier for a Discord
 
 Read ONE Discord message and output ONLY a single JSON object matching exactly this schema, with no prose, no markdown code fences, and no explanation before or after it:
 
-{"intent": "...", "metric": "...", "operation": "...", "target": "...", "scope": "..."}
+{"intent": "...", "metric": "...", "operation": "...", "target": "...", "scope": "...", "days": 0}
+
+"days" is only ever meaningful when scope is "last_n_days" -- omit it (or use 0) for every other scope.
 
 Allowed values (nothing else is ever valid):
 intent: "leaderboard" or "generic"
 metric: "kills", "deaths", "injuries", "walk_distance", "drive_distance", "drinks", "alcohol", "alcoholic_drinks", "pills", "books", "skill_books", "literature_books", "indoor_time", "outdoor_time", "sleep"
 operation: "max"
 target: "server"
-scope: "lifetime", "today", "yesterday", "this_week", "last_week", "this_month", "last_month"
+scope: "lifetime", "today", "yesterday", "this_week", "last_week", "this_month", "last_month", "last_n_days"
+days: a whole number from 1 to 90 (ONLY when scope is "last_n_days")
 
 If the message does not CLEARLY ask who holds a server-wide record for one of the listed metrics, output exactly {"intent": "generic"} and nothing else.
 
@@ -119,6 +147,7 @@ Scope mapping (all time frames are the real-world calendar, server time -- never
 - "yesterday" -> scope "yesterday".
 - "this week" -> scope "this_week". "last week" -> scope "last_week".
 - "this month" -> scope "this_month". "last month" -> scope "last_month".
+- "last N days" / "past N days" / "in the last N days" (N is an explicit whole number, 1-90) -> scope "last_n_days", days: N. If N is missing, not a whole number, zero, negative, or greater than 90, do NOT guess a substitute -- output {"intent": "generic"} instead.
 - Any OTHER time frame -- "this session", "tonight", "this life", "last night", a specific named date -- is NOT supported. Do not approximate it as any of the scopes above: output exactly {"intent": "generic"} instead.
 
 Specific mapping guidance:
@@ -336,14 +365,36 @@ var scopedMetricEvents = map[string]scopedMetricEvent{
 	"sleep":        {"sleep", "(details->>'hours')::float8", "", "Most time spent sleeping", "hours"},
 }
 
-// curatorScopeWindow is one calendar window's SQL boundary -- occurred_at
-// >= startExpr, and < endExpr when endExpr is set ("" means open-ended,
-// i.e. up to now, which is all "today"/"this_week"/"this_month" need
-// since events can't be in the future).
+// curatorScopeWindow is one time window's SQL boundary -- occurred_at >=
+// startExpr, and < endExpr when endExpr is set ("" means open-ended, i.e.
+// up to now, which is all "today"/"this_week"/"last_n_days" etc. need
+// since events can't be in the future). args are extra bind parameters
+// startExpr/endExpr reference beyond $1 (serverName) -- empty for the
+// fixed calendar windows (their boundaries are pure Go-literal SQL, no
+// runtime value involved), non-empty only for "last_n_days" (a validated
+// Days int bound as $2, never string-interpolated despite being
+// resolver-derived).
 type curatorScopeWindow struct {
 	startExpr string
 	endExpr   string
 	label     string // used in the leaderboard sentence, e.g. "today, server-wide"
+	args      []any
+}
+
+// lastNDaysWindow builds scope="last_n_days"'s window -- unlike the fixed
+// calendar windows, its boundary depends on a runtime value (days), so
+// that value is passed as a bound query parameter ($2) rather than
+// baked into the SQL text; days itself is already range-validated by
+// validateCuratorStatQueryPlan before this is ever called. A rolling
+// "now() minus N days" window, not calendar-aligned -- "last 8 days"
+// naturally means the trailing 8*24 hours from right now, not a
+// Stockholm-midnight-aligned period the way "this_week" is.
+func lastNDaysWindow(days int) curatorScopeWindow {
+	return curatorScopeWindow{
+		startExpr: "(now() - ($2 * interval '1 day'))",
+		label:     fmt.Sprintf("last %d days, server-wide", days),
+		args:      []any{days},
+	}
 }
 
 // stockholmTrunc builds a Stockholm-local calendar boundary (optionally
@@ -446,9 +497,12 @@ func formatLeaderboardSentence(label, scopeLabel string, entries []curatorLeader
 // real total is zero: a plan resolving cleanly to an all-zero column is
 // not evidence anyone actually did the thing, and Curator must not claim
 // otherwise (a false positive is worse than saying nothing).
-func resolveCuratorLeaderboardFact(ctx context.Context, db *pgxpool.Pool, serverName, metric, scope string) curatorStatFact {
+func resolveCuratorLeaderboardFact(ctx context.Context, db *pgxpool.Pool, serverName, metric, scope string, days int) curatorStatFact {
 	if db == nil {
 		return curatorStatFact{}
+	}
+	if scope == "last_n_days" {
+		return resolveCuratorWindowedLeaderboardFact(ctx, db, serverName, metric, lastNDaysWindow(days))
 	}
 	if window, ok := curatorScopeWindows[scope]; ok {
 		return resolveCuratorWindowedLeaderboardFact(ctx, db, serverName, metric, window)
@@ -590,7 +644,8 @@ func resolveCuratorWindowedLeaderboardFact(ctx context.Context, db *pgxpool.Pool
 		) agg
 		JOIN players p ON p.steam_id = agg.steam_id
 		ORDER BY agg.total DESC
-	`, m.valueExpr, m.eventType, window.startExpr, upperBound, extraFilter, m.valueExpr, curatorLeaderboardTopN), serverName)
+	`, m.valueExpr, m.eventType, window.startExpr, upperBound, extraFilter, m.valueExpr, curatorLeaderboardTopN),
+		append([]any{serverName}, window.args...)...)
 	if err != nil {
 		slog.Error("curator: windowed leaderboard query failed", "metric", metric, "err", err)
 		return curatorStatFact{}
@@ -643,7 +698,8 @@ func resolveCuratorDeathsWindowedLeaderboardFact(ctx context.Context, db *pgxpoo
 		) agg
 		JOIN players p ON p.steam_id = agg.steam_id
 		ORDER BY agg.total DESC
-	`, window.startExpr, upperBound, curatorLeaderboardTopN), serverName)
+	`, window.startExpr, upperBound, curatorLeaderboardTopN),
+		append([]any{serverName}, window.args...)...)
 	if err != nil {
 		slog.Error("curator: windowed leaderboard query failed", "metric", "deaths", "err", err)
 		return curatorStatFact{}
@@ -685,10 +741,10 @@ func resolveCuratorSemanticStatFact(ctx context.Context, deps botDeps, message s
 		slog.Info("curator: semantic resolver", "resolverAttempted", true, "planAccepted", false)
 		return curatorStatFact{}
 	}
-	fact := resolveCuratorLeaderboardFact(ctx, deps.db, deps.serverName, plan.Metric, plan.Scope)
+	fact := resolveCuratorLeaderboardFact(ctx, deps.db, deps.serverName, plan.Metric, plan.Scope, plan.Days)
 	slog.Info("curator: semantic resolver",
 		"resolverAttempted", true, "planAccepted", true,
 		"intent", plan.Intent, "metric", plan.Metric, "operation", plan.Operation,
-		"target", plan.Target, "scope", plan.Scope, "factResolved", fact.Resolved)
+		"target", plan.Target, "scope", plan.Scope, "days", plan.Days, "factResolved", fact.Resolved)
 	return fact
 }
