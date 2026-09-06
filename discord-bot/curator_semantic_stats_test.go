@@ -70,6 +70,12 @@ func TestValidateCuratorStatQueryPlan_OnlyExactV1ShapeAccepted(t *testing.T) {
 		want bool
 	}{
 		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "lifetime"}, true},
+		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "today"}, true},
+		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "yesterday"}, true},
+		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "this_week"}, true},
+		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "last_week"}, true},
+		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "this_month"}, true},
+		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "last_month"}, true},
 		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "server", Scope: "this_session"}, false},
 		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "min", Target: "server", Scope: "lifetime"}, false},
 		{curatorStatQueryPlan{Intent: "leaderboard", Metric: "kills", Operation: "max", Target: "named_player", Scope: "lifetime"}, false},
@@ -79,6 +85,23 @@ func TestValidateCuratorStatQueryPlan_OnlyExactV1ShapeAccepted(t *testing.T) {
 	for _, tc := range cases {
 		if got := validateCuratorStatQueryPlan(tc.plan); got != tc.want {
 			t.Errorf("validateCuratorStatQueryPlan(%+v) = %v, want %v", tc.plan, got, tc.want)
+		}
+	}
+}
+
+// Every metric the resolver can emit must have a matching events-table
+// query for every non-lifetime scope (deaths is special-cased, see
+// resolveCuratorDeathsWindowedLeaderboardFact) -- otherwise a validated
+// plan with e.g. scope="today" would silently resolve to nothing for
+// that one metric, a much harder regression to notice live than a
+// failing test here.
+func TestScopedMetricEventsCoversAllMetrics(t *testing.T) {
+	for metric := range curatorLeaderboardMetrics {
+		if metric == "deaths" {
+			continue
+		}
+		if _, ok := scopedMetricEvents[metric]; !ok {
+			t.Errorf("metric %q has no scopedMetricEvents entry for windowed (non-lifetime) scopes", metric)
 		}
 	}
 }

@@ -23,9 +23,16 @@ import (
 // curatorStatQueryPlan is the resolver's entire output shape -- every
 // field must be validated against a closed enum before use
 // (validateCuratorStatQueryPlan). V1 deliberately supports only
-// leaderboard/max/server/lifetime (the doc's "start narrow" rule);
-// PlayerName exists in the schema for a future comparison/named_player
-// path but is unused and unvalidated in V1.
+// leaderboard/max/server, with Scope restricted to "lifetime" plus a
+// fixed set of CALENDAR windows (curatorScopeWindows: today, yesterday,
+// this_week, last_week, this_month, last_month) -- deliberately not a
+// generic date-range parser the untrusted resolver could be talked into
+// misusing, and deliberately not "session" (no single well-defined
+// boundary exists for a SERVER-WIDE leaderboard -- each player has their
+// own session history, so "this session" is ambiguous until that's
+// designed as its own feature). PlayerName exists in the schema for a
+// future comparison/named_player path but is unused and unvalidated in
+// V1.
 type curatorStatQueryPlan struct {
 	Intent     string `json:"intent"`
 	Metric     string `json:"metric"`
@@ -70,14 +77,18 @@ func randomCuratorLeaderboardMetric() string {
 
 // validateCuratorStatQueryPlan is the untrusted-output gate
 // (SEM-3/SEM-6): every field must land in a closed enum or the whole
-// plan is rejected outright, no partial/"best guess" acceptance. V1
-// only accepts exactly one shape -- leaderboard/max/server/lifetime --
-// per the doc's explicit "start narrow."
+// plan is rejected outright, no partial/"best guess" acceptance. V1 only
+// accepts leaderboard/max/server, with Scope restricted to "lifetime" or
+// one of curatorScopeWindows' keys -- any other scope string (a model
+// inventing "session"/"tonight" because a user asked for one) fails
+// closed instead of silently falling back to lifetime and answering the
+// wrong question.
 func validateCuratorStatQueryPlan(p curatorStatQueryPlan) bool {
+	_, validWindow := curatorScopeWindows[p.Scope]
 	return p.Intent == "leaderboard" &&
 		p.Operation == "max" &&
 		p.Target == "server" &&
-		p.Scope == "lifetime" &&
+		(p.Scope == "lifetime" || validWindow) &&
 		curatorLeaderboardMetrics[p.Metric]
 }
 
@@ -98,9 +109,17 @@ intent: "leaderboard" or "generic"
 metric: "kills", "deaths", "injuries", "walk_distance", "drive_distance", "drinks", "alcohol", "alcoholic_drinks", "pills", "books", "skill_books", "literature_books", "indoor_time", "outdoor_time", "sleep"
 operation: "max"
 target: "server"
-scope: "lifetime"
+scope: "lifetime", "today", "yesterday", "this_week", "last_week", "this_month", "last_month"
 
 If the message does not CLEARLY ask who holds a server-wide record for one of the listed metrics, output exactly {"intent": "generic"} and nothing else.
+
+Scope mapping (all time frames are the real-world calendar, server time -- never an in-game/ingame-calendar date):
+- No time frame mentioned ("who has the most kills") -> scope "lifetime".
+- "today" / "so far today" / "since midnight" -> scope "today".
+- "yesterday" -> scope "yesterday".
+- "this week" -> scope "this_week". "last week" -> scope "last_week".
+- "this month" -> scope "this_month". "last month" -> scope "last_month".
+- Any OTHER time frame -- "this session", "tonight", "this life", "last night", a specific named date -- is NOT supported. Do not approximate it as any of the scopes above: output exactly {"intent": "generic"} instead.
 
 Specific mapping guidance:
 - "who is the drunk" / "who drinks the most" / "who gets drunk the most" -> metric "alcoholic_drinks" (a count of alcoholic drinks), NOT "alcohol". These questions describe HISTORICAL cumulative consumption, never present/current intoxication -- there is no tracked "currently drunk" state.
@@ -253,6 +272,127 @@ var leaderboardMetricColumns = map[string]leaderboardMetricColumn{
 	"sleep":            {"sleep_hours", "Most time spent sleeping", "hours"},
 }
 
+// scopedMetricEvent describes how one metric's non-lifetime (calendar
+// window) leaderboard is computed directly from the raw events table,
+// mirroring leaderboardMetricColumns' lifetime shape but reading
+// events.details (JSONB) instead of a characters aggregate column --
+// occurred_at is a real per-event timestamp, but the characters aggregate
+// columns have no time dimension at all, so any calendar window can only
+// ever be answered from the raw log. eventType/valueExpr/filter are FIXED
+// Go-literal strings, never interpolated from user/LLM input --
+// curatorLeaderboardMetrics already validated the metric string before
+// this map is ever consulted, same precedent as leaderboardMetricColumns'
+// column field. Scoped and lifetime totals can never structurally
+// diverge: store_postgres.go's ingestExporterEvent always inserts this
+// same details JSONB into events BEFORE it ever touches the characters
+// aggregate columns.
+type scopedMetricEvent struct {
+	eventType string
+	valueExpr string // SQL expression for one row's numeric contribution -- "1" for a count, "(details->>'km')::float8" for a sum
+	filter    string // extra boolean SQL fragment on the SAME event row, "" for none
+	label     string
+	unit      string
+}
+
+// alcoholicFluidsSQLArray mirrors characterstats.go's alcoholicFluids map
+// (itself already duplicated from milestones.go -- see that comment) as a
+// fixed SQL array literal. A third copy of the same list is not ideal,
+// but this package resolves "today" scope directly against raw JSONB in
+// SQL rather than replaying aggregateDeltaForEvent (that function lives
+// in the separate exporter Go module and isn't importable here), so
+// there's no way to share the Go-side list across this boundary.
+const alcoholicFluidsSQLArray = `ARRAY['Beer','Brandy','Champagne','Cider','CoffeeLiqueur','Curacao','Gin','Grenadine','Mead','Port','Rum','Scotch','Sherry','Tequila','Vermouth','Vodka','Whiskey','Wine']`
+
+// scopedMetricEvents must have one entry for every curatorLeaderboardMetrics
+// key except "deaths" (which is special-cased, see
+// resolveCuratorDeathsWindowedLeaderboardFact) -- TestScopedMetricEventsCoversAllMetrics
+// guards this. filter/valueExpr semantics are hand-kept in sync with
+// aggregateDeltaForEvent's per-event-type rules (characterstats.go) --
+// see each entry's inline note for which case it mirrors. The SAME map
+// serves every non-lifetime scope (today/yesterday/this_week/...) --
+// only the occurred_at window differs, see curatorScopeWindows.
+var scopedMetricEvents = map[string]scopedMetricEvent{
+	"kills":          {"kill", "1", "", "Most zombies eliminated", ""},
+	"injuries":       {"injury", "1", "", "Most injuries recorded", ""},
+	"walk_distance":  {"movement_distance", "(details->>'km')::float8", "", "Furthest walked", "km"},
+	"drive_distance": {"driving_distance", "(details->>'km')::float8", "", "Furthest driven", "km"},
+	"drinks":         {"drink", "1", "", "Most drinks consumed", ""},
+	// alcohol/alcoholic_drinks: only rows whose fluid is in the alcoholic
+	// list count at all, mirroring aggregateDeltaForEvent's "drink" case.
+	"alcohol":          {"drink", "COALESCE((details->>'liters')::float8, 0) * 1000", "details->>'fluid' = ANY(" + alcoholicFluidsSQLArray + ")", "Highest recorded alcohol volume", "ml"},
+	"alcoholic_drinks": {"drink", "1", "details->>'fluid' = ANY(" + alcoholicFluidsSQLArray + ")", "Most alcoholic drinks consumed", ""},
+	"pills":            {"pill", "1", "", "Most pills taken", ""},
+	// books/skill_books/literature_books mirror the "read" case's
+	// completed-or-hasAmount / completed / hasAmount-and-not-completed
+	// distinction exactly.
+	"books":            {"read", "1", "(details->>'completed')::boolean = true OR details ? 'amount'", "Most books read", ""},
+	"skill_books":      {"read", "1", "(details->>'completed')::boolean = true", "Most skill books completed", ""},
+	"literature_books": {"read", "1", "details ? 'amount' AND COALESCE((details->>'completed')::boolean, false) = false", "Most literature/novels read", ""},
+	// indoor/outdoor streaks: only the final=true row of a closed streak
+	// counts, exactly like aggregateDeltaForEvent's case -- otherwise an
+	// open streak's hourly heartbeats would massively over-count.
+	"indoor_time":  {"indoor_streak", "(details->>'hours')::float8", "(details->>'final')::boolean = true", "Most time spent indoors", "hours"},
+	"outdoor_time": {"outdoor_streak", "(details->>'hours')::float8", "(details->>'final')::boolean = true", "Most time spent outdoors", "hours"},
+	"sleep":        {"sleep", "(details->>'hours')::float8", "", "Most time spent sleeping", "hours"},
+}
+
+// curatorScopeWindow is one calendar window's SQL boundary -- occurred_at
+// >= startExpr, and < endExpr when endExpr is set ("" means open-ended,
+// i.e. up to now, which is all "today"/"this_week"/"this_month" need
+// since events can't be in the future).
+type curatorScopeWindow struct {
+	startExpr string
+	endExpr   string
+	label     string // used in the leaderboard sentence, e.g. "today, server-wide"
+}
+
+// stockholmTrunc builds a Stockholm-local calendar boundary (optionally
+// offset by a fixed interval) as a TIMESTAMPTZ SQL expression --
+// occurred_at is a real instant and this playerbase's actual calendar day/
+// week/month turns over at Stockholm local time, not at 00:00 UTC, so
+// using UTC boundaries would give a visibly wrong answer for several
+// hours around every real rollover. AT TIME ZONE is applied twice
+// deliberately: once to read now() as a Stockholm wall-clock moment (so
+// date_trunc lands on the correct local calendar unit even when UTC has
+// already rolled over or hasn't yet), and once more to reinterpret that
+// local boundary back into the correct UTC instant for comparison against
+// occurred_at -- both conversions are DST-aware since 'Europe/Stockholm'
+// (not a fixed offset) is used both times. offset is a fixed Go-literal
+// interval expression (e.g. "- interval '7 days'") or "" for none --
+// never interpolated from user input.
+func stockholmTrunc(field, offset string) string {
+	inner := fmt.Sprintf("date_trunc('%s', now() AT TIME ZONE 'Europe/Stockholm')", field)
+	if offset != "" {
+		inner = fmt.Sprintf("(%s %s)", inner, offset)
+	}
+	return fmt.Sprintf("(%s AT TIME ZONE 'Europe/Stockholm')", inner)
+}
+
+// curatorScopeWindows is the closed set of non-lifetime scopes V1
+// supports -- validateCuratorStatQueryPlan only accepts a Scope that is
+// either "lifetime" or a key of this map. ISO weeks (Postgres'
+// date_trunc('week', ...) default) start on Monday.
+var curatorScopeWindows = map[string]curatorScopeWindow{
+	"today": {startExpr: stockholmTrunc("day", ""), label: "today, server-wide"},
+	"yesterday": {
+		startExpr: stockholmTrunc("day", "- interval '1 day'"),
+		endExpr:   stockholmTrunc("day", ""),
+		label:     "yesterday, server-wide",
+	},
+	"this_week": {startExpr: stockholmTrunc("week", ""), label: "this week, server-wide"},
+	"last_week": {
+		startExpr: stockholmTrunc("week", "- interval '7 days'"),
+		endExpr:   stockholmTrunc("week", ""),
+		label:     "last week, server-wide",
+	},
+	"this_month": {startExpr: stockholmTrunc("month", ""), label: "this month, server-wide"},
+	"last_month": {
+		startExpr: stockholmTrunc("month", "- interval '1 month'"),
+		endExpr:   stockholmTrunc("month", ""),
+		label:     "last month, server-wide",
+	},
+}
+
 func formatLeaderboardValue(unit string, total float64) string {
 	switch unit {
 	case "km":
@@ -275,9 +415,9 @@ const curatorLeaderboardTopN = 3
 // Curator's Known Facts / fallback text can use directly. Never pads to
 // N entries: HAVING ... > 0 means fewer than N players may legitimately
 // qualify, and Curator must not imply ranks that don't exist.
-func formatLeaderboardSentence(label string, entries []curatorLeaderboardEntry) string {
+func formatLeaderboardSentence(label, scopeLabel string, entries []curatorLeaderboardEntry) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s (lifetime, server-wide): ", label)
+	fmt.Fprintf(&b, "%s (%s): ", label, scopeLabel)
 	for i, e := range entries {
 		if i > 0 {
 			b.WriteString(", ")
@@ -306,9 +446,12 @@ func formatLeaderboardSentence(label string, entries []curatorLeaderboardEntry) 
 // real total is zero: a plan resolving cleanly to an all-zero column is
 // not evidence anyone actually did the thing, and Curator must not claim
 // otherwise (a false positive is worse than saying nothing).
-func resolveCuratorLeaderboardFact(ctx context.Context, db *pgxpool.Pool, serverName, metric string) curatorStatFact {
+func resolveCuratorLeaderboardFact(ctx context.Context, db *pgxpool.Pool, serverName, metric, scope string) curatorStatFact {
 	if db == nil {
 		return curatorStatFact{}
+	}
+	if window, ok := curatorScopeWindows[scope]; ok {
+		return resolveCuratorWindowedLeaderboardFact(ctx, db, serverName, metric, window)
 	}
 	if metric == "deaths" {
 		return resolveCuratorDeathsLeaderboardFact(ctx, db, serverName)
@@ -356,7 +499,7 @@ func resolveCuratorLeaderboardFact(ctx context.Context, db *pgxpool.Pool, server
 		return curatorStatFact{}
 	}
 
-	sentence := formatLeaderboardSentence(m.label, entries)
+	sentence := formatLeaderboardSentence(m.label, "lifetime, server-wide", entries)
 	return curatorStatFact{KnownFact: sentence, FallbackSentence: sentence, Entries: entries, Resolved: true}
 }
 
@@ -404,7 +547,128 @@ func resolveCuratorDeathsLeaderboardFact(ctx context.Context, db *pgxpool.Pool, 
 		return curatorStatFact{}
 	}
 
-	sentence := formatLeaderboardSentence("Most deaths recorded", entries)
+	sentence := formatLeaderboardSentence("Most deaths recorded", "lifetime, server-wide", entries)
+	return curatorStatFact{KnownFact: sentence, FallbackSentence: sentence, Entries: entries, Resolved: true}
+}
+
+// resolveCuratorWindowedLeaderboardFact is every non-lifetime scope's
+// query shape -- reads the raw events table (not the characters lifetime
+// aggregate columns) filtered to window's calendar boundary, since
+// occurred_at has no lifetime/window distinction the way the characters
+// columns do. steam_id IS NOT NULL excludes player-less system events
+// (e.g. world_stats) that could never join to players anyway.
+func resolveCuratorWindowedLeaderboardFact(ctx context.Context, db *pgxpool.Pool, serverName, metric string, window curatorScopeWindow) curatorStatFact {
+	if metric == "deaths" {
+		return resolveCuratorDeathsWindowedLeaderboardFact(ctx, db, serverName, window)
+	}
+	m, ok := scopedMetricEvents[metric]
+	if !ok {
+		return curatorStatFact{}
+	}
+	upperBound := ""
+	if window.endExpr != "" {
+		upperBound = fmt.Sprintf("AND occurred_at < %s", window.endExpr)
+	}
+	extraFilter := ""
+	if m.filter != "" {
+		extraFilter = "AND " + m.filter
+	}
+
+	rows, err := db.Query(ctx, fmt.Sprintf(`
+		SELECT p.steam_id, p.last_username, agg.total
+		FROM (
+			SELECT steam_id, SUM(%s) AS total
+			FROM events
+			WHERE server = $1 AND event_type = '%s' AND steam_id IS NOT NULL
+			  AND occurred_at >= %s
+			  %s
+			  %s
+			GROUP BY steam_id
+			HAVING SUM(%s) > 0
+			ORDER BY total DESC
+			LIMIT %d
+		) agg
+		JOIN players p ON p.steam_id = agg.steam_id
+		ORDER BY agg.total DESC
+	`, m.valueExpr, m.eventType, window.startExpr, upperBound, extraFilter, m.valueExpr, curatorLeaderboardTopN), serverName)
+	if err != nil {
+		slog.Error("curator: windowed leaderboard query failed", "metric", metric, "err", err)
+		return curatorStatFact{}
+	}
+	defer rows.Close()
+
+	var entries []curatorLeaderboardEntry
+	for rows.Next() {
+		var steamID, username string
+		var total float64
+		if err := rows.Scan(&steamID, &username, &total); err != nil {
+			slog.Error("curator: windowed leaderboard row scan failed", "metric", metric, "err", err)
+			return curatorStatFact{}
+		}
+		entries = append(entries, curatorLeaderboardEntry{Username: username, SteamID: steamID, Formatted: formatLeaderboardValue(m.unit, total)})
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("curator: windowed leaderboard rows failed", "metric", metric, "err", err)
+		return curatorStatFact{}
+	}
+	if len(entries) == 0 {
+		return curatorStatFact{}
+	}
+
+	sentence := formatLeaderboardSentence(m.label, window.label, entries)
+	return curatorStatFact{KnownFact: sentence, FallbackSentence: sentence, Entries: entries, Resolved: true}
+}
+
+// resolveCuratorDeathsWindowedLeaderboardFact is deaths' windowed-scope
+// shape, mirroring resolveCuratorDeathsLeaderboardFact but COUNTing
+// event_type='died' rows from the events table within window instead of
+// died_at IS NOT NULL rows from characters.
+func resolveCuratorDeathsWindowedLeaderboardFact(ctx context.Context, db *pgxpool.Pool, serverName string, window curatorScopeWindow) curatorStatFact {
+	upperBound := ""
+	if window.endExpr != "" {
+		upperBound = fmt.Sprintf("AND occurred_at < %s", window.endExpr)
+	}
+
+	rows, err := db.Query(ctx, fmt.Sprintf(`
+		SELECT p.steam_id, p.last_username, agg.total
+		FROM (
+			SELECT steam_id, COUNT(*) AS total
+			FROM events
+			WHERE server = $1 AND event_type = 'died' AND steam_id IS NOT NULL
+			  AND occurred_at >= %s
+			  %s
+			GROUP BY steam_id
+			ORDER BY total DESC
+			LIMIT %d
+		) agg
+		JOIN players p ON p.steam_id = agg.steam_id
+		ORDER BY agg.total DESC
+	`, window.startExpr, upperBound, curatorLeaderboardTopN), serverName)
+	if err != nil {
+		slog.Error("curator: windowed leaderboard query failed", "metric", "deaths", "err", err)
+		return curatorStatFact{}
+	}
+	defer rows.Close()
+
+	var entries []curatorLeaderboardEntry
+	for rows.Next() {
+		var steamID, username string
+		var total int
+		if err := rows.Scan(&steamID, &username, &total); err != nil {
+			slog.Error("curator: windowed leaderboard row scan failed", "metric", "deaths", "err", err)
+			return curatorStatFact{}
+		}
+		entries = append(entries, curatorLeaderboardEntry{Username: username, SteamID: steamID, Formatted: fmt.Sprintf("%d", total)})
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("curator: windowed leaderboard rows failed", "metric", "deaths", "err", err)
+		return curatorStatFact{}
+	}
+	if len(entries) == 0 {
+		return curatorStatFact{}
+	}
+
+	sentence := formatLeaderboardSentence("Most deaths recorded", window.label, entries)
 	return curatorStatFact{KnownFact: sentence, FallbackSentence: sentence, Entries: entries, Resolved: true}
 }
 
@@ -421,7 +685,7 @@ func resolveCuratorSemanticStatFact(ctx context.Context, deps botDeps, message s
 		slog.Info("curator: semantic resolver", "resolverAttempted", true, "planAccepted", false)
 		return curatorStatFact{}
 	}
-	fact := resolveCuratorLeaderboardFact(ctx, deps.db, deps.serverName, plan.Metric)
+	fact := resolveCuratorLeaderboardFact(ctx, deps.db, deps.serverName, plan.Metric, plan.Scope)
 	slog.Info("curator: semantic resolver",
 		"resolverAttempted", true, "planAccepted", true,
 		"intent", plan.Intent, "metric", plan.Metric, "operation", plan.Operation,

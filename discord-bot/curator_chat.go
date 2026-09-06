@@ -134,7 +134,7 @@ func askCurator(ctx context.Context, deps botDeps, discordUserID string, candida
 	// answers one genuine named fact to dramatize instead of inventing
 	// one from nothing.
 	if llmAllowed && intent == intentGenericCurator && !statFact.Resolved {
-		statFact = resolveCuratorLeaderboardFact(ctx, deps.db, deps.serverName, randomCuratorLeaderboardMetric())
+		statFact = resolveCuratorLeaderboardFact(ctx, deps.db, deps.serverName, randomCuratorLeaderboardMetric(), "lifetime")
 	}
 
 	if llmAllowed {
