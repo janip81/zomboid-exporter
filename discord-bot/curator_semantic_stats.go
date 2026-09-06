@@ -61,10 +61,10 @@ const (
 // curatorLeaderboardMetrics is the V1-supported metric allowlist -- only
 // metrics with an actual deterministic aggregate column behind them.
 // Adding a metric here requires a matching entry in
-// leaderboardMetricColumns (or the deaths special case) below; the
+// leaderboardMetricColumns (or the deaths/vehicle_kills special cases) below; the
 // resolver's own prompt vocabulary must be kept in sync by hand.
 var curatorLeaderboardMetrics = map[string]bool{
-	"kills": true, "deaths": true, "injuries": true,
+	"kills": true, "vehicle_kills": true, "deaths": true, "injuries": true,
 	"walk_distance": true, "drive_distance": true,
 	"drinks": true, "alcohol": true, "alcoholic_drinks": true,
 	"pills": true, "books": true, "skill_books": true, "literature_books": true,
@@ -133,7 +133,7 @@ Read ONE Discord message and output ONLY a single JSON object matching exactly t
 
 Allowed values (nothing else is ever valid):
 intent: "leaderboard" or "generic"
-metric: "kills", "deaths", "injuries", "walk_distance", "drive_distance", "drinks", "alcohol", "alcoholic_drinks", "pills", "books", "skill_books", "literature_books", "indoor_time", "outdoor_time", "sleep"
+metric: "kills", "vehicle_kills", "deaths", "injuries", "walk_distance", "drive_distance", "drinks", "alcohol", "alcoholic_drinks", "pills", "books", "skill_books", "literature_books", "indoor_time", "outdoor_time", "sleep"
 operation: "max"
 target: "server"
 scope: "lifetime", "today", "yesterday", "this_week", "last_week", "this_month", "last_month", "last_n_days"
@@ -151,6 +151,7 @@ Scope mapping (all time frames are the real-world calendar, server time -- never
 - Any OTHER time frame -- "this session", "tonight", "this life", "last night", a specific named date -- is NOT supported. Do not approximate it as any of the scopes above: output exactly {"intent": "generic"} instead.
 
 Specific mapping guidance:
+- "who's killed the most zombies with a vehicle/car" / "roadkill" / "who's run over the most zombies" / "tally of zombies killed in cars" -> metric "vehicle_kills". This is a SUBSET of "kills" restricted to vehicle kills specifically -- use plain "kills" instead whenever the question is about zombie kills in general with no vehicle/car/roadkill/run-over qualifier.
 - "who is the drunk" / "who drinks the most" / "who gets drunk the most" -> metric "alcoholic_drinks" (a count of alcoholic drinks), NOT "alcohol". These questions describe HISTORICAL cumulative consumption, never present/current intoxication -- there is no tracked "currently drunk" state.
 - "who consumed the most alcohol by volume" -> metric "alcohol".
 - "who has walked/run/sprinted the furthest" / "who has covered the most distance on foot" -> metric "walk_distance". This ONE metric covers walking, running, AND sprinting combined into a single total distance -- there is no separate running-only or sprinting-only metric, so never reject a "run"/"ran"/"sprint" phrasing just because the metric name itself says "walk".
@@ -341,7 +342,12 @@ const alcoholicFluidsSQLArray = `ARRAY['Beer','Brandy','Champagne','Cider','Coff
 // serves every non-lifetime scope (today/yesterday/this_week/...) --
 // only the occurred_at window differs, see curatorScopeWindows.
 var scopedMetricEvents = map[string]scopedMetricEvent{
-	"kills":          {"kill", "1", "", "Most zombies eliminated", ""},
+	"kills": {"kill", "1", "", "Most zombies eliminated", ""},
+	// vehicle_kills is the SAME "kill" event as "kills", just restricted
+	// to killMethod="vehicle" rows -- mirrors resolveKillMethod's
+	// "VEHICLE MUST BE CHECKED FIRST" attribution in the Lua tracker
+	// (Kills.lua).
+	"vehicle_kills":  {"kill", "1", "details->>'killMethod' = 'vehicle'", "Most zombies killed by vehicle", ""},
 	"injuries":       {"injury", "1", "", "Most injuries recorded", ""},
 	"walk_distance":  {"movement_distance", "(details->>'km')::float8", "", "Furthest walked", "km"},
 	"drive_distance": {"driving_distance", "(details->>'km')::float8", "", "Furthest driven", "km"},
@@ -510,6 +516,9 @@ func resolveCuratorLeaderboardFact(ctx context.Context, db *pgxpool.Pool, server
 	if metric == "deaths" {
 		return resolveCuratorDeathsLeaderboardFact(ctx, db, serverName)
 	}
+	if metric == "vehicle_kills" {
+		return resolveCuratorVehicleKillsLeaderboardFact(ctx, db, serverName)
+	}
 	m, ok := leaderboardMetricColumns[metric]
 	if !ok {
 		return curatorStatFact{}
@@ -602,6 +611,59 @@ func resolveCuratorDeathsLeaderboardFact(ctx context.Context, db *pgxpool.Pool, 
 	}
 
 	sentence := formatLeaderboardSentence("Most deaths recorded", "lifetime, server-wide", entries)
+	return curatorStatFact{KnownFact: sentence, FallbackSentence: sentence, Entries: entries, Resolved: true}
+}
+
+// resolveCuratorVehicleKillsLeaderboardFact is vehicle_kills' lifetime
+// query shape -- unlike every other lifetime metric, there is no
+// characters aggregate column for "kills by method" (characters.
+// zombie_kills is the combined total across melee/firearm/vehicle/
+// unarmed), so this reads character_stat_breakdown instead, which
+// aggregateDeltaForEvent's "kill" case already populates with
+// category='kill_method', value_key='vehicle' for every vehicle kill
+// (characterstats.go). Summed and joined exactly like every other
+// lifetime query, just from a different source table.
+func resolveCuratorVehicleKillsLeaderboardFact(ctx context.Context, db *pgxpool.Pool, serverName string) curatorStatFact {
+	rows, err := db.Query(ctx, fmt.Sprintf(`
+		SELECT p.steam_id, p.last_username, agg.total
+		FROM (
+			SELECT c.steam_id, SUM(b.value) AS total
+			FROM character_stat_breakdown b
+			JOIN characters c ON c.id = b.character_id
+			WHERE c.server = $1 AND b.category = 'kill_method' AND b.value_key = 'vehicle'
+			GROUP BY c.steam_id
+			HAVING SUM(b.value) > 0
+			ORDER BY total DESC
+			LIMIT %d
+		) agg
+		JOIN players p ON p.steam_id = agg.steam_id
+		ORDER BY agg.total DESC
+	`, curatorLeaderboardTopN), serverName)
+	if err != nil {
+		slog.Error("curator: leaderboard query failed", "metric", "vehicle_kills", "err", err)
+		return curatorStatFact{}
+	}
+	defer rows.Close()
+
+	var entries []curatorLeaderboardEntry
+	for rows.Next() {
+		var steamID, username string
+		var total float64
+		if err := rows.Scan(&steamID, &username, &total); err != nil {
+			slog.Error("curator: leaderboard row scan failed", "metric", "vehicle_kills", "err", err)
+			return curatorStatFact{}
+		}
+		entries = append(entries, curatorLeaderboardEntry{Username: username, SteamID: steamID, Formatted: formatLeaderboardValue("", total)})
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("curator: leaderboard rows failed", "metric", "vehicle_kills", "err", err)
+		return curatorStatFact{}
+	}
+	if len(entries) == 0 {
+		return curatorStatFact{}
+	}
+
+	sentence := formatLeaderboardSentence("Most zombies killed by vehicle", "lifetime, server-wide", entries)
 	return curatorStatFact{KnownFact: sentence, FallbackSentence: sentence, Entries: entries, Resolved: true}
 }
 

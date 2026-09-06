@@ -27,6 +27,16 @@ func TestParseCuratorStatQueryPlan_ValidPlanAccepted(t *testing.T) {
 	}
 }
 
+func TestParseCuratorStatQueryPlan_VehicleKillsTodayAccepted(t *testing.T) {
+	plan, ok := parseCuratorStatQueryPlan(`{"intent":"leaderboard","metric":"vehicle_kills","operation":"max","target":"server","scope":"today"}`)
+	if !ok {
+		t.Fatal("expected vehicle_kills + today to be accepted")
+	}
+	if plan.Metric != "vehicle_kills" || plan.Scope != "today" {
+		t.Errorf("plan = %+v, want metric=vehicle_kills scope=today", plan)
+	}
+}
+
 func TestParseCuratorStatQueryPlan_GenericIntentNeverResolvesAFact(t *testing.T) {
 	_, ok := parseCuratorStatQueryPlan(`{"intent":"generic"}`)
 	if ok {
