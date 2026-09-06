@@ -57,6 +57,35 @@ local function resolveKillMethod(zombie)
     end
     local isDriving = ExporterLog.Vehicles.isDriver(attacker, vehicle)
 
+    -- FALLBACK (2026-09-06): confirmed live -- a full session of
+    -- sustained driving (818 driving_distance events, speeds up to
+    -- ~50 km/h) produced ZERO "vehicle" kill attributions; every kill
+    -- fell through to whatever weapon the driver happened to have
+    -- equipped instead. A fresh attacker:getVehicle() lookup is
+    -- apparently nil/stale at the exact instant OnZombieDead fires for
+    -- a genuine collision kill -- the same class of staleness already
+    -- documented and worked around for OnExitVehicle in Vehicles.lua
+    -- ("character:getVehicle() is ALREADY nil by the time our handler
+    -- runs"). Falls back to Vehicles.lua's own periodic driving-state
+    -- cache (updated every EveryOneMinute tick) whenever the fresh
+    -- check comes up empty but the attacker was confirmed driving
+    -- moments ago -- a narrow false-positive window (a kill by another
+    -- means within ~60s of exiting a vehicle would be misattributed to
+    -- "vehicle") is an acceptable trade for fixing what was otherwise a
+    -- 100% miss rate on real vehicle kills.
+    local usedDrivingStateFallback = false
+    if not isDriving and attackedByOk and attacker then
+        local okName, uname = pcall(function() return attacker:getUsername() end)
+        if okName and uname then
+            local cachedVehicle = ExporterLog.Vehicles.lastKnownDrivingVehicle(uname)
+            if cachedVehicle then
+                vehicle = cachedVehicle
+                isDriving = true
+                usedDrivingStateFallback = true
+            end
+        end
+    end
+
     local method = "unknown"
     local weaponType = nil
     local vehicleType = nil
@@ -65,6 +94,9 @@ local function resolveKillMethod(zombie)
         method = "vehicle"
         local okType, t = pcall(function() return vehicle:getScriptName() end)
         vehicleType = okType and t or nil
+        if usedDrivingStateFallback then
+            print(ExporterLog.Runtime.logPrefix() .. ": vehicle kill resolved via driving-state fallback (fresh getVehicle() was nil/stale) vehicle=" .. tostring(vehicleType))
+        end
     elseif attackedByOk and attacker then
         local wOk, w = pcall(function() return attacker:getPrimaryHandItem() end)
         if wOk and w then

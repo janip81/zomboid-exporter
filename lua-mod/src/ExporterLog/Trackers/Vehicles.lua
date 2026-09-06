@@ -69,6 +69,17 @@ local function resetDrivingState(username)
     drivingState[username] = nil
 end
 
+-- Public accessor for the periodic driving-state cache -- Kills.lua's
+-- fallback for a fresh character:getVehicle() lookup that comes back
+-- nil/stale at the exact instant a vehicle-collision kill's
+-- OnZombieDead fires (see resolveKillMethod). Accurate to within one
+-- EveryOneMinute tick (<=60s old), not instantaneous, but a real
+-- driving session in progress is never that short-lived.
+function Vehicles.lastKnownDrivingVehicle(username)
+    local state = drivingState[username]
+    return state and state.vehicle or nil
+end
+
 local function onEveryMinuteDriving()
     ExporterLog.Runtime.forEachTrackedPlayer(function(p)
         local username = p:getUsername()
