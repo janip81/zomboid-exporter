@@ -122,6 +122,25 @@ end
 local function onZombieDead(zombie)
     if not zombie then return end
 
+    -- DIAGNOSTIC (2026-09-06): confirmed live -- a driver's own
+    -- p:getZombieKills() counter often does NOT increment for a
+    -- vehicle-collision death (one full 8-minute driving session
+    -- produced +1 on the counter despite an estimated ~20 zombies run
+    -- over), so the loop below never even calls resolveKillMethod() for
+    -- those deaths -- we have zero data on whether zombie:getAttackedBy()
+    -- would still have correctly resolved the driver anyway. This
+    -- unconditionally resolves and prints the method for EVERY dead
+    -- zombie, regardless of whether any tracked player's counter moved,
+    -- so DebugLog-server.txt's KILLMETHOD_DIAG line count is a true
+    -- server-side death tally to compare against an in-game headcount
+    -- next carmageddon, and against how many DID show method != nil
+    -- (meaning getAttackedBy() found someone even though the vanilla
+    -- stat didn't move). Printed unconditionally (not gated behind
+    -- isDebug) so it's visible on the live dedicated server. Remove once
+    -- resolved.
+    local diagMethod, _, diagVehicle = resolveKillMethod(zombie)
+    print(ExporterLog.Runtime.logPrefix() .. ": KILLMETHOD_DIAG zombieDied method=" .. tostring(diagMethod) .. " vehicle=" .. tostring(diagVehicle))
+
     ExporterLog.Runtime.forEachTrackedPlayer(function(p)
         local username = p:getUsername()
         local prev = lastKnownKills[username]
