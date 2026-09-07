@@ -52,14 +52,29 @@ type chatCompletionsResponse struct {
 // "system" messages, then the untrusted Discord message as a plain "user"
 // message -- never concatenated into the system instructions, so the
 // model's own role separation keeps it as data, not new instructions.
+//
+// The "Known facts" system message is only added when req.Context is
+// non-empty. The personality call (curator_chat.go) always sets Context
+// -- either real resolved facts or an explicit neutral placeholder, so
+// it's never blank there. The semantic resolver call
+// (curator_semantic_stats.go) never sets Context at all: it isn't
+// answering with facts, it's classifying a message into strict JSON, and
+// telling it to "use only these facts" with an EMPTY fact list confirmed
+// live (2026-09-07) to make some models (Gemini) refuse outright
+// ("I do not have access to any gun violence statistics...") instead of
+// emitting the classifier schema -- the exact opposite of the resolver's
+// job. Gating on Context=="" keeps the personality call's behavior
+// completely unchanged while fixing the resolver.
 func (c *openAIChatClient) Reply(ctx context.Context, req CuratorRequest) (string, error) {
+	messages := []chatMessage{{Role: "system", Content: req.Persona}}
+	if req.Context != "" {
+		messages = append(messages, chatMessage{Role: "system", Content: "Known facts (use only these; never invent facts about the server or players):\n" + req.Context})
+	}
+	messages = append(messages, chatMessage{Role: "user", Content: req.Message})
+
 	body := chatCompletionsRequest{
-		Model: c.model,
-		Messages: []chatMessage{
-			{Role: "system", Content: req.Persona},
-			{Role: "system", Content: "Known facts (use only these; never invent facts about the server or players):\n" + req.Context},
-			{Role: "user", Content: req.Message},
-		},
+		Model:     c.model,
+		Messages:  messages,
 		MaxTokens: req.MaxOutputTokens,
 	}
 

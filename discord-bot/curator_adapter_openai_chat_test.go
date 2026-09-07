@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -53,6 +55,66 @@ func TestOpenAIChatClient_HTTP429_StillClassifiesAsRateLimited(t *testing.T) {
 	var pe *providerError
 	if !errors.As(err, &pe) || pe.kind != errKindRateLimited {
 		t.Fatalf("got err=%v, want errKindRateLimited (402 handling must not have disturbed this)", err)
+	}
+}
+
+// Confirmed live (2026-09-07): sending the "Known facts" system message
+// with an empty fact list makes some models (Gemini) refuse to answer at
+// all instead of doing their actual job -- for the semantic resolver
+// call, that job is strict JSON classification, not fact-grounded
+// conversation, and it never sets Context. This locks in that the
+// adapter omits the message entirely when Context is empty, and still
+// includes it (unchanged) when the personality call sets a real one.
+func TestOpenAIChatClient_OmitsKnownFactsMessageWhenContextEmpty(t *testing.T) {
+	var captured chatCompletionsRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &captured); err != nil {
+			t.Fatalf("failed to decode captured request: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	client := newOpenAIChatClient(srv.Client(), srv.URL, "key", "model")
+	if _, err := client.Reply(context.Background(), CuratorRequest{Persona: "you are a classifier", Message: "hi"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(captured.Messages) != 2 {
+		t.Fatalf("got %d messages, want 2 (persona system + user) when Context is empty: %+v", len(captured.Messages), captured.Messages)
+	}
+	if captured.Messages[0].Role != "system" || captured.Messages[0].Content != "you are a classifier" {
+		t.Errorf("Messages[0] = %+v, want the persona as the only system message", captured.Messages[0])
+	}
+	if captured.Messages[1].Role != "user" || captured.Messages[1].Content != "hi" {
+		t.Errorf("Messages[1] = %+v, want the user message", captured.Messages[1])
+	}
+}
+
+func TestOpenAIChatClient_IncludesKnownFactsMessageWhenContextSet(t *testing.T) {
+	var captured chatCompletionsRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &captured); err != nil {
+			t.Fatalf("failed to decode captured request: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	client := newOpenAIChatClient(srv.Client(), srv.URL, "key", "model")
+	if _, err := client.Reply(context.Background(), CuratorRequest{Persona: "you are Curator", Context: "Most kills: Schabo -- 25.", Message: "hi"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(captured.Messages) != 3 {
+		t.Fatalf("got %d messages, want 3 (persona system + known-facts system + user) when Context is set: %+v", len(captured.Messages), captured.Messages)
+	}
+	if captured.Messages[1].Role != "system" || !strings.Contains(captured.Messages[1].Content, "Most kills: Schabo -- 25.") {
+		t.Errorf("Messages[1] = %+v, want a system message containing the Context", captured.Messages[1])
 	}
 }
 
